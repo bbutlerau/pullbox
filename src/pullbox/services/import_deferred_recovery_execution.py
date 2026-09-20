@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import asdict
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
@@ -36,7 +37,10 @@ from pullbox.services.import_deferred_recovery import (
     provider_ids,
     refresh_recovered_groups,
 )
-from pullbox.services.import_recovery_checkpoint import compact_recovery_state
+from pullbox.services.import_recovery_checkpoint import (
+    compact_recovery_state,
+    run_checkpointed_recovery,
+)
 from pullbox.services.import_recovery_identity import (
     catalog_file_identity,
     catalog_target_agrees,
@@ -223,7 +227,7 @@ async def _search_exact_title_catalog(
 async def cancel_deferred_preparation(session: AsyncSession, job: ImportJob) -> bool:
     """Stop this recovery pass, retaining the original and any completed imports."""
     state = recovery_state(job)
-    if state.get("state") not in {"queued", "catalogs", "prepared"}:
+    if state.get("state") not in {"queued", "catalogs", "mixed_folder", "prepared"}:
         return False
     ids = state.get("series_ids", [])
     for item in await session.scalars(
@@ -568,6 +572,16 @@ async def prepare_deferred_recovery(
     if job.status is not ImportJobStatus.IMPORTING:
         raise ValidationError("Deferred recovery must run inside the import worker.")
 
+    if state.get("state") == "mixed_folder":
+        from pullbox.services.import_mixed_recovery_execution import prepare_mixed_folder_recovery
+
+        await run_checkpointed_recovery(
+            session,
+            job,
+            partial(prepare_mixed_folder_recovery, progress_callback=progress_callback),
+        )
+        return True
+
     revision_state = {"value": int(job.progress_revision or 0)}
 
     def progress_event(
@@ -620,7 +634,10 @@ async def prepare_deferred_recovery(
         )
 
     if state.get("state") == "queued":
+        from pullbox.services.import_pending_recovery import prepare_pending_files
+
         await report(0, 1, "Reconciling deferred files with the existing library...")
+        await run_checkpointed_recovery(session, job, prepare_pending_files)
         local_counts = await apply_deferred_recovery(session, job, running=True)
         state = recovery_state(job)
         references = state.get("reference_candidates")

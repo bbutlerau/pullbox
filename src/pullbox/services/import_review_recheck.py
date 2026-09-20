@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,8 +37,15 @@ from pullbox.models.import_job import (
     ImportSeriesStatus,
     ImportSourceType,
 )
+from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryRoot
+from pullbox.models.series import Series
 from pullbox.services.import_content_inspection import inspect_import_content
+from pullbox.services.import_recovery_approvals import source_approval
+from pullbox.services.import_recovery_identity import (
+    MIXED_IDENTITY_REVIEW_ERROR,
+    fresh_mixed_identity_agrees,
+)
 from pullbox.services.import_safety_diagnostics import (
     ImportSafetyCategory,
     build_import_safety_diagnostics,
@@ -75,19 +83,82 @@ def retryable_failed_source_filters(job_id: int) -> tuple[Any, ...]:
     """Select only transient source failures that another inspection can resolve."""
     category = ImportedFile.diagnostics["source_revalidation"]["category"].as_string()
     code = ImportedFile.diagnostics["source_revalidation"]["code"].as_string()
-    return (
-        ImportedFile.import_job_id == job_id,
-        ImportedFile.status == ImportedFileStatus.FAILED,
+    ordinary = and_(
         ImportedFile.diagnostics["source_revalidation"]["retryable"].as_boolean().is_(True),
         or_(
             category.in_(_TRANSIENT_SOURCE_RECHECK_CATEGORIES),
             code.in_(_TRANSIENT_SOURCE_RECHECK_CODES),
+            and_(
+                code == "source_identity_changed",
+                category == ImportSafetyCategory.SOURCE_CHANGED.value,
+                ImportedFile.diagnostics["source_revalidation"]["source"].as_string()
+                == "completed_import_recheck",
+                ImportedFile.diagnostics["source_revalidation"]["reason"].as_string()
+                == (
+                    "The source changed or became unavailable after scanning. "
+                    "Rescan before retrying."
+                ),
+                ImportedFile.diagnostics["source_revalidation"]["identity_conflicts"][0]
+                .as_string()
+                .is_(None),
+            ),
             and_(
                 category == ImportSafetyCategory.SOURCE_CHANGED.value,
                 code.is_(None),
             ),
         ),
     )
+    mixed_proof_failure = and_(
+        code == "source_identity_changed",
+        ImportedFile.error_message == MIXED_IDENTITY_REVIEW_ERROR,
+        ImportedFile.diagnostics["completed_import_cleanup"]["action"].as_string()
+        == "resolve_mixed_folder_files",
+        ImportedFile.diagnostics["completed_import_cleanup"]["evidence_source"].as_string()
+        == "comicinfo",
+        ImportedFile.diagnostics["completed_import_cleanup"]["target_issue_id"].as_integer()
+        == ImportedFile.matched_issue_id,
+        ImportedFile.diagnostics["source_revalidation"]["identity_conflicts"][0]
+        .as_string()
+        .is_(None),
+    )
+    return (
+        ImportedFile.import_job_id == job_id,
+        ImportedFile.status == ImportedFileStatus.FAILED,
+        or_(ordinary, mixed_proof_failure),
+    )
+
+
+async def _recheck_mixed_proof(
+    session: AsyncSession,
+    file: ImportedFile,
+    item: ImportedSeries,
+    metadata: SourceMetadata,
+    content: dict[str, Any],
+) -> dict[str, Any]:
+    if file.error_message != MIXED_IDENTITY_REVIEW_ERROR or "file_safety" in content:
+        return content
+    target = (
+        await session.execute(
+            select(Issue, Series)
+            .join(Series, Series.id == Issue.series_id)
+            .where(
+                Issue.id == file.matched_issue_id,
+                Series.id == item.series_id,
+                Series.comicvine_id == item.cv_id,
+            )
+        )
+    ).one_or_none()
+    if target is not None and fresh_mixed_identity_agrees(file, metadata, target[0], target[1]):
+        return content
+    return {
+        **content,
+        "file_safety": build_import_safety_diagnostics(
+            MIXED_IDENTITY_REVIEW_ERROR,
+            code="source_identity_changed",
+            source="completed_import_recheck",
+            overrideable_hint=False,
+        ),
+    }
 
 
 def _preserve_mylar_identity(base: SourceMetadata, fresh: SourceMetadata) -> SourceMetadata:
@@ -636,18 +707,34 @@ async def prepare_completed_import_file_recheck(
         ] = []
         for imported_file, imported_series in rows:
             cursor = int(imported_file.id)
+            approval = await asyncio.to_thread(source_approval, imported_file)
+            approved_code = approval.code if approval else None
             metadata, content, signature = await asyncio.to_thread(
                 inspect_review_source,
                 Path(imported_file.file_path),
                 source_metadata_for_import_file(imported_series, imported_file),
-                dict(imported_file.source_signature or {}),
+                approval.signature if approval else dict(imported_file.source_signature or {}),
                 roots=roots,
                 block_dangerous=block_dangerous,
-                max_archive_size=max_archive_size,
-                accept_replaced_files=accept_replaced_files,
+                max_archive_size=(
+                    sys.maxsize
+                    if approved_code == "archive_decompressed_size_limit"
+                    else max_archive_size
+                ),
+                accept_replaced_files=accept_replaced_files and approval is None,
                 sidecars=sidecars,
             )
+            content_block = content.get("file_safety")
+            if (
+                approved_code == "single_page_comic"
+                and isinstance(content_block, dict)
+                and content_block.get("code") == approved_code
+            ):
+                content = {key: value for key, value in content.items() if key != "file_safety"}
             report["files_checked"] += 1
+            content = await _recheck_mixed_proof(
+                session, imported_file, imported_series, metadata, content
+            )
             if apply:
                 inspected.append((int(imported_file.id), metadata, content, signature))
             else:

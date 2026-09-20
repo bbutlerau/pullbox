@@ -9,9 +9,16 @@ from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.name_matcher import NameMatcher
 from pullbox.core.release_parser import parse_release_title
 from pullbox.core.story_arc_ordering import extract_story_arc_order_prefix
+from pullbox.models.import_job import ImportedFile
 
 if TYPE_CHECKING:
-    from pullbox.models.import_job import ImportedFile
+    from pullbox.core.source_metadata import SourceMetadata
+    from pullbox.models.issue import Issue
+    from pullbox.models.series import Series
+
+MIXED_IDENTITY_REVIEW_ERROR = (
+    "Fresh ComicInfo does not prove the selected recovery issue. Review it in Follow-up."
+)
 
 
 def catalog_file_identity(file: ImportedFile) -> dict[str, Any] | None:
@@ -158,3 +165,51 @@ def record_catalog_review(file: ImportedFile, identity: dict[str, Any], reason: 
             "reason": reason,
         },
     }
+
+
+def fresh_mixed_identity_agrees(
+    file: ImportedFile, metadata: SourceMetadata, target: Issue, series: Series
+) -> bool:
+    """Reprove a previewed ComicInfo match, never promote filename-only evidence."""
+    cleanup = dict(file.diagnostics or {}).get("completed_import_cleanup")
+    if not isinstance(cleanup, dict) or (
+        cleanup.get("action") != "resolve_mixed_folder_files"
+        or cleanup.get("evidence_source") != "comicinfo"
+        or cleanup.get("target_issue_id") != target.id
+        or cleanup.get("target_series_id") != target.series_id
+    ):
+        return False
+    fresh = ImportedFile(
+        file_name=file.file_name,
+        parsed_series=metadata.series_name,
+        parsed_issue_number=metadata.issue_number,
+        issue_number_raw=metadata.issue_number_text,
+        comicvine_issue_id=metadata.comicvine_issue_id,
+        diagnostics={
+            "source_metadata": metadata.diagnostics,
+            "source_issue_type": metadata.issue_type.value,
+            "comicvine_series_id": metadata.comicvine_series_id,
+            "metadata_signals": {key: value.value for key, value in metadata.signals.items()},
+        },
+    )
+    identity = catalog_file_identity(fresh)
+    return bool(
+        identity
+        and identity["evidence"] == "comicinfo"
+        and catalog_target_agrees(
+            identity,
+            {
+                "title": series.title,
+                "cv_id": series.comicvine_id,
+                "summary": {
+                    "provider_id": target.comicvine_id,
+                    "issue_number": target.issue_number,
+                    "issue_number_text": target.issue_number_text,
+                    "issue_type": target.issue_type.value,
+                    "release_date": target.release_date.isoformat()
+                    if target.release_date
+                    else None,
+                },
+            },
+        )
+    )

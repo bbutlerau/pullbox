@@ -5,7 +5,7 @@ from __future__ import annotations
 import enum
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from itertools import batched
@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Final
 from uuid import uuid4
 
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
-from sqlalchemy import and_, case, exists, func, or_, select, update
+from sqlalchemy import and_, case, exists, func, or_, select, true, update
 from sqlalchemy.orm import aliased
 
 from pullbox.core.config_resolver import get_application_secret
@@ -252,12 +252,14 @@ def _eligible_conflict_groups(job_id: int) -> Any:
 def _file_filters(job_id: int, action: CompletedImportCleanupAction) -> tuple[Any, ...]:
     filters: list[Any] = [ImportedFile.import_job_id == job_id]
     if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES:
+        from pullbox.services.import_pending_recovery import pending_file_ids
         from pullbox.services.import_reference_recovery import reference_candidate_ids
 
         filters.append(
             or_(
                 ImportedFile.status == ImportedFileStatus.NO_MATCH,
                 ImportedFile.id.in_(reference_candidate_ids(job_id)),
+                ImportedFile.id.in_(pending_file_ids(job_id)),
             )
         )
     elif action is CompletedImportCleanupAction.DISMISS_MISSING_REFERENCES:
@@ -456,6 +458,8 @@ def _mixed_folder_source_identity(
 async def _load_mixed_folder_resolutions(
     session: AsyncSession,
     job_id: int,
+    *,
+    file_ids: list[int] | None = None,
 ) -> tuple[_MixedFolderResolution, ...]:
     """Resolve exact local targets without provider calls or source-file access."""
     series_signal = ImportedFile.diagnostics["metadata_signals"]["series_name"].as_string()
@@ -496,6 +500,7 @@ async def _load_mixed_folder_resolutions(
                 ImportedFile.import_job_id == job_id,
                 ImportedFile.status.in_((ImportedFileStatus.NO_MATCH, ImportedFileStatus.IMPORTED)),
                 or_(trusted_identity_filter, filename_review_filter),
+                ImportedFile.id.in_(file_ids) if file_ids is not None else true(),
             )
             .order_by(ImportedFile.id)
         )
@@ -1349,6 +1354,7 @@ async def _apply_mixed_folder_resolutions(
     job: ImportJob,
     *,
     resolutions: tuple[_MixedFolderResolution, ...] | None = None,
+    isolate_targets: bool = False,
 ) -> tuple[set[int], set[int]]:
     """Rebucket exact embedded identities while preserving every source artifact."""
     if resolutions is None:
@@ -1446,8 +1452,21 @@ async def _apply_mixed_folder_resolutions(
     affected_series_ids: set[int] = set()
     retry_series_ids: set[int] = set()
     affected_file_ids: list[int] = []
+    isolated_targets: dict[int, ImportedSeries] = {}
+    files_by_id = {
+        file.id: file
+        for ids in batched([row.file_id for row in resolutions], 400)
+        for file in await session.scalars(select(ImportedFile).where(ImportedFile.id.in_(ids)))
+    }
     for resolution in resolutions:
-        target_import_series = imported_target_by_series_id.get(resolution.target_series_id)
+        target_map = (
+            isolated_targets
+            if isolate_targets
+            and resolution.source_library_file_id is None
+            and resolution.target_library_file_id is None
+            else imported_target_by_series_id
+        )
+        target_import_series = target_map.get(resolution.target_series_id)
         if target_import_series is None:
             target_series = target_series_by_id[resolution.target_series_id]
             target_import_series = ImportedSeries(
@@ -1473,9 +1492,9 @@ async def _apply_mixed_folder_resolutions(
             )
             session.add(target_import_series)
             await session.flush()
-            imported_target_by_series_id[resolution.target_series_id] = target_import_series
+            target_map[resolution.target_series_id] = target_import_series
 
-        imported_file = await session.get(ImportedFile, resolution.file_id)
+        imported_file = files_by_id.get(resolution.file_id)
         if imported_file is None:  # pragma: no cover - signed snapshot guards deletion
             raise ValidationError("A mixed-folder file disappeared. Preview the action again.")
         affected_file_ids.append(int(imported_file.id))
@@ -1721,6 +1740,7 @@ async def apply_completed_import_cleanup(
     preview_token: str,
     actor_username: str | None = None,
     source_ip: str | None = None,
+    background: bool = False,
 ) -> CompletedImportCleanupResult:
     """Apply exactly the previewed cleanup scope without touching source files."""
     job = await _load_completed_job(session, job_id)
@@ -1735,6 +1755,7 @@ async def apply_completed_import_cleanup(
         raise ValidationError("The cleanup scope changed. Preview the action again.")
 
     if action is CompletedImportCleanupAction.RECHECK_DEFERRED_FILES:
+        from pullbox.services.import_pending_recovery import pending_scope
         from pullbox.services.import_reference_recovery import reference_candidates
         from pullbox.services.import_retry_helpers import require_retained_import_destination
 
@@ -1748,6 +1769,7 @@ async def apply_completed_import_cleanup(
                 "series_ids": [],
                 "stale_series_ids": stale_series_ids,
                 "reference_candidates": await reference_candidates(session, job_id),
+                "pending_files": await pending_scope(session, job_id),
                 "actor_id": actor_id,
             },
             "mode": "import",
@@ -1786,9 +1808,37 @@ async def apply_completed_import_cleanup(
         affected_file_ids = ()
         requires_import_retry = await _prepare_series_for_retry(session, job, affected_series_ids)
     elif action is CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES:
-        affected_series_ids, retry_series_ids = await _apply_mixed_folder_resolutions(session, job)
         affected_file_ids = ()
-        requires_import_retry = await _prepare_series_for_retry(session, job, retry_series_ids)
+        if background:
+            from pullbox.services.import_retry_helpers import require_retained_import_destination
+
+            require_retained_import_destination(job)
+            resolutions = await _load_mixed_folder_resolutions(session, job.id)
+            job.progress_snapshot = {
+                **dict(job.progress_snapshot or {}),
+                "deferred_recovery": {
+                    "state": "mixed_folder",
+                    "action": action.value,
+                    "run_id": uuid4().hex,
+                    "series_ids": [],
+                    "actor_id": actor_id,
+                    "mixed_resolutions": [asdict(row) for row in resolutions],
+                    "mixed_cursor": 0,
+                },
+                "mode": "import",
+                "phase": "deferred_recovery",
+                "progress": 0,
+                "message": "Queued mixed-folder recovery...",
+            }
+            job.status = ImportJobStatus.IMPORTING
+            job.error_message = None
+            affected_series_ids = set()
+            requires_import_retry = True
+        else:
+            affected_series_ids, retry_series_ids = await _apply_mixed_folder_resolutions(
+                session, job
+            )
+            requires_import_retry = await _prepare_series_for_retry(session, job, retry_series_ids)
     else:
         affected_series_ids, affected_file_ids, requires_import_retry = await _apply_file_action(
             session, job, action
@@ -1798,7 +1848,9 @@ async def apply_completed_import_cleanup(
                 session, job, affected_series_ids
             )
 
-    if action is not CompletedImportCleanupAction.RECHECK_DEFERRED_FILES:
+    if action is not CompletedImportCleanupAction.RECHECK_DEFERRED_FILES and not (
+        background and action is CompletedImportCleanupAction.RESOLVE_MIXED_FOLDER_FILES
+    ):
         await recompute_file_counters(session, job, series_ids=sorted(affected_series_ids))
         await recompute_series_counters(session, job)
     result = CompletedImportCleanupResult(

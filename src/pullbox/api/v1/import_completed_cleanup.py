@@ -114,6 +114,7 @@ async def apply_completed_import_cleanup_route(
         actor_username=_user.username,
         source_ip=source_ip_from_request(request),
         preview_token=body.preview_token,
+        background=True,
     )
 
     if action is CompletedImportCleanupAction.RETRY_SOURCE_INSPECTION:

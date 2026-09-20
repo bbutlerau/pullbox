@@ -20,6 +20,11 @@ from pullbox.core.library_file_ownership import (
 )
 from pullbox.models.issue import Issue
 from pullbox.models.series import Series
+from pullbox.services.import_recovery_approvals import source_approval
+from pullbox.services.import_recovery_identity import (
+    MIXED_IDENTITY_REVIEW_ERROR,
+    fresh_mixed_identity_agrees,
+)
 from pullbox.services.import_review_recheck import (
     _apply_completed_file_recheck,
     _retry_source_roots,
@@ -43,11 +48,18 @@ async def refresh_recovery_source(
     folder_conflict = isinstance(source_metadata, dict) and bool(
         source_metadata.get("identity_conflicts")
     )
-    if not manual and dict(item.diagnostics or {}).get("kind") not in {
-        "known_series_recovery",
-        "deferred_recovery",
-        "completed_import_mixed_folder_recovery",
-    }:
+    approval = await asyncio.to_thread(source_approval, file)
+    approved_code = approval.code if approval else None
+    if (
+        not manual
+        and approved_code is None
+        and dict(item.diagnostics or {}).get("kind")
+        not in {
+            "known_series_recovery",
+            "deferred_recovery",
+            "completed_import_mixed_folder_recovery",
+        }
+    ):
         return
     previous = dict(file.source_signature or {})
     path = Path(file.file_path)
@@ -85,16 +97,6 @@ async def refresh_recovery_source(
     pairs = [(root, await asyncio.to_thread(root.resolve, strict=True)) for root in roots]
     block_dangerous = await is_dangerous_file_blocking_enabled(session)
     max_size = await get_archive_size_limit_bytes(session)
-    exception = diagnostics.get("safety_exception")
-    previous_block = exception.get("previous_block") if isinstance(exception, dict) else None
-    approved_code = (
-        previous_block.get("code")
-        if isinstance(exception, dict)
-        and exception.get("allowed_once") is True
-        and isinstance(previous_block, dict)
-        and previous_block.get("overrideable") is True
-        else None
-    )
     if approved_code == "archive_decompressed_size_limit":
         max_size = sys.maxsize
     metadata, content, signature = await asyncio.to_thread(
@@ -116,12 +118,18 @@ async def refresh_recovery_source(
     ):
         content = {key: value for key, value in content.items() if key != "file_safety"}
     embedded = metadata.diagnostics.get("embedded_identity")
-    if "file_safety" not in content and (
-        not isinstance(embedded, dict) or embedded.get("issue_id") != target.comicvine_id
+    series = await session.get(Series, target.series_id)
+    fresh_mixed_match = series is not None and fresh_mixed_identity_agrees(
+        file, metadata, target, series
+    )
+    if (
+        "file_safety" not in content
+        and (not isinstance(embedded, dict) or embedded.get("issue_id") != target.comicvine_id)
+        and not fresh_mixed_match
     ):
         raise ReferencedFileValidationError(
             "source_identity_changed",
-            "Fresh ComicInfo does not prove the selected recovery issue. Review it in Follow-up.",
+            MIXED_IDENTITY_REVIEW_ERROR,
         )
     ready = _apply_completed_file_recheck(
         file,

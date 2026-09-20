@@ -565,6 +565,37 @@ rules but have no stale Mylar database references to repair. Missing-path copy
 does not assume a file disappeared after the scan: it may never have existed
 under the database's recorded name.
 
+## Completed Recovery Checkpoints
+
+`Recheck files` includes selected, confirmed files stranded under completed
+series groups when their saved issue target is still intact. The signed request
+captures their IDs and update timestamps. Recovery isolates those files into
+retry groups, checkpoints each batch, and leaves skipped, unselected,
+conflicting, or subsequently changed rows alone. Ordinary Step 4 source and
+ownership checks still run before registration.
+
+`Resolve and retry` for mixed folders queues background preparation rather
+than applying the entire reconciliation in the HTTP request. Batches contain
+at most 25 previewed resolutions; each mutation and cursor commit together,
+with progress published afterward. Changed evidence is left for another review.
+Only groups containing newly prepared files enter Step 4. Pause/restart resumes
+the saved cursor, and Cancel preserves the original import and completed repairs.
+Transient SQLite lock failures retry from that cursor; persistent contention
+leaves the job stalled and resumable, not failed. Unrelated database errors are
+not retried as lock failures.
+
+Source rechecks retain a one-time size or single-page approval only when the
+inspected file matches the approved signature. A mount device number may change;
+the path, inode, size, and modification time may not. Inspection validates that
+signature again so replacement races cannot inherit an old approval. Dangerous
+archives remain blocked.
+
+Legacy generic identity failures without recorded conflicts can be reinspected;
+explicit identity conflicts remain manual. A previously approved mixed-folder
+ComicInfo match rejected only for lacking an embedded issue ID can also be
+rechecked. Fresh exact title, issue, type, and compatible date evidence must
+agree with the saved target, without contradictory IDs or filename evidence.
+
 ## Content Outcomes
 
 - `archive_no_pages`: there are no non-empty supported image members. A

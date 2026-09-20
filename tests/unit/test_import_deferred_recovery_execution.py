@@ -776,7 +776,8 @@ async def test_preparation_cancel_preserves_original_import(db_session):
 
 
 @pytest.mark.parametrize("started", [True, False])
-async def test_paused_recovery_cancel_never_requests_original_rollback(db_session, started):
+@pytest.mark.parametrize("phase", ["catalogs", "mixed_folder"])
+async def test_paused_recovery_cancel_never_requests_original_rollback(db_session, started, phase):
     from datetime import UTC, datetime
 
     from pullbox.services.import_job_controls import request_cancel
@@ -784,7 +785,7 @@ async def test_paused_recovery_cancel_never_requests_original_rollback(db_sessio
     job, _, _, _, _ = await seed(db_session)
     job.status = ImportJobStatus.PAUSED
     job.import_started_at = datetime.now(UTC) if started else None
-    job.progress_snapshot = {"deferred_recovery": {"state": "catalogs"}}
+    job.progress_snapshot = {"deferred_recovery": {"state": phase}}
     await db_session.commit()
     await request_cancel(db_session, job.id, log_event=AsyncMock())
     assert job.status is ImportJobStatus.CANCELLING
