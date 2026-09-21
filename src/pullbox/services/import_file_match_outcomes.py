@@ -59,12 +59,25 @@ _SOURCE_EVIDENCE_DIAGNOSTIC_KEYS = (
     "review_source_action",
     "review_source_previous",
     "review_deferred",
+    "review_decision",
 )
 
 
 def _source_evidence_diagnostics(imp_file: ImportedFile) -> dict[str, Any]:
     diagnostics = dict(imp_file.diagnostics or {})
-    return {key: diagnostics[key] for key in _SOURCE_EVIDENCE_DIAGNOSTIC_KEYS if key in diagnostics}
+    evidence = {
+        key: diagnostics[key] for key in _SOURCE_EVIDENCE_DIAGNOSTIC_KEYS if key in diagnostics
+    }
+    exception = diagnostics.get("safety_exception")
+    if (
+        imp_file.status == ImportedFileStatus.CONFIRMED
+        or imp_file.match_method in {"manual_override", "import_reconcile"}
+        or imp_file.match_confidence == "manual"
+        or (isinstance(exception, dict) and exception.get("allowed_once") is True)
+    ):
+        # Accounting evidence only; this does not grant a safety exception or select a file.
+        evidence["review_decision"] = True
+    return evidence
 
 
 def apply_matched_file_outcome(

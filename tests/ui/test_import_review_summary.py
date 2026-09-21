@@ -19,7 +19,10 @@ from pullbox.models.import_job import (
 
 
 @pytest.mark.parametrize("job_status", [ImportJobStatus.REVIEW, ImportJobStatus.SCANNING])
-async def test_missing_references_are_not_files_or_unfinished_decisions(db_session, job_status):
+@pytest.mark.parametrize("missing_key", ["code", "category", "kind", "reason"])
+async def test_missing_references_are_unfinished_decisions_but_not_available_files(
+    db_session, job_status, missing_key
+):
     from pullbox.ui.import_review_lanes import load_review_rows
     from pullbox.ui.import_review_summary import load_import_review_summary
 
@@ -52,7 +55,11 @@ async def test_missing_references_are_not_files_or_unfinished_decisions(db_sessi
                 file_path=f"/fixture/{index}.cbz",
                 file_format="cbz",
                 status=status,
-                diagnostics={"safety_block": {"code": code}} if code else {},
+                diagnostics={
+                    "safety_block": {missing_key if code == "source_missing" else "code": code}
+                }
+                if code
+                else {},
             )
         )
     await db_session.flush()
@@ -61,13 +68,172 @@ async def test_missing_references_are_not_files_or_unfinished_decisions(db_sessi
     assert summary.get("files_present") == 2
     assert summary.get("files_missing_references") == 2
     assert summary["files_safety_blocked"] == 1
-    assert summary["review_files_settled"] == 1
-    assert summary["review_files_open"] == 1
-    assert summary["needs_attention_files_total"] == 1
+    assert summary["review_files_settled"] == 2
+    assert summary["review_decisions_made"] == 1
+    assert summary["review_decisions_total"] == 3
+    assert summary["review_files_open"] == 2
+    assert summary["needs_attention_files_total"] == 2
     row = (await load_review_rows(db_session, job.id))[series.id]
     assert row.missing_references == 2
-    assert row.decision_files == 1
-    assert row.attention_files == 2  # Keep unresolved references expandable in Info.
+    assert row.decision_files == 2
+    assert row.attention_files == 2
+
+
+async def test_review_decisions_count_files_not_automatic_matches_and_survive_reopening(db_session):
+    from pullbox.ui.import_review_context import load_import_review_context
+
+    job = ImportJob(
+        source_path="/fixture", source_type=ImportSourceType.MYLAR3, status=ImportJobStatus.REVIEW
+    )
+    series = ImportedSeries(
+        import_job=job, raw_series_name="Mixed review", status=ImportSeriesStatus.MATCHED, cv_id=1
+    )
+    db_session.add_all([job, series])
+    await db_session.flush()
+    specs = [
+        (ImportedFileStatus.MATCHED, {}),  # Automatic matches are not user decisions.
+        (ImportedFileStatus.DUPLICATE_FILE, {}),
+        (ImportedFileStatus.ALREADY_OWNED, {}),
+        (ImportedFileStatus.SKIPPED, {}),
+        (ImportedFileStatus.CONFLICT, {}),
+        (ImportedFileStatus.CONFLICT, {}),
+        (ImportedFileStatus.NO_MATCH, {}),
+        (ImportedFileStatus.SAFETY_BLOCKED, {"safety_block": {"category": "zero_byte"}}),
+        (ImportedFileStatus.SAFETY_BLOCKED, {"safety_block": {"category": "source_missing"}}),
+        (ImportedFileStatus.SKIPPED, {"safety_block": {"category": "source_missing"}}),
+    ]
+    files = [
+        ImportedFile(
+            import_job_id=job.id,
+            import_series_id=series.id,
+            file_name=f"{index}.cbz",
+            file_path=f"/fixture/{index}.cbz",
+            file_format="cbz",
+            status=status,
+            diagnostics=diagnostics,
+            conflict_group_id=1 if status is ImportedFileStatus.CONFLICT else None,
+        )
+        for index, (status, diagnostics) in enumerate(specs)
+    ]
+    db_session.add_all(files)
+    await db_session.flush()
+
+    async def check(made, opened):
+        await db_session.flush()
+        ctx = await load_import_review_context(db_session, job, page=1, sort=None, status="decide")
+        summary = ctx["review_summary"]
+        assert summary.get("review_decisions_made") == made
+        assert summary.get("review_decisions_total") == made + opened
+        assert summary["review_files_open"] == opened
+        assert summary["files_present"] == 8
+        assert summary["files_missing_references"] == 2
+        assert summary["review_files_settled"] + opened == 10
+        assert sum(ctx["lane_file_counts"].values()) == opened
+        assert not db_session.dirty  # Rendering is read-only.
+
+    await check(2, 5)
+    files[4].status = ImportedFileStatus.CONFIRMED
+    files[5].status = ImportedFileStatus.SKIPPED
+    await check(4, 3)  # Keeping one copy settles both files, not one group.
+    files[4].status = files[5].status = ImportedFileStatus.CONFLICT
+    await check(2, 5)
+    series.status = ImportSeriesStatus.SKIPPED
+    await check(10, 0)
+    series.status = ImportSeriesStatus.MATCHED
+    await check(2, 5)
+
+
+@pytest.mark.parametrize(
+    ("method", "diagnostics", "series_method"),
+    [
+        ("manual_override", {}, None),
+        ("import_reconcile", {}, None),
+        (None, {"safety_exception": {"allowed_once": True}}, None),
+        (None, {"review_source_action": {"state": "completed"}}, None),
+        (None, {}, "user_override"),
+    ],
+)
+async def test_completed_decisions_use_saved_review_evidence(
+    db_session, method, diagnostics, series_method
+):
+    from pullbox.ui.import_review_summary import load_import_review_summary
+
+    job = ImportJob(source_path="/fixture", source_type=ImportSourceType.FILESYSTEM)
+    series = ImportedSeries(
+        import_job=job,
+        raw_series_name="Reviewed",
+        status=ImportSeriesStatus.MATCHED,
+        cv_match_method=series_method,
+    )
+    file = ImportedFile(
+        import_job=job,
+        import_series=series,
+        file_path="/fixture/a.cbz",
+        file_name="a.cbz",
+        file_format="cbz",
+        status=ImportedFileStatus.MATCHED,
+        match_method=method,
+        diagnostics=diagnostics,
+    )
+    db_session.add_all([job, series, file])
+    await db_session.flush()
+    summary = await load_import_review_summary(db_session, job)
+    assert summary.get("review_decisions_made") == 1
+    assert summary.get("review_decisions_total") == 1
+    file.status = ImportedFileStatus.SAFETY_APPROVED
+    await db_session.flush()
+    summary = await load_import_review_summary(db_session, job)
+    assert summary.get("review_decisions_made") == 0
+    assert summary.get("review_decisions_total") == 1
+    assert summary["review_files_open"] == 1
+
+
+async def test_safety_decision_remains_counted_after_background_matching(db_session):
+    from pullbox.services.import_file_match_candidates import FileMatchCandidate
+    from pullbox.services.import_file_match_outcomes import apply_matched_file_outcome
+    from pullbox.ui.import_review_summary import load_import_review_summary
+
+    job = ImportJob(source_path="/fixture", source_type=ImportSourceType.FILESYSTEM)
+    series = ImportedSeries(
+        import_job=job, raw_series_name="Approved", status=ImportSeriesStatus.MATCHED
+    )
+    file = ImportedFile(
+        import_job=job,
+        import_series=series,
+        file_path="/fixture/a.cbz",
+        file_name="a.cbz",
+        file_format="cbz",
+        status=ImportedFileStatus.SAFETY_APPROVED,
+        diagnostics={"safety_exception": {"allowed_once": True}},
+    )
+    db_session.add_all([job, series, file])
+    await db_session.flush()
+    before = await load_import_review_summary(db_session, job)
+    assert before["review_decisions_total"] == 1
+    candidate = FileMatchCandidate(
+        matched_issue_id=None,
+        matched_issue_cv_id=123,
+        target_issue_number=1,
+        has_library_file=False,
+        matched_issue=None,
+        target_issue_title="First",
+        confidence="high",
+        method="issue_number",
+    )
+    # A later rematch must retain the accounting evidence too.
+    for _ in range(2):
+        apply_matched_file_outcome(
+            file,
+            series,
+            candidate,
+            duplicate_series=False,
+            duplicate_target_state=lambda _: "missing",
+        )
+        await db_session.flush()
+        after = await load_import_review_summary(db_session, job)
+        assert after["review_decisions_made"] == 1
+        assert after["review_decisions_total"] == 1
+        assert after["review_files_open"] == 0
 
 
 async def test_conflict_summary_distinguishes_groups_files_and_series(db_session):

@@ -3,21 +3,21 @@
     <div class="min-w-0 flex-1 basis-[420px] space-y-2.5">
       <h2 class="font-display text-[22px] font-bold leading-7 tracking-tight text-pb-text">
         <span class="text-pb-success">{{ review_summary.ready_to_import_total }} series</span> ready to import
-        {% if review_summary.review_files_open %}<span class="text-pb-warning">&middot; {{ review_summary.review_files_open }} files need you</span>{% else %}<span class="text-pb-success">&middot; all decisions made</span>{% endif %}
+        {% if review_summary.review_files_open %}<span class="text-pb-warning">&middot; {{ review_summary.review_files_open }} {{ 'file' if review_summary.review_files_open == 1 else 'files' }}</span> {{ 'needs' if review_summary.review_files_open == 1 else 'need' }} you{% else %}<span class="text-pb-success">&middot; all decisions made</span>{% endif %}
       </h2>
-      {% set settled = review_summary.review_files_settled %}
-      {% set file_total = review_summary.files_present|default(review_summary.files_total) %}
-      {% set percent = (100 * settled / file_total)|round(1) if file_total else 100 %}
+      {% set made = review_summary.review_decisions_made %}
+      {% set decision_total = review_summary.review_decisions_total %}
+      {% set open_files = review_summary.review_files_open %}
+      {% set percent = (100 * made / decision_total)|round(1) if decision_total else 100 %}
       <div class="max-w-[560px] space-y-2">
-        <div class="app-progress-track h-1.5" data-testid="import-review-progress" role="progressbar" aria-label="Files ready or handled" aria-valuemin="0" aria-valuemax="{{ file_total or 1 }}" aria-valuenow="{{ settled if file_total else 1 }}" aria-valuetext="{{ settled }} of {{ file_total }} files ready or handled">
+        <div class="app-progress-track h-1.5" data-testid="import-review-progress" role="progressbar" aria-label="Decisions made" aria-valuemin="0" aria-valuemax="{{ decision_total or 1 }}" aria-valuenow="{{ made if decision_total else 1 }}" aria-valuetext="{{ made }} of {{ decision_total }} file decisions made">
           <div class="app-progress-fill bg-pb-success" style="width:{{ percent }}%"></div>
         </div>
         <div class="flex flex-wrap gap-x-5 gap-y-1.5 text-xs text-pb-text-sec">
-          <span><span class="text-pb-success" aria-hidden="true">&bull;</span> Ready or handled {{ settled }} of {{ file_total }} files</span>
-          <span><span class="text-pb-warning" aria-hidden="true">&bull;</span> Still open {{ review_summary.review_files_open }} files in {{ review_open_series }} series</span>
-          {% if lane_counts.blocked %}<span><span class="text-pb-error" aria-hidden="true">&bull;</span> Cannot import: {{ lane_counts.blocked }} series</span>{% endif %}
+          <span class="inline-flex items-center gap-1.5"><span class="h-2 w-2 rounded-sm bg-pb-success" aria-hidden="true"></span><strong class="font-semibold text-pb-text">Decisions</strong> <span>{{ made }} of {{ decision_total }} made</span></span>
+          <span class="inline-flex items-center gap-1.5"><span class="h-2 w-2 rounded-sm bg-pb-warning" aria-hidden="true"></span><strong class="font-semibold text-pb-text">Still open</strong> <span>{{ open_files }} {{ 'file' if open_files == 1 else 'files' }} in {{ review_open_series }} series</span></span>
+          {% if lane_counts.blocked %}<span class="inline-flex items-center gap-1.5"><span class="h-2 w-2 rounded-sm bg-pb-error" aria-hidden="true"></span><strong class="font-semibold text-pb-text">Cannot import</strong> <span>{{ lane_file_counts.blocked }} {{ 'file' if lane_file_counts.blocked == 1 else 'files' }}</span></span>{% endif %}
         </div>
-        {% if review_summary.files_missing_references %}<p data-testid="import-review-missing-references" class="text-xs text-pb-text-dim">{{ review_summary.files_missing_references }} missing file reference{{ 's' if review_summary.files_missing_references != 1 else '' }} tracked separately. Ready files can still import.</p>{% endif %}
       </div>
     </div>
     <div class="flex flex-1 basis-[360px] flex-col items-end gap-1.5">
@@ -28,17 +28,20 @@
           <span data-import-review-import-label x-text="importActionLabel()">Import {{ review_summary.selected_items_total }} ready series</span>
         </button>
       </div>
-      <p class="max-w-md text-right text-xs text-pb-text-dim">Ready files import while you work through the rest. Unresolved files stay in Follow-up.</p>
+      <p class="max-w-md text-right text-xs text-pb-text-dim">Ready files import while you work through the rest.</p>
       <span data-import-review-selection-summary class="sr-only" x-text="importSelectionLabel()"></span>
     </div>
   </div>
   <div class="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-4">
     {% for lane, kicker in [('decide', 'Start here'), ('confirm', 'Then'), ('fix_source', 'Can wait'), ('blocked', 'Will not import')] if lane != 'blocked' or lane_counts.blocked %}
+    {% set lane_active = active_lane == lane %}
+    {% set lane_hot = lane == 'decide' and lane_counts[lane] %}
     <button type="button" data-testid="import-review-attention-{{ lane }}" hx-get="/import/{{ job.id }}/review-partial?status={{ lane }}" hx-target="#import-step-review-shell" hx-swap="morph:outerHTML"
-      class="rounded-lg border {{ 'border-pb-warning/40 bg-pb-warning/5' if lane == 'decide' and lane_counts[lane] else 'border-pb-border bg-pb-card' }} p-3 text-left hover:bg-pb-card-hover focus-visible:outline-2 focus-visible:outline-pb-interactive">
-      <span class="block text-[10px] font-semibold uppercase tracking-wider text-pb-text-dim">{{ kicker }}</span>
+      aria-pressed="{{ 'true' if lane_active else 'false' }}"
+      class="rounded-lg border {{ 'border-pb-interactive bg-pb-warning/5 ring-1 ring-pb-interactive' if lane_active and lane_hot else 'border-pb-interactive bg-pb-interactive-dim ring-1 ring-pb-interactive' if lane_active else 'border-pb-warning/40 bg-pb-warning/5' if lane_hot else 'border-pb-border bg-pb-card' }} p-3 text-left transition-[border-color,background-color,box-shadow] duration-150 focus-visible:outline-2 focus-visible:outline-pb-interactive">
+      <span data-testid="import-review-attention-kicker-{{ lane }}" class="block text-[10px] font-semibold uppercase tracking-wider {{ 'text-pb-success' if not lane_counts[lane] else 'text-pb-warning' if lane == 'decide' else 'text-pb-error' if lane == 'blocked' else 'text-pb-text-dim' }}">{{ kicker }}</span>
       <span class="mt-1 block text-sm font-semibold text-pb-text">{{ review_lanes[lane] }}</span>
-      <span class="mt-1 block text-xs {{ 'text-pb-warning' if lane_counts[lane] and lane != 'blocked' else 'text-pb-error' if lane_counts[lane] else 'text-pb-text-dim' }}">{% if lane_counts[lane] %}{{ lane_counts[lane] }} series &middot; {{ lane_file_counts[lane] }} {{ 'file' if lane_file_counts[lane] == 1 else 'files' }}{% else %}Done &middot; Nothing left here{% endif %}</span>
+      <span data-import-review-attention-units class="mt-1 block text-xs text-pb-text-sec">{% if lane_counts[lane] %}{{ lane_counts[lane] }} series &middot; {{ lane_file_counts[lane] }} {{ 'file' if lane_file_counts[lane] == 1 else 'files' }}{% else %}Done &middot; Nothing left here{% endif %}</span>
     </button>
     {% endfor %}
   </div>

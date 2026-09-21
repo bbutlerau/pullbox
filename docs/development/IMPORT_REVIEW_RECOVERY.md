@@ -18,6 +18,15 @@ task-oriented:
   all ready comics** selects the safe canonical set without requiring the user
   to visit every deferred group. Detailed status tables remain available under
   **Review details**.
+- Dangerous archive content stays in **Cannot import**. **Acknowledge** excludes
+  every dangerous file shown for that series from the import, records the
+  decision, and leaves the source files and safe siblings unchanged.
+- Unsupported extensions stay in **Cannot import** with the detected extension,
+  the supported comic types, and **Recheck** and **Skip** actions. Recheck may
+  adopt one exact same-folder, same-stem converted file after normal source and
+  safety validation; it never chooses between multiple replacements.
+- Unclassified safety failures appear in **Fix source** with **Recheck** and
+  **Skip** because Pullbox has not established that the file is dangerous.
 - Trusted, complete Mylar or ComicInfo Story Arc evidence may create a logical
   Story Arc automatically. Inferred or incomplete arc evidence is retained for
   later review and never blocks canonical comic import.
@@ -63,15 +72,19 @@ an ordinary numbered issue. Keep-in-place reference-root checks still apply
 independently of discovery.
 
 Steps 2 and 3 report available file records separately from missing references.
-Missing references remain visible in review (in Info when no other issue needs
-attention), but are not counted as available comics, archive safety decisions,
-or unsettled file-review work. Durable
+Every unresolved missing reference remains visible in the dedicated Missing
+references lane, including when the same series has ready files in another lane.
+It counts as an unsettled review decision until the user pairs it to a verified
+replacement, restores and rechecks its recorded path, or explicitly skips the
+reference. It is not counted as an available comic or archive safety decision. Durable
 `scan_total_files` and `files_total` remain record totals for compatibility.
 `files_present` and `files_missing_references` expose the split. Mylar batch
 diagnostics also record the handling mode and reconciled-reference count.
 
-A renamed source can replace a stale Mylar path only when one same-folder file
-has an independent, agreeing ComicInfo issue ID. Reconciliation checks the
+A renamed source can replace a stale Mylar path only when a same-folder file has
+an independent, agreeing ComicInfo issue ID. When more than one proven candidate
+exists, the user chooses the replacement and the background worker verifies that
+exact selection before pairing it. Reconciliation checks the
 issue publication year, not ComicInfo.Volume's series start year. A Mylar
 ordinary-issue row may represent a collected volume only when its saved
 filename explicitly identifies a volume. Conflicting IDs, numbers, publication
@@ -374,8 +387,7 @@ expired preview or any action whose row set changed after preview. Bounded,
 recoverable actions use a normal confirmation; typed confirmation remains
 reserved for permanent deletion. Mutations run in bounded database pages,
 recompute import counters, and create import and security audit records.
-Dangerous, unknown, and genuinely ambiguous outcomes remain manual-review
-items.
+Dangerous and genuinely ambiguous outcomes remain manual-review items.
 
 Once cleanup is complete, **Archive results** hides the finished job from the
 current history view without deleting its rows, logs, decisions, or rollback

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import func, or_, select
 
+from pullbox.core.file_safety import DEFAULT_ALLOWED_EXTENSIONS
 from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
@@ -26,7 +27,13 @@ from pullbox.services.import_story_arc_review import (
 )
 from pullbox.services.library_root_management import list_library_roots
 from pullbox.ui.import_conflict_review import _load_import_conflict_review_context
-from pullbox.ui.import_review_lanes import LANES, REASONS, load_review_rows
+from pullbox.ui.import_review_lanes import (
+    LANES,
+    REASONS,
+    load_review_rows,
+    review_row_decision_files,
+    review_row_in_lane,
+)
 from pullbox.ui.import_review_summary import (
     load_import_review_summary,
     load_import_safety_failure_summary,
@@ -308,6 +315,34 @@ def _build_safety_file_display_name_by_file_id(
     return result
 
 
+def _build_safety_file_extension_by_file_id(
+    files_by_series_id: Mapping[int, list[ImportedFile]],
+) -> dict[int, str]:
+    """Return a bounded display-only extension without exposing source paths."""
+    result: dict[int, str] = {}
+    for files in files_by_series_id.values():
+        for imp_file in files:
+            normalized = str(imp_file.file_name).replace("\\", "/").rstrip("/")
+            leaf = normalized.rsplit("/", maxsplit=1)[-1]
+            raw_extension = leaf.rsplit(".", maxsplit=1)[-1] if "." in leaf else ""
+            safe_extension = "".join(
+                character
+                for character in raw_extension
+                if character.isascii() and (character.isalnum() or character in "-_")
+            )
+            result[imp_file.id] = f".{safe_extension.lower()}" if safe_extension else "no extension"
+    return result
+
+
+def _supported_import_file_types_label() -> str:
+    preferred_order = (".cbz", ".cbr", ".cb7", ".cbt", ".pdf", ".epub")
+    extensions = [item for item in preferred_order if item in DEFAULT_ALLOWED_EXTENSIONS]
+    extensions.extend(sorted(DEFAULT_ALLOWED_EXTENSIONS.difference(extensions)))
+    if len(extensions) < 2:
+        return extensions[0] if extensions else "a configured comic file type"
+    return f"{', '.join(extensions[:-1])}, and {extensions[-1]}"
+
+
 async def _load_inline_conflicts(
     session: AsyncSession, job_id: int, series_ids: list[int]
 ) -> dict[int, list[dict[str, object]]]:
@@ -382,7 +417,9 @@ async def load_import_review_context(
     job_id = int(job.id)
     current_view, requested_series_status = _resolve_review_view(status)
     review_rows = await load_review_rows(session, job_id)
-    lane_counts = {lane: sum(row.lane == lane for row in review_rows.values()) for lane in LANES}
+    lane_counts = {
+        lane: sum(review_row_in_lane(row, lane) for row in review_rows.values()) for lane in LANES
+    }
     if status in LANES or not status:
         current_view = status or next(
             (lane for lane, count in lane_counts.items() if count), "ready"
@@ -391,7 +428,10 @@ async def load_import_review_context(
     active_lane = current_view if current_view in LANES else ""
     active_reason = reason if reason in REASONS else None
     reason_counts = {
-        key: sum(row.lane == active_lane and key in row.reasons for row in review_rows.values())
+        key: sum(
+            review_row_in_lane(row, active_lane) and key in row.reasons
+            for row in review_rows.values()
+        )
         for key in REASONS
     }
     page_size = 25
@@ -487,7 +527,7 @@ async def load_import_review_context(
             matching_ids = [
                 series_id
                 for series_id in ordered_ids
-                if review_rows[series_id].lane == active_lane
+                if review_row_in_lane(review_rows[series_id], active_lane)
                 and (not active_reason or active_reason in review_rows[series_id].reasons)
             ]
             total = len(matching_ids)
@@ -595,9 +635,7 @@ async def load_import_review_context(
         "job": job,
         "one_page_review": one_page_review,
         "review_rows": review_rows,
-        "review_open_series": sum(
-            row.decision_files > 0 or row.updating for row in review_rows.values()
-        ),
+        "review_open_series": sum(row.decision_files > 0 for row in review_rows.values()),
         "inline_conflicts": await _load_inline_conflicts(
             session, job_id, [item.id for item in series_items]
         ),
@@ -606,7 +644,7 @@ async def load_import_review_context(
         "review_reasons": REASONS,
         "lane_counts": lane_counts,
         "lane_file_counts": {
-            lane: sum(row.decision_files for row in review_rows.values() if row.lane == lane)
+            lane: sum(review_row_decision_files(row, lane) for row in review_rows.values())
             for lane in LANES
         },
         "reason_counts": reason_counts,
@@ -652,6 +690,10 @@ async def load_import_review_context(
         "safety_file_display_name_by_file_id": _build_safety_file_display_name_by_file_id(
             safety_blocked_files_by_series_id
         ),
+        "safety_file_extension_by_file_id": _build_safety_file_extension_by_file_id(
+            safety_blocked_files_by_series_id
+        ),
+        "supported_import_file_types_label": _supported_import_file_types_label(),
         "safety_rematch_pending": safety_rematch_pending,
         "matched_file_targets_by_series_id": matched_file_targets_by_series_id,
         "review_file_groups_by_series_id": review_file_groups_by_series_id,

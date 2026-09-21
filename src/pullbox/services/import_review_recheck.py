@@ -13,6 +13,7 @@ from sqlalchemy import and_, exists, func, or_, select
 
 from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.core.file_safety import (
+    DEFAULT_ALLOWED_EXTENSIONS,
     FileSafetyError,
     get_archive_size_limit_bytes,
     is_dangerous_file_blocking_enabled,
@@ -194,11 +195,14 @@ def inspect_review_source(
     max_archive_size: int,
     accept_replaced_files: bool,
     sidecars: dict[str, dict[str, Any]],
+    allowed_extensions: frozenset[str] | set[str] = DEFAULT_ALLOWED_EXTENSIONS,
 ) -> tuple[SourceMetadata, dict[str, Any], dict[str, int | str]]:
     """Inspect only explicitly permitted paths; no providers or page extraction."""
     current_signature: dict[str, int | str] = {}
     fresh = base
     try:
+        if path.suffix.lower() not in allowed_extensions:
+            raise ReferencedFileValidationError("unsupported_file_type", "Unsupported file type")
         if is_invalid_path_text(str(path)) or ".." in path.parts:
             raise ReferencedFileValidationError("source_path_unsafe", "Unsafe source path")
         lexical = path.expanduser().absolute()

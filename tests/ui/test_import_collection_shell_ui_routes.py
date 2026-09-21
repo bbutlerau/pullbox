@@ -856,6 +856,16 @@ class TestImportShellRouteContracts:
         assert "data-import-review-import-button" in template
         assert 'data-testid="import-review-subtabs"' in template
 
+    async def test_import_review_hero_accents_only_the_open_file_count(self) -> None:
+        template = Path("src/pullbox/ui/templates/partials/import_review_overview.html").read_text()
+
+        assert (
+            '<span class="text-pb-warning">&middot; '
+            "{{ review_summary.review_files_open }} "
+            "{{ 'file' if review_summary.review_files_open == 1 else 'files' }}</span> "
+            "{{ 'needs' if review_summary.review_files_open == 1 else 'need' }} you"
+        ) in template
+
     async def test_import_review_row_expansion_is_stable_and_action_scoped(self) -> None:
         script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
         template = Path(
@@ -3409,7 +3419,7 @@ class TestImportShellRouteContracts:
         assert 'data-import-review-selectable="7"' in response.text
         assert 'aria-label="Select Review Series 7 for import"' in response.text
 
-    async def test_import_review_non_importable_status_rows_are_not_selectable(
+    async def test_import_review_terminal_status_rows_leave_the_active_lanes(
         self,
         authenticated_client,
         sec_db,
@@ -3427,7 +3437,7 @@ class TestImportShellRouteContracts:
         response = await authenticated_client.get(f"/import/{job_id}/review-partial?status=info")
 
         assert response.status_code == 200
-        assert "Review Series 6" in response.text
+        assert "Review Series 6" not in response.text
         assert 'data-import-review-selectable="6"' not in response.text
         assert 'aria-label="Select Review Series 6 for import"' not in response.text
 

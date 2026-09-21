@@ -2714,6 +2714,7 @@ function importCvSearchModalData(config) {
 function importReviewFileActionData(config) {
   var state = importCvSearchModalData(config);
   state.issueId = "";
+  state.candidateId = config.candidateId == null ? "" : String(config.candidateId);
   state.error = "";
   state.submit = async function (form) {
     if (this.selecting) return;

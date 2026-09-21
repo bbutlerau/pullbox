@@ -28,7 +28,7 @@ def test_partial_series_keeps_ready_files_while_needing_issue_decisions() -> Non
         ("outside_approved_root", "fix_source", "outside_approved_root"),
         ("dangerous_path_or_payload", "blocked", "dangerous_path_or_payload"),
         ("unsupported_file_type", "blocked", "unsupported_file_type"),
-        ("unknown", "blocked", "unknown"),
+        ("unknown", "fix_source", "unknown"),
     ],
 )
 def test_safety_reasons_have_honest_lanes(category: str, lane: str, reason: str) -> None:
@@ -72,10 +72,10 @@ def test_approved_file_without_pending_worker_still_allows_series_matching() -> 
     assert row.attention_files == 1
 
 
-def test_already_owned_and_skipped_are_information_without_decisions() -> None:
+def test_already_owned_and_skipped_leave_the_active_review_lanes() -> None:
     for status in ("duplicate", "skipped", "imported"):
         row = classify_review_row(ReviewFacts(status=status, known_target=True))
-        assert row.lane == "info"
+        assert row.lane == "handled"
         assert row.attention_files == 0
 
 
@@ -176,3 +176,64 @@ async def test_workspace_lanes_partition_rows_without_changing_saved_recovery(db
     assert (
         await db_session.scalar(select(ImportedFile).where(ImportedFile.id == stale.id))
     ).diagnostics == before
+
+
+@pytest.mark.asyncio
+async def test_missing_reference_lane_also_includes_series_with_ready_files(db_session) -> None:  # type: ignore[no-untyped-def]
+    from pullbox.models.import_job import (
+        ImportedFile,
+        ImportedFileStatus,
+        ImportedSeries,
+        ImportJob,
+        ImportJobStatus,
+        ImportSeriesStatus,
+        ImportSourceType,
+    )
+    from pullbox.ui.import_review_context import load_import_review_context
+
+    job = ImportJob(
+        source_path="/fixtures", source_type=ImportSourceType.MYLAR3, status=ImportJobStatus.REVIEW
+    )
+    series = ImportedSeries(
+        import_job=job,
+        raw_series_name="Ready with stale reference",
+        status=ImportSeriesStatus.MATCHED,
+        cv_id=123,
+        files_total=2,
+        file_count=2,
+        files_matched=1,
+    )
+    db_session.add_all([job, series])
+    await db_session.flush()
+    db_session.add_all(
+        [
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=series.id,
+                file_path="/fixtures/actual.cbz",
+                file_name="actual.cbz",
+                file_format="cbz",
+                status=ImportedFileStatus.MATCHED,
+            ),
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=series.id,
+                file_path="/fixtures/recorded.cbz",
+                file_name="recorded.cbz",
+                file_format="cbz",
+                status=ImportedFileStatus.SAFETY_BLOCKED,
+                diagnostics={"safety_block": {"category": "source_missing"}},
+            ),
+        ]
+    )
+    await db_session.flush()
+
+    ready = await load_import_review_context(db_session, job, status="ready", page=1, sort=None)
+    missing = await load_import_review_context(db_session, job, status="info", page=1, sort=None)
+
+    assert [item.id for item in ready["series_items"]] == [series.id]
+    assert [item.id for item in missing["series_items"]] == [series.id]
+    assert ready["lane_counts"]["ready"] == 1
+    assert ready["lane_counts"]["info"] == 1
+    assert ready["lane_file_counts"]["ready"] == 0
+    assert ready["lane_file_counts"]["info"] == 1

@@ -101,6 +101,15 @@ def test_identity_disagreement_is_not_reported_as_physical_source_change() -> No
             False,
         ),
         (
+            "Archive contains dangerous path or link",
+            None,
+            None,
+            ImportSafetyCategory.DANGEROUS_PATH_OR_PAYLOAD,
+            "dangerous_archive_path",
+            False,
+            False,
+        ),
+        (
             "File resolves outside enabled library root: /mnt/private/file.cbz",
             None,
             "source_outside_root",
@@ -115,7 +124,7 @@ def test_identity_disagreement_is_not_reported_as_physical_source_change() -> No
             None,
             ImportSafetyCategory.UNSUPPORTED_FILE_TYPE,
             "unsupported_file_type",
-            False,
+            True,
             False,
         ),
         (

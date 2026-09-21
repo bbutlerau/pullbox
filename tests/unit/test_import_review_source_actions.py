@@ -54,6 +54,77 @@ async def test_recheck_saves_intent_without_approving_or_skipping(db_session: As
     assert series.diagnostics["rematch_pending"] is True
 
 
+@pytest.mark.parametrize("category", ["unsupported_file_type", "unknown"])
+async def test_recheck_accepts_recoverable_safety_categories(
+    db_session: AsyncSession, category: str
+):
+    job, series, file = await make_source(db_session, category=category)
+
+    await queue_source_action(db_session, job.id, file.id)
+
+    assert file.diagnostics["review_source_action"]["state"] == "pending"
+    assert file.status is ImportedFileStatus.SAFETY_BLOCKED
+    assert series.diagnostics["rematch_pending"] is True
+
+
+async def test_unsupported_recheck_keeps_an_unchanged_extension_blocked(
+    db_session, async_engine, tmp_path
+):
+    job, _, file = await make_source(
+        db_session, root=str(tmp_path), category="unsupported_file_type"
+    )
+    unsupported = tmp_path / "Example 01.rar"
+    unsupported.write_bytes(b"unsupported source")
+    file.file_path = str(unsupported)
+    file.file_name = unsupported.name
+    file.file_format = "rar"
+    await queue_source_action(db_session, job.id, file.id)
+    await db_session.commit()
+
+    await process_source_action(
+        async_sessionmaker(async_engine, expire_on_commit=False), job.id, file.id
+    )
+
+    await db_session.refresh(file)
+    assert file.status is ImportedFileStatus.SAFETY_BLOCKED
+    assert file.diagnostics["safety_block"]["category"] == "unsupported_file_type"
+    assert file.file_path == str(unsupported)
+
+
+async def test_unsupported_recheck_adopts_one_exact_same_stem_supported_replacement(
+    db_session, async_engine, tmp_path
+):
+    job, series, file = await make_source(
+        db_session, root=str(tmp_path), category="unsupported_file_type"
+    )
+    unsupported = tmp_path / "Example 01.rar"
+    replacement = tmp_path / "Example 01.cbz"
+    unsupported.write_bytes(b"unsupported source")
+    with zipfile.ZipFile(replacement, "w") as archive:
+        archive.writestr("01.jpg", b"first")
+        archive.writestr("02.jpg", b"second")
+    file.file_path = str(unsupported)
+    file.file_name = unsupported.name
+    file.file_format = "rar"
+    await queue_source_action(db_session, job.id, file.id)
+    await db_session.commit()
+
+    result = await process_source_action(
+        async_sessionmaker(async_engine, expire_on_commit=False), job.id, file.id
+    )
+
+    assert result == series.id
+    await db_session.refresh(file)
+    assert file.status is ImportedFileStatus.SAFETY_APPROVED
+    assert file.file_path == str(replacement)
+    assert file.file_name == replacement.name
+    assert file.file_format == "cbz"
+    assert file.diagnostics["review_source_replacement"] == {
+        "previous_file_name": unsupported.name,
+        "replacement_file_name": replacement.name,
+    }
+
+
 async def test_recheck_cannot_override_dangerous_content(db_session: AsyncSession):
     job, _, file = await make_source(db_session, category="dangerous_path_or_payload")
     with pytest.raises(ValidationError):
