@@ -88,7 +88,9 @@ async def test_existing_conflict_link_uses_immediate_choices(authenticated_clien
     assert "Save conflict choices" not in response.text
     assert "pendingResolutions" not in response.text
     assert "It's a different comic" in response.text
-    assert "Across this import: 2 issue groups involving 4 files in 2 series." in response.text
+    assert "Why?" not in response.text
+    assert "Across this import:" not in response.text
+    assert 'data-testid="import-review-conflict-counts"' not in response.text
 
 
 async def test_duplicate_files_remain_individually_selectable(authenticated_client, sec_db):
@@ -112,7 +114,7 @@ async def test_legacy_safety_reason_gets_the_correct_lane(authenticated_client, 
     )
     assert "Review Series 1" in response.text
     assert 'data-testid="import-review-allow-safety-file"' in response.text
-    assert '<input type="hidden" name="reason" value="decompression_size_limit">' in response.text
+    assert "/safety/allow-once?status=decide&reason=decompression_size_limit" in response.text
 
 
 async def test_legacy_conflicts_do_not_suggest_keeping_different_comics(

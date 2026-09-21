@@ -186,9 +186,19 @@ async def test_v2_header_rail_and_problem_table(authenticated_client, sec_db):
     assert re.search(r'data-testid="import-review-progress"[^>]*role="progressbar"', html)
     workspace = html.split('id="import-review-workspace"', 1)[1]
     assert re.search(r'id="import-review-lanes"[^>]*role="tablist"', workspace)
+    lane_rail = workspace.split('id="import-review-lanes"', 1)[1].split("</nav>", 1)[0]
+    lane_count_spans = re.findall(
+        r'<span class="([^"]*)">([^<]*)</span>',
+        lane_rail,
+    )
+    assert lane_count_spans
+    for classes, count_text in lane_count_spans:
+        assert classes == "font-mono text-xs text-current"
+        assert re.fullmatch(r"\(\d+\)", count_text.strip())
     assert "border-l border-pb-border ml-2 pl-4" not in workspace
     assert 'data-testid="import-review-lane-description"' in workspace
     assert 'data-testid="import-review-reason-all"' in workspace
+    assert "Why?" not in workspace
     assert _headers(workspace)[:5] == [
         "Series",
         "Files",

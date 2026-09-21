@@ -5,12 +5,12 @@
       data-testid="import-review-lane-{{ lane }}" data-import-review-nav-url="/import/{{ job.id }}/review-partial?status={{ lane }}" data-import-review-view="{{ lane }}"
       hx-get="/import/{{ job.id }}/review-partial?status={{ lane }}" hx-target="#import-step-review-shell" hx-swap="morph:outerHTML"
       class="downloads-tab-btn {{ 'is-active' if active_review_view == lane }}">
-      {{ label }} <span class="font-mono text-xs {{ 'text-current' if active_review_view == lane else 'text-pb-success' if lane == 'ready' and lane_counts[lane] else 'text-pb-error' if lane == 'blocked' else 'text-pb-warning' if lane_counts[lane] and lane != 'info' else 'text-pb-text-dim' }}">{{ lane_counts[lane] }}</span>
+      {{ label }} <span class="font-mono text-xs text-current">({{ lane_counts[lane] }})</span>
     </button>
     {% endfor %}
     {% if review_summary.story_arcs_total %}
     <button type="button" id="import-review-tab-story_arcs" role="tab" tabindex="{{ '0' if active_review_view == 'story_arcs' else '-1' }}" aria-controls="import-review-lane-panel" aria-selected="{{ 'true' if active_review_view == 'story_arcs' else 'false' }}"
-      data-testid="import-review-tab-story-arcs" hx-get="/import/{{ job.id }}/review-partial?status=story_arcs" hx-target="#import-step-review-shell" hx-swap="morph:outerHTML" class="downloads-tab-btn {{ 'is-active' if active_review_view == 'story_arcs' }}">Story Arcs <span class="font-mono text-xs text-pb-text-dim">{{ review_summary.story_arcs_total }}</span></button>
+      data-testid="import-review-tab-story-arcs" hx-get="/import/{{ job.id }}/review-partial?status=story_arcs" hx-target="#import-step-review-shell" hx-swap="morph:outerHTML" class="downloads-tab-btn {{ 'is-active' if active_review_view == 'story_arcs' }}">Story Arcs <span class="font-mono text-xs text-current">({{ review_summary.story_arcs_total }})</span></button>
     {% endif %}
   </nav>
 </div>
@@ -25,9 +25,6 @@
       <button type="button" data-testid="import-review-reason-{{ key }}" aria-pressed="{{ 'true' if active_reason == key else 'false' }}" class="{{ 'text-pb-interactive underline underline-offset-4' if active_reason == key else 'text-pb-text-sec hover:underline' }}" hx-get="/import/{{ job.id }}/review-partial?status={{ active_review_view }}&reason={{ key }}&sort={{ sort }}" hx-target="#import-step-review-shell" hx-swap="morph:outerHTML">{{ filter_labels.get(key, review_reasons[key][0]) }} &middot; {{ count }} series</button>
       {% endfor %}
     </div>
-    {% endif %}
-    {% if active_review_view in ('confirm', 'decide', 'conflict_rows') and review_summary.file_conflict_groups %}
-    <p class="text-xs text-pb-text-dim" data-testid="import-review-conflict-counts">Across this import: {{ review_summary.file_conflict_groups }} issue {{ 'group' if review_summary.file_conflict_groups == 1 else 'groups' }} involving {{ review_summary.files_conflict }} files in {{ review_summary.series_file_conflicts }} series.</p>
     {% endif %}
   </div>
   {% if active_review_view == 'ready' %}

@@ -2110,8 +2110,8 @@ class TestImportShellRouteContracts:
             r'data-testid="import-review-lane-confirm"[\s\S]*?</button>', response.text
         )
         assert conflict_filter is not None
-        assert ">2</span>" in conflict_filter.group(0)
-        assert ">4</span>" not in conflict_filter.group(0)
+        assert ">(2)</span>" in conflict_filter.group(0)
+        assert ">(4)</span>" not in conflict_filter.group(0)
 
     async def test_import_review_conflicts_view_expands_file_keep_choices_by_default(
         self,
@@ -2891,7 +2891,7 @@ class TestImportShellRouteContracts:
         assert 'data-testid="import-review-reconcile-action"' not in response.text
         assert "Candidate Series 11" in response.text
 
-    async def test_import_review_safety_blocked_view_shows_allow_and_skip_actions(
+    async def test_import_review_large_file_filter_shows_direct_actions_without_summary_card(
         self,
         authenticated_client,
         sec_db,
@@ -2927,24 +2927,33 @@ class TestImportShellRouteContracts:
             await session.commit()
 
         response = await authenticated_client.get(
-            f"/import/{job_id}/review-partial?status=safety_blocked"
+            f"/import/{job_id}/review-partial?status=decide&reason=decompression_size_limit"
         )
 
         assert response.status_code == 200
         assert "Large file needs approval" in response.text
         assert "Oversized Omnibus.cbz" in response.text
-        assert 'data-testid="import-review-safety-category-summary"' in response.text
+        assert 'data-testid="import-review-safety-category-summary"' not in response.text
         assert 'data-testid="import-review-safety-category-details"' not in response.text
-        assert "Decompression-size limit" in response.text
-        assert "Code: archive_decompressed_size_limit" in response.text
-        assert "Retry alone will not help" in response.text
-        assert "A one-time exception is available for eligible files" in response.text
+        assert "Decompression-size limit" not in response.text
+        assert "Code: archive_decompressed_size_limit" not in response.text
+        assert "Inspection details" not in response.text
+        assert "Retry alone will not help" not in response.text
+        assert "A one-time exception is available for eligible files" not in response.text
         assert "/tmp/review-1/oversized.cbz" not in response.text
-        assert 'data-testid="import-review-allow-safety-file"' in response.text
-        assert 'data-testid="import-review-skip-safety-file"' in response.text
+        assert response.text.count('data-testid="import-review-allow-safety-file"') == 1
+        assert response.text.count('data-testid="import-review-skip-safety-file"') == 1
+        assert ">Allow</button>" in response.text
+        assert ">Skip</button>" in response.text
+        assert ">Allow once</button>" not in response.text
+        assert ">Review file</button>" not in response.text
+        assert 'data-testid="import-review-primary-action"' not in response.text
+        assert 'data-testid="import-review-more-actions"' not in response.text
+        assert 'data-testid="import-review-expand"' in response.text
+        assert 'data-testid="import-review-safety-file-size">4.0 GB</p>' in response.text
         assert f'hx-post="/import/{job_id}/files/' in response.text
-        assert "/safety/allow-once?status=safety_blocked" in response.text
-        assert "/safety/skip?status=safety_blocked" in response.text
+        assert "/safety/allow-once?status=decide&reason=decompression_size_limit" in response.text
+        assert "/safety/skip?status=decide&reason=decompression_size_limit" in response.text
         assert 'hx-target="#import-step-review-shell"' in response.text
 
     async def test_import_review_non_overrideable_safety_block_hides_allow_action(

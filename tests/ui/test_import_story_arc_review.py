@@ -78,6 +78,10 @@ async def test_story_arc_review_partial_is_paginated_and_keeps_arc_counts_separa
 
     assert response.status_code == 200
     assert 'data-testid="import-review-tab-story-arcs"' in response.text
+    story_arc_tab = response.text.split(
+        'data-testid="import-review-tab-story-arcs"', 1
+    )[1].split("</button>", 1)[0]
+    assert '<span class="font-mono text-xs text-current">(1)</span>' in story_arc_tab
     assert 'data-testid="import-review-story-arcs"' in response.text
     assert "Story arcs detected for this import" in response.text
     assert "Knightfall" in response.text

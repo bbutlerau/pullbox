@@ -60,6 +60,7 @@
     <div class="flex flex-wrap items-start justify-between gap-3">
       <div class="min-w-0 flex-1">
         <h4 class="break-words text-sm font-medium text-pb-text">{{ safety_file_display_name_by_file_id.get(file.id, 'File') }}</h4>
+        {% if block.get('category') == 'decompression_size_limit' %}<p class="mt-1 text-xs text-pb-text-dim" data-testid="import-review-safety-file-size">{{ file.file_size|filesize }}</p>{% endif %}
         {% if block.get('category') == 'unsupported_file_type' %}
         <p class="mt-1 text-xs leading-5 text-pb-text-sec">The {{ safety_file_extension_by_file_id.get(file.id, 'current') }} file type is not supported. Pullbox can import {{ supported_import_file_types_label }} files. Convert or replace this file with a supported type, then recheck it.</p>
         {% elif block.get('category') == 'unknown' %}
@@ -67,11 +68,11 @@
         {% else %}
         <p class="mt-1 text-xs leading-5 text-pb-text-sec">{{ block.get('reason', 'This file needs another inspection before importing.') }}</p>
         {% endif %}
-        {% if block.get('code') and block.get('category') not in ('dangerous_path_or_payload', 'unsupported_file_type') %}<details class="mt-2 text-xs text-pb-text-dim"><summary class="cursor-pointer">Inspection details</summary><p>Code: {{ block.code }}</p></details>{% endif %}
+        {% if block.get('code') and block.get('category') not in ('dangerous_path_or_payload', 'unsupported_file_type', 'decompression_size_limit') %}<details class="mt-2 text-xs text-pb-text-dim"><summary class="cursor-pointer">Inspection details</summary><p>Code: {{ block.code }}</p></details>{% endif %}
         {% if block.get('category') == 'source_missing' %}<p class="mt-1 text-xs text-pb-text-dim">Pair a verified file, restore the recorded path and recheck it, or skip this stale reference.</p>{% endif %}
         {% if block.get('category') == 'outside_approved_root' %}<button type="button" class="btn-ghost btn-sm mt-2" @click="window.dispatchEvent(new CustomEvent('wizard:advance', {detail: {step: 1}}))">Review import setup</button>{% endif %}
       </div>
-      <div class="flex flex-wrap gap-2">
+      {% if block.get('category') != 'decompression_size_limit' or file.status.value != 'safety_blocked' %}<div class="flex flex-wrap gap-2">
         {% if source_work.get('state') in ('pending', 'matching') %}
           <div class="w-48 space-y-2" role="status"><span class="text-xs text-pb-text-sec">Verifying source</span><div class="app-progress-track" role="progressbar" aria-label="Verifying source"><div class="app-progress-fill is-indeterminate" style="width:35%"></div></div></div>
         {% elif file.status.value not in ('safety_blocked', 'safety_approved') %}
@@ -92,7 +93,7 @@
             hx-post="/import/{{ job.id }}/files/{{ file.id }}/safety/skip?status={{ active_review_view }}{% if active_reason %}&reason={{ active_reason }}{% endif %}&sort={{ sort }}&page={{ page }}"
             hx-target="#import-step-review-shell" hx-swap="morph:outerHTML">{{ 'Skip reference' if block.get('category') == 'source_missing' else 'Skip' }}</button>{% endif %}
         {% endif %}
-      </div>
+      </div>{% endif %}
     </div>
     {% if source_work.get('state') == 'failed' %}<p class="mt-2 text-xs text-pb-warning">{{ source_work.get('error') }}</p>{% endif %}
   </section>
