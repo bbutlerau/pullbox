@@ -791,7 +791,8 @@ async def test_allow_safety_blocked_file_once_keeps_file_in_safety_review_until_
     )
 
     assert updated_file.status == ImportedFileStatus.SAFETY_APPROVED
-    assert updated_file.include_in_import is False
+    assert updated_file.include_in_import is True
+    assert updated_file.diagnostics["review_selection"] is True
     assert updated_file.error_message is None
     assert imported.selected_for_import is False
     assert updated_file.diagnostics["safety_exception"]["allowed_once"] is True

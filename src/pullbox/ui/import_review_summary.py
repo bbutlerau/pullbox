@@ -314,7 +314,7 @@ async def load_import_review_summary(
         "selected_items_total": _object_to_int(selection_state["selected_item_count"]),
         "selected_files_total": matched_selected_file_count + duplicate_selected_count,
         "importable_items_total": _object_to_int(selection_state["importable_item_count"]),
-        "ready_to_import_total": _object_to_int(selection_state["importable_item_count"]),
+        "ready_to_import_total": _object_to_int(selection_state["selected_item_count"]),
         "needs_attention_total": needs_attention_series_total,
         "needs_attention_files_total": needs_attention_files_total,
         "resolved_file_conflict_groups": resolved_file_conflict_groups,

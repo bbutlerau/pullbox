@@ -83,9 +83,9 @@ def apply_safety_allow_once_to_file(
     imp_file.status = (
         ImportedFileStatus.CONFIRMED if retry_import else ImportedFileStatus.SAFETY_APPROVED
     )
-    imp_file.include_in_import = bool(retry_import)
     imp_file.error_message = None
     imp_file.diagnostics = diagnostics
+    set_review_file_selection(imp_file, True)
 
 
 async def resolve_conflict(

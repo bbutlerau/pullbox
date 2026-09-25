@@ -5,7 +5,7 @@
               hx-target="#import-step-review-shell" hx-swap="morph:outerHTML" hx-disabled-elt="find button">
               <input type="hidden" name="token" value="{{ one_page[action ~ '_token'] }}">
               <button type="submit" class="{{ 'btn-primary' if action == 'allow' else 'btn-ghost' }} btn-sm" {% if row.updating %}disabled{% endif %}>
-                {{ 'Allow All' if action == 'allow' else 'Skip All' }}
+                {{ ('Allow' if action == 'allow' else 'Skip') if one_page.count == 1 else ('Allow All (' ~ one_page.count ~ ')' if action == 'allow' else 'Skip All (' ~ one_page.count ~ ')') }}
               </button>
             </form>
             {% endfor %}

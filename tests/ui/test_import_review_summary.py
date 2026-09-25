@@ -18,6 +18,41 @@ from pullbox.models.import_job import (
 )
 
 
+async def test_ready_headline_counts_selected_ready_series(db_session):
+    from pullbox.ui.import_review_summary import load_import_review_summary
+
+    job = ImportJob(
+        source_path="/fixture",
+        source_type=ImportSourceType.FILESYSTEM,
+        status=ImportJobStatus.REVIEW,
+    )
+    series = ImportedSeries(
+        import_job=job,
+        raw_series_name="Ready but excluded",
+        status=ImportSeriesStatus.MATCHED,
+        files_total=1,
+        files_matched=1,
+        selected_for_import=False,
+    )
+    file = ImportedFile(
+        import_job=job,
+        import_series=series,
+        file_name="Ready but excluded 001.cbz",
+        file_path="/fixture/Ready but excluded 001.cbz",
+        file_format="cbz",
+        status=ImportedFileStatus.MATCHED,
+        diagnostics={"review_selection": False},
+    )
+    db_session.add_all([job, series, file])
+    await db_session.flush()
+
+    summary = await load_import_review_summary(db_session, job)
+
+    assert summary["importable_items_total"] == 1
+    assert summary["selected_items_total"] == 0
+    assert summary["ready_to_import_total"] == summary["selected_items_total"]
+
+
 @pytest.mark.parametrize("job_status", [ImportJobStatus.REVIEW, ImportJobStatus.SCANNING])
 @pytest.mark.parametrize("missing_key", ["code", "category", "kind", "reason"])
 async def test_missing_references_are_unfinished_decisions_but_not_available_files(

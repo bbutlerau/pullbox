@@ -83,6 +83,33 @@ async def test_reassignment_moves_only_staged_identity_and_preserves_evidence(
     assert sibling.status is ImportedFileStatus.CONFLICT
 
 
+async def test_reassignment_selects_an_existing_ready_target(db_session: AsyncSession):
+    job, _parent, files, metadata = await setup_conflict(db_session)
+    target = ImportedSeries(
+        import_job_id=job.id,
+        raw_series_name="Second",
+        cv_id=20,
+        status=ImportSeriesStatus.MATCHED,
+        selected_for_import=False,
+    )
+    db_session.add(target)
+    await db_session.flush()
+
+    chosen = await assign_review_file(
+        db_session,
+        job.id,
+        files[0].id,
+        cv_id=20,
+        issue_cv_id=201,
+        metadata_service=metadata,
+    )
+
+    assert chosen.import_series_id == target.id
+    assert chosen.status is ImportedFileStatus.MATCHED
+    assert chosen.include_in_import is True
+    assert target.selected_for_import is True
+
+
 async def test_reassignment_rejects_issue_outside_chosen_series(db_session: AsyncSession):
     job, parent, files, metadata = await setup_conflict(db_session)
     with pytest.raises(ValidationError, match="series"):

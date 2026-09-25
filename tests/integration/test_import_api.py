@@ -1915,7 +1915,8 @@ async def test_mylar_and_folder_share_sidecar_and_content_review(
         await service.allow_safety_blocked_file_once(db_session, job.id, file.id)
         await service.rematch_imported_series_files(db_session, job.id, item.id)
         assert file.status is ImportedFileStatus.MATCHED
-        assert not file.include_in_import
+        assert file.include_in_import
+        assert item.selected_for_import is True
         assert not is_resource_safety_exception_allowed(file.diagnostics)
     elif pages == 0:
         with pytest.raises(ValidationError, match="cannot be overridden"):

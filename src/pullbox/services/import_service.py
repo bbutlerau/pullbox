@@ -28,6 +28,7 @@ from pullbox.models.import_job import (
     ImportJob,
     ImportJobAction,
     ImportJobStatus,
+    ImportSeriesStatus,
     ImportSourceType,
 )
 from pullbox.services.import_catalog_hydration import (
@@ -905,6 +906,8 @@ class ImportService(
         diagnostics = dict(refreshed.diagnostics or {})
         if diagnostics.pop("rematch_pending", None) is not None:
             refreshed.diagnostics = diagnostics
+        if refreshed.status is ImportSeriesStatus.MATCHED and refreshed.files_matched > 0:
+            refreshed.selected_for_import = True
         await session.flush()
         await self._log_event(
             session,

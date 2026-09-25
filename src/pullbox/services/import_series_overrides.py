@@ -144,6 +144,11 @@ async def override_cv_id(
         await run_file_matching(session, job, series_ids=[canonical_series_id])
         canonical_item = await session.get(ImportedSeries, canonical_series_id)
         if canonical_item is not None:
+            if (
+                canonical_item.status is ImportSeriesStatus.MATCHED
+                and canonical_item.files_matched > 0
+            ):
+                canonical_item.selected_for_import = True
             return canonical_item
     if job is not None:
         canonical_item = await session.get(ImportedSeries, canonical_series_id)
