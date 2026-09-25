@@ -2855,7 +2855,18 @@ class TestImportShellRouteContracts:
         assert 'hx-get="/import/' in response.text
         assert "/reconcile" in response.text
         assert "Match issues" in response.text
-        assert "Not this series" in response.text
+        assert 'data-testid="import-review-more-actions"' not in response.text
+        known_series_row = response.text.split(f'data-import-review-series-row="{series.id}"', 1)[
+            1
+        ].split("</tbody>", 1)[0]
+        choose_issue = re.search(
+            r'<button[^>]*data-testid="import-review-choose-issue"[^>]*>', known_series_row
+        )
+        assert choose_issue is not None
+        assert 'aria-expanded="false"' in choose_issue.group(0)
+        assert 'aria-controls="import-review-issue-choices-' in choose_issue.group(0)
+        assert "toggleReviewIssueChoices(" in choose_issue.group(0)
+        assert "hx-get=" not in choose_issue.group(0)
 
     async def test_import_review_needs_issue_match_includes_duplicate_rows(
         self,
@@ -2874,7 +2885,45 @@ class TestImportShellRouteContracts:
         assert "Match issues" in response.text
         assert "Already in library" in response.text
 
-    async def test_import_review_needs_series_match_view_keeps_comicvine_search(
+    async def test_import_review_same_comic_rows_omit_more_actions_menu(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from sqlalchemy import select
+
+        from pullbox.models.import_job import ImportedFile, ImportedSeries
+
+        job_id = await _seed_import_review_job(sec_db)
+        async with sec_db() as session:
+            series = await session.get(ImportedSeries, 7)
+            assert series is not None
+            files = list(
+                (
+                    await session.scalars(
+                        select(ImportedFile).where(ImportedFile.import_series_id == series.id)
+                    )
+                ).all()
+            )
+            for file in files:
+                if file.status.value == "conflict":
+                    file.diagnostics = {
+                        **file.diagnostics,
+                        "conflict_class": "series_mismatch",
+                    }
+            await session.commit()
+
+        response = await authenticated_client.get(
+            f"/import/{job_id}/review-partial?status=decide&reason=same_comic_review"
+        )
+
+        assert response.status_code == 200
+        assert "Files disagree about the comic" in response.text
+        row = response.text.split(f'data-import-review-series-row="{series.id}"', 1)[1]
+        row = row.split("</tbody>", 1)[0]
+        assert 'data-testid="import-review-more-actions"' not in row
+
+    async def test_import_review_needs_series_match_keeps_only_primary_search_action(
         self,
         authenticated_client,
         sec_db,
@@ -2887,7 +2936,9 @@ class TestImportShellRouteContracts:
 
         assert response.status_code == 200
         assert "Search ComicVine" in response.text
-        assert 'data-testid="import-review-search-cv-action"' in response.text
+        assert 'data-testid="import-review-primary-action"' in response.text
+        assert 'data-testid="import-review-search-cv-action"' not in response.text
+        assert 'data-testid="import-review-more-actions"' not in response.text
         assert 'data-testid="import-review-reconcile-action"' not in response.text
         assert "Candidate Series 11" in response.text
 

@@ -181,11 +181,19 @@ async def test_inline_issue_choices_are_bounded_and_use_the_same_scoped_assignme
     response = await authenticated_client.get(url)
     assert response.status_code == 200
     assert 'data-testid="import-review-issue-choices"' in response.text
+    assert 'data-testid="import-review-issue-choices-viewport"' in response.text
+    assert 'data-visible-rows="10"' in response.text
+    assert 'tabindex="0"' in response.text
+    assert 'aria-label="Issue choices for Review Series 1 #1.cbz"' in response.text
     assert response.text.count('data-testid="import-review-use-issue"') == 25
     assert 'role="dialog"' not in response.text
+    assert 'data-testid="import-review-issue-pagination"' in response.text
+    assert ">Next</button>" in response.text
     assert "issue_page=2" in response.text
     second = await authenticated_client.get(url + "&issue_page=2")
     assert second.text.count('data-testid="import-review-use-issue"') == 6
+    assert 'data-testid="import-review-issue-pagination"' in second.text
+    assert ">Previous</button>" in second.text
     filtered = await authenticated_client.get(url + "&q=Issue%2031")
     assert filtered.text.count('data-testid="import-review-use-issue"') == 1
     assert 'value="231"' in filtered.text

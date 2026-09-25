@@ -96,7 +96,7 @@
           {% if suggestions.items %}<button type="button" class="btn-primary btn-sm" :disabled="reviewActionPending" @click='keepSuggestedCopies({{ suggestions.items|tojson|forceescape }}, $event.currentTarget)'>Keep suggested</button>{% endif %}
           {{ review_expander(item, row, false, 'Change', not suggestions.items) }}
         {% else %}{{ review_expander(item, row, false, row.action, true) }}{% endif %}
-        {% if not compact_one_page and not dangerous_row and not unsupported_row and not large_file_row %}{% include "partials/import_review_row_menu.html" %}{% endif %}
+        {% if reason_key not in ('needs_series', 'needs_issue', 'same_comic_review') and not compact_one_page and not dangerous_row and not unsupported_row and not large_file_row %}{% include "partials/import_review_row_menu.html" %}{% endif %}
       </div></td><td>{{ review_expander(item, row, compact_one_page) }}</td>
       {% endif %}
     </tr>

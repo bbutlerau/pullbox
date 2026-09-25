@@ -7287,6 +7287,22 @@
     overflow-wrap: anywhere;
     text-overflow: clip;
   }
+  .import-review-issue-choices-viewport {
+    max-height: calc(2.25rem + (10 * 2.5rem));
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
+  .import-review-issue-choices-viewport .downloads-table th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
+  .import-review-issue-choices-viewport .downloads-table td {
+    padding-block: 0.25rem;
+  }
+  .import-review-issue-choices-viewport .downloads-table tbody tr {
+    height: 2.5rem;
+  }
   .dropdown-select-panel-wrap .dropdown-select-option {
     align-items: flex-start;
   }

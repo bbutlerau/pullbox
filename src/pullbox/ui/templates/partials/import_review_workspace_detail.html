@@ -20,10 +20,10 @@
         {% if known_series_target %}<dt class="text-pb-text-dim">ComicVine</dt><dd><a data-testid="import-review-cv-id-link" class="text-pb-interactive hover:underline" href="{{ item.cv_url or ('https://comicvine.gamespot.com/volume/4050-' ~ (item.user_selected_cv_id or item.cv_id) ~ '/') }}" target="_blank" rel="noopener noreferrer">{{ item.cv_title or item.raw_series_name }} &middot; {{ item.user_selected_cv_id or item.cv_id or 'Known library series' }}</a></dd>{% endif %}
         <dt class="text-pb-text-dim">Result</dt><dd class="leading-5">{{ series_diagnostics.get('rejection_reason') or review_reasons[reason_key][0] }}</dd>
       </dl>
-      <div class="flex flex-wrap gap-2">
+      {% if reason_key != 'needs_series' %}<div class="flex flex-wrap gap-2">
         <button type="button" class="btn-ghost btn-sm" data-testid="import-review-search-cv-action" onclick='return openImportCvSearchModal({jobId: {{ job.id }}, seriesId: {{ item.id }}, query: {{ item.raw_series_name|tojson|forceescape }} })'>{{ 'Change ComicVine match' if known_series_target else 'Search ComicVine' }}</button>
         {% if known_series_target %}<button type="button" class="btn-ghost btn-sm" @click="{{ 'unmatchDuplicateSeries' if item.status.value == 'duplicate' else 'unmatchSeriesMatch' }}({{ item.id }})">Not this series</button>{% endif %}
-      </div>
+      </div>{% endif %}
     </section>
     <section class="min-w-0 space-y-3">
       {% if reason_key in ('needs_series', 'series_conflict') %}
@@ -42,8 +42,11 @@
       {% for file in group.rows %}<div class="rounded-lg border border-pb-border bg-pb-card/70 p-3">
         <div class="flex flex-wrap items-center justify-between gap-2"><span class="font-mono text-xs text-pb-text [overflow-wrap:anywhere]">{{ file.file_name }}</span><span class="text-xs text-pb-text-dim">{{ file.file_size|filesize }}</span></div>
         {% if file.status == 'skipped' %}<span class="pill pill-neutral" data-import-review-file-outcome="{{ file.id }}">Skipped</span>{% else %}
-        <div class="mt-2 flex flex-wrap gap-2"><button type="button" class="btn-primary btn-sm" hx-get="{% if item.user_selected_cv_id or item.cv_id %}/import/{{ job.id }}/files/{{ file.id }}/assign?cv_id={{ item.user_selected_cv_id or item.cv_id }}&inline=true{% else %}/import/{{ job.id }}/series/{{ item.id }}/cv-search?file_id={{ file.id }}{% endif %}" hx-target="{{ '#import-review-issue-choices-' ~ file.id if item.user_selected_cv_id or item.cv_id else '#cv-search-modal' }}" hx-swap="{{ 'outerHTML' if item.user_selected_cv_id or item.cv_id else 'innerHTML' }}">Choose issue</button><button type="button" class="btn-ghost btn-sm" data-testid="import-review-reassign-file" hx-get="/import/{{ job.id }}/series/{{ item.id }}/cv-search?file_id={{ file.id }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Different series</button><button type="button" class="btn-ghost btn-sm" :disabled="reviewActionPending" @click="skipReviewFile({{ item.id }}, {{ file.id }}, $event.currentTarget)">Skip this file</button></div>
-        <div id="import-review-issue-choices-{{ file.id }}"></div>{% endif %}
+        {% set issue_choices_url = ('/import/' ~ job.id ~ '/files/' ~ file.id ~ '/assign?cv_id=' ~ known_series_target ~ '&inline=true') if known_series_target else none %}
+        <div class="mt-2 flex flex-wrap gap-2"><button type="button" class="btn-primary btn-sm" data-testid="import-review-choose-issue"
+          {% if issue_choices_url is defined %}aria-expanded="false" aria-controls="import-review-issue-choices-{{ file.id }}" @click='toggleReviewIssueChoices({{ file.id }}, {{ issue_choices_url|tojson|forceescape }}, $event.currentTarget)'
+          {% else %}hx-get="/import/{{ job.id }}/series/{{ item.id }}/cv-search?file_id={{ file.id }}" hx-target="#cv-search-modal" hx-swap="innerHTML"{% endif %}>Choose issue</button><button type="button" class="btn-ghost btn-sm" data-testid="import-review-reassign-file" hx-get="/import/{{ job.id }}/series/{{ item.id }}/cv-search?file_id={{ file.id }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Different series</button><button type="button" class="btn-ghost btn-sm" :disabled="reviewActionPending" @click="skipReviewFile({{ item.id }}, {{ file.id }}, $event.currentTarget)">Skip this file</button></div>
+        {% if issue_choices_url is defined %}<div id="import-review-issue-choices-{{ file.id }}" hidden></div>{% endif %}{% endif %}
       </div>{% endfor %}{% endfor %}
       <button type="button" class="btn-ghost btn-sm" data-testid="import-review-reconcile-action" hx-get="/import/{{ job.id }}/series/{{ item.id }}/reconcile" hx-target="#cv-search-modal" hx-swap="innerHTML">Review all issue decisions</button>
       {% endif %}

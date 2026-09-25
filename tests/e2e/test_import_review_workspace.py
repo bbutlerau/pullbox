@@ -68,6 +68,55 @@ def test_copy_choice_can_open_file_reassignment_without_losing_review(
     assert errors == []
 
 
+def test_choose_issue_button_toggles_the_inline_issue_list(
+    authed_page, seeded_server, copy_review_job
+):
+    page = authed_page
+    errors = []
+    requests = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.goto(
+        f"{seeded_server}/import?tab=collection&resume_job_id={copy_review_job}&resume_step=3"
+    )
+    page.get_by_test_id("import-review-lane-decide").click()
+    page.get_by_test_id("import-review-reason-needs_issue").click()
+    row = page.locator("[data-import-review-series-row]").filter(has_text="Review Series 10")
+    expander = row.locator("td:last-child > [data-import-review-expand-action]")
+    expander.click()
+    trigger = row.get_by_test_id("import-review-choose-issue")
+    panel_id = trigger.get_attribute("aria-controls")
+    assert panel_id is not None
+
+    def issue_choices(route):
+        requests.append(route.request.url)
+        route.fulfill(
+            content_type="text/html",
+            body=(
+                f'<div id="{panel_id}" data-testid="import-review-issue-choices" '
+                'data-import-review-issue-choices-loaded="true">Issue choices</div>'
+            ),
+        )
+
+    page.route(f"**/import/{copy_review_job}/files/*/assign?*", issue_choices)
+    panel = page.locator(f"#{panel_id}")
+
+    trigger.click()
+    expect(trigger).to_have_attribute("aria-expanded", "true")
+    expect(panel).to_be_visible()
+    expect(panel).to_have_text("Issue choices")
+
+    trigger.click()
+    expect(trigger).to_have_attribute("aria-expanded", "false")
+    expect(panel).to_be_hidden()
+
+    trigger.click()
+    expect(trigger).to_have_attribute("aria-expanded", "true")
+    expect(panel).to_be_visible()
+    expect(expander).to_have_attribute("aria-expanded", "true")
+    assert len(requests) == 1
+    assert errors == []
+
+
 def test_series_file_inventory_preserves_review_and_focus(authed_page, seeded_server, browser_name):
     from pullbox.database import get_session_factory
     from tests.e2e.conftest import _run_async_blocking
@@ -482,11 +531,14 @@ def test_inline_issue_choice_submits_only_its_file_without_navigation(authed_pag
         job={"id": 1},
         file={"id": 1, "file_name": "Needs issue.cbz"},
         series={"provider_id": "20", "title": "Test series"},
-        issues=[{"provider_id": "201", "issue_number": 1, "title": "First issue"}],
+        issues=[
+            {"provider_id": str(200 + number), "issue_number": number, "title": f"Issue {number}"}
+            for number in range(1, 26)
+        ],
         token="scoped-test-token",
         query="",
         issue_page=1,
-        issue_page_count=1,
+        issue_page_count=2,
     )
     submissions = []
 
@@ -506,7 +558,15 @@ def test_inline_issue_choice_submits_only_its_file_without_navigation(authed_pag
     )
     panel = page.get_by_test_id("import-review-issue-choices")
     expect(panel).to_be_visible()
-    panel.get_by_role("button", name="Use this", exact=True).click()
+    viewport = panel.get_by_test_id("import-review-issue-choices-viewport")
+    pagination = panel.get_by_test_id("import-review-issue-pagination")
+    expect(viewport.get_by_test_id("import-review-use-issue")).to_have_count(25)
+    expect(pagination.get_by_role("button", name="Next", exact=True)).to_be_visible()
+    assert viewport.evaluate("el => el.scrollHeight > el.clientHeight")
+    assert pagination.evaluate(
+        "el => !el.closest('[data-testid=\"import-review-issue-choices-viewport\"]')"
+    )
+    viewport.get_by_role("button", name="Use this", exact=True).first.click()
     expect(panel).not_to_be_visible()
     assert len(submissions) == 1
     assert 'name="issue_cv_id"\r\n\r\n201' in submissions[0]

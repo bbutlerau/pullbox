@@ -8352,6 +8352,34 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       return this.applyReviewAction("/api/v1/import/" + this.jobId + "/series/" + seriesId + "/reconcile", "POST", { decisions: [{ imported_file_id: fileId, action: "skip" }] }, button);
     },
 
+    toggleReviewIssueChoices: function (fileId, url, button) {
+      var panelId = "import-review-issue-choices-" + String(fileId);
+      var panel = document.getElementById(panelId);
+      if (!panel || !button) { return; }
+
+      var shouldOpen = button.getAttribute("aria-expanded") !== "true";
+      button.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+      panel.hidden = !shouldOpen;
+      if (!shouldOpen || panel.dataset.importReviewIssueChoicesLoaded === "true") { return; }
+
+      panel.setAttribute("aria-busy", "true");
+      var request = htmx.ajax("GET", url, { target: "#" + panelId, swap: "outerHTML" });
+      if (!request || typeof request.then !== "function") { return; }
+      request.then(function () {
+        var refreshed = document.getElementById(panelId);
+        if (!refreshed) { return; }
+        refreshed.hidden = button.getAttribute("aria-expanded") !== "true";
+        refreshed.removeAttribute("aria-busy");
+      }).catch(function () {
+        var current = document.getElementById(panelId);
+        button.setAttribute("aria-expanded", "false");
+        if (current) {
+          current.hidden = true;
+          current.removeAttribute("aria-busy");
+        }
+      });
+    },
+
     keepSuggestedCopies: function (resolutions, button) {
       return this.applyReviewAction("/api/v1/import/" + this.jobId + "/conflicts/resolve-bulk", "POST", { resolutions: resolutions }, button);
     },
