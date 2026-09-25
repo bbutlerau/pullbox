@@ -2183,8 +2183,11 @@ function handleImportReviewTabKey(event) {
 }
 
 function positionImportReviewMenu(menu, event) {
-  if (event.newState !== 'open') { return; }
   var trigger = document.querySelector('[popovertarget="' + menu.id + '"]');
+  if (trigger) {
+    trigger.setAttribute("aria-expanded", event.newState === "open" ? "true" : "false");
+  }
+  if (event.newState !== 'open') { return; }
   if (!trigger) { return; }
   var rect = trigger.getBoundingClientRect();
   menu.style.left = Math.max(8, Math.min(window.innerWidth - 232, rect.right - 224)) + 'px';

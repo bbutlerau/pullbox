@@ -2923,6 +2923,53 @@ class TestImportShellRouteContracts:
         row = row.split("</tbody>", 1)[0]
         assert 'data-testid="import-review-more-actions"' not in row
 
+    async def test_import_review_duplicate_copy_actions_preserve_styled_menu_options(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from pullbox.models.import_job import ImportedSeries
+
+        job_id = await _seed_import_review_job(sec_db)
+        async with sec_db() as session:
+            series = await session.get(ImportedSeries, 7)
+            assert series is not None
+            series.cv_id = 507
+            series.cv_title = "Review Series 7"
+            await session.commit()
+
+        response = await authenticated_client.get(
+            f"/import/{job_id}/review-partial?status=confirm&reason=duplicate_copy_confirm"
+        )
+
+        assert response.status_code == 200
+        assert "Choose which copy to import" in response.text
+        row = response.text.split('data-import-review-series-row="7"', 1)[1]
+        row = row.split("</tbody>", 1)[0]
+        assert "Keep suggested" in row
+        change = re.search(r'<button[^>]*data-testid="import-review-change-copies"[^>]*>', row)
+        assert change is not None
+        assert "btn-ghost" in change.group(0)
+        assert "btn-sm" in change.group(0)
+        assert 'data-testid="import-review-more-actions"' in row
+        assert 'data-testid="import-review-copy-menu"' in row
+        assert 'role="menu"' in row
+        assert 'role="menuitem"' in row
+        assert row.count('class="import-review-row-menu-item"') == 4
+        assert "Change ComicVine match" in row
+        assert "Not this series" in row
+        assert "View files" in row
+        assert "Skip series" in row
+        assert "Skip this row" not in row
+        input_css = Path("src/pullbox/ui/static/css/input.css").read_text(encoding="utf-8")
+        assert (
+            ".import-review-row-menu-item:hover,\n"
+            ".import-review-row-menu-item:focus-visible {\n"
+            "  background: var(--pb-interactive-dim);\n"
+            "  color: var(--pb-interactive);\n"
+            "}"
+        ) in input_css
+
     async def test_import_review_needs_series_match_keeps_only_primary_search_action(
         self,
         authenticated_client,

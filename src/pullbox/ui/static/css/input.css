@@ -8481,13 +8481,13 @@ input[type="range"].range-pb::-moz-range-thumb {
 .issue-search-empty-copy {
   margin-top: 0.25rem;
   font-size: 0.78rem;
-  color: var(--pb-text-sec);
+  color: var(--pb-text-secondary);
 }
 .downloads-release-name {
   display: block;
   max-width: 260px;
   font-weight: 600;
-  color: var(--pb-text);
+  color: var(--pb-text-primary);
 }
 .downloads-release-meta {
   margin-top: 0.2rem;
@@ -8686,6 +8686,26 @@ input[type="range"].range-pb::-moz-range-thumb {
 .downloads-action-btn:hover {
   border-color: var(--pb-interactive);
   background: color-mix(in srgb, var(--pb-info) 10%, transparent);
+  color: var(--pb-interactive);
+}
+.import-review-row-menu-item {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 8px 12px;
+  color: var(--pb-text);
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.25rem;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+.import-review-row-menu-item:hover,
+.import-review-row-menu-item:focus-visible {
+  background: var(--pb-interactive-dim);
   color: var(--pb-interactive);
 }
 .downloads-action-btn.is-danger:hover {

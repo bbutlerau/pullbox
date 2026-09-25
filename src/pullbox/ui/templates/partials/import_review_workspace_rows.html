@@ -94,7 +94,9 @@
         {% elif reason_key == 'duplicate_copy_confirm' %}
           {% set suggestions = namespace(items=[]) %}{% for group in inline_conflicts.get(item.id, []) if group.preferred_file_id %}{% set suggestions.items = suggestions.items + [{'conflict_group_id': group.id, 'chosen_file_id': group.preferred_file_id}] %}{% endfor %}
           {% if suggestions.items %}<button type="button" class="btn-primary btn-sm" :disabled="reviewActionPending" @click='keepSuggestedCopies({{ suggestions.items|tojson|forceescape }}, $event.currentTarget)'>Keep suggested</button>{% endif %}
-          {{ review_expander(item, row, false, 'Change', not suggestions.items) }}
+          <button type="button" class="btn-ghost btn-sm" data-testid="import-review-change-copies" data-import-review-expand-action
+            aria-label="Change the suggested copy for {{ item.cv_title or item.raw_series_name }}" onclick="toggleImportReviewRow(this)"
+            aria-expanded="false" aria-controls="import-review-detail-{{ item.id }}">Change</button>
         {% else %}{{ review_expander(item, row, false, row.action, true) }}{% endif %}
         {% if reason_key not in ('needs_series', 'needs_issue', 'same_comic_review') and not compact_one_page and not dangerous_row and not unsupported_row and not large_file_row %}{% include "partials/import_review_row_menu.html" %}{% endif %}
       </div></td><td>{{ review_expander(item, row, compact_one_page) }}</td>
