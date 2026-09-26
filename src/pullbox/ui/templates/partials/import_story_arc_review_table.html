@@ -99,7 +99,7 @@
               <button
                 type="button"
                 data-testid="import-story-arc-select-{{ arc.id }}"
-                @click="updateStoryArcDecision({{ arc.id }}, 'select', document.querySelector('[data-testid=&quot;import-story-arc-target-{{ arc.id }}&quot;] [data-dropdown-select-input]'))"
+                @click="updateStoryArcDecision({{ arc.id }}, 'select', document.querySelector('[data-testid=&quot;import-story-arc-target-{{ arc.id }}&quot;] [data-dropdown-select-input]'), $event.currentTarget)"
                 {% if arc.selection_blocked %}disabled{% endif %}
                 class="btn-primary btn-sm disabled:cursor-not-allowed disabled:opacity-40"
               >
@@ -108,10 +108,10 @@
               <button
                 type="button"
                 data-testid="import-story-arc-skip-{{ arc.id }}"
-                @click="updateStoryArcDecision({{ arc.id }}, 'skip', null)"
+                @click="updateStoryArcDecision({{ arc.id }}, 'skip', null, $event.currentTarget)"
                 class="btn-ghost btn-sm"
               >
-                {{ 'Skipped' if arc.status.value == 'skipped' else 'Skip' }}
+                Skip
               </button>
             </fieldset>
             {% if arc.selection_block_reason %}
@@ -299,6 +299,7 @@
   {% if story_arc_selected_item %}
   <section
     data-testid="import-story-arc-entry-review"
+    data-import-story-arc-entry-review="{{ story_arc_selected_item.id }}"
     aria-labelledby="import-story-arc-entry-review-heading"
     class="border-t border-pb-border"
   >
@@ -362,7 +363,7 @@
             class_name="min-w-40 text-xs"
           ) }}
         </div>
-        <button type="submit" class="btn-secondary btn-sm">Apply filter</button>
+        <button type="submit" data-testid="import-story-arc-entry-filter-apply" class="btn-primary btn-sm">Apply filter</button>
       </form>
     </div>
 

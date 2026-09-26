@@ -213,6 +213,11 @@ async def load_import_review_summary(
         status.value if hasattr(status, "value") else str(status): int(count)
         for status, count in story_arc_counts_result.all()
     }
+    story_arcs_active = sum(
+        count
+        for status, count in story_arc_counts.items()
+        if status != ImportedStoryArcStatus.SKIPPED.value
+    )
     story_arc_entry_counts_result = await session.execute(
         select(ImportedStoryArcEntry.resolution_state, func.count(ImportedStoryArcEntry.id))
         .join(
@@ -319,6 +324,7 @@ async def load_import_review_summary(
         "needs_attention_files_total": needs_attention_files_total,
         "resolved_file_conflict_groups": resolved_file_conflict_groups,
         "story_arcs_total": sum(story_arc_counts.values()),
+        "story_arcs_active": story_arcs_active,
         "story_arcs_detected": story_arc_counts.get(ImportedStoryArcStatus.DETECTED.value, 0),
         "story_arcs_needs_review": story_arc_counts.get(
             ImportedStoryArcStatus.NEEDS_REVIEW.value,

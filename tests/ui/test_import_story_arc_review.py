@@ -78,10 +78,11 @@ async def test_story_arc_review_partial_is_paginated_and_keeps_arc_counts_separa
 
     assert response.status_code == 200
     assert 'data-testid="import-review-tab-story-arcs"' in response.text
-    story_arc_tab = response.text.split(
-        'data-testid="import-review-tab-story-arcs"', 1
-    )[1].split("</button>", 1)[0]
-    assert '<span class="font-mono text-xs text-current">(1)</span>' in story_arc_tab
+    story_arc_tab = response.text.split('data-testid="import-review-tab-story-arcs"', 1)[1].split(
+        "</button>", 1
+    )[0]
+    assert 'data-import-story-arc-count="1"' in story_arc_tab
+    assert "(1)" in story_arc_tab
     assert 'data-testid="import-review-story-arcs"' in response.text
     assert "Story arcs detected for this import" in response.text
     assert "Knightfall" in response.text
@@ -94,6 +95,8 @@ async def test_story_arc_review_partial_is_paginated_and_keeps_arc_counts_separa
     assert "Create new story arc" in response.text
     assert 'data-testid="import-story-arc-select-' in response.text
     assert 'data-testid="import-story-arc-skip-' in response.text
+    assert "'skip', null, $event.currentTarget" in response.text
+    assert 'data-import-story-arc-count="1"' in response.text
     assert 'data-testid="import-story-arc-pagination"' in response.text
     assert 'data-testid="import-review-pagination"' not in response.text
 
@@ -332,6 +335,10 @@ async def test_story_arc_review_partial_shows_entry_evidence_without_private_pat
     assert response.status_code == 200
     assert 'data-testid="import-story-arc-entry-review"' in response.text
     assert 'data-testid="import-story-arc-entry-filter"' in response.text
+    assert (
+        'data-testid="import-story-arc-entry-filter-apply" class="btn-primary btn-sm"'
+        in response.text
+    )
     assert response.text.count('data-dropdown-select-contract="v1"') >= 5
     assert "<select" not in response.text
     assert "Source order 1" in response.text

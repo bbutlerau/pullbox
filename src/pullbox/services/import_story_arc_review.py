@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import selectinload
 
 from pullbox.core.exceptions import NotFoundError, ValidationError
@@ -76,6 +76,7 @@ class ImportedStoryArcReviewPage:
 
 
 StoryArcReviewAction = Literal["select", "skip"]
+StoryArcReviewUpdateAction = Literal["select", "skip", "restore"]
 StoryArcDecisionTuple = tuple[int, StoryArcReviewAction, int | None]
 
 
@@ -159,7 +160,10 @@ async def load_import_story_arc_review_page(
     await _require_review_job(session, job_id)
     total = int(
         await session.scalar(
-            select(func.count(ImportedStoryArc.id)).where(ImportedStoryArc.import_job_id == job_id)
+            select(func.count(ImportedStoryArc.id)).where(
+                ImportedStoryArc.import_job_id == job_id,
+                ImportedStoryArc.status != ImportedStoryArcStatus.SKIPPED,
+            )
         )
         or 0
     )
@@ -167,7 +171,10 @@ async def load_import_story_arc_review_page(
         (
             await session.execute(
                 select(ImportedStoryArc)
-                .where(ImportedStoryArc.import_job_id == job_id)
+                .where(
+                    ImportedStoryArc.import_job_id == job_id,
+                    ImportedStoryArc.status != ImportedStoryArcStatus.SKIPPED,
+                )
                 .order_by(ImportedStoryArc.source_ordinal.asc(), ImportedStoryArc.id.asc())
                 .offset((page - 1) * page_size)
                 .limit(page_size)
@@ -242,16 +249,35 @@ async def update_import_story_arc_decision(
     job_id: int,
     imported_story_arc_id: int,
     *,
-    action: StoryArcReviewAction,
+    action: StoryArcReviewUpdateAction,
     proposed_story_arc_id: int | None,
 ) -> ImportedStoryArc:
-    """Persist one explicit select/skip decision without creating canonical rows."""
+    """Persist one explicit select, skip, or restore decision without canonical writes."""
     await _require_review_job(session, job_id)
     staged_arc = await session.get(ImportedStoryArc, imported_story_arc_id)
     if staged_arc is None or staged_arc.import_job_id != job_id:
         raise NotFoundError("ImportedStoryArc", imported_story_arc_id)
-    if action not in {"select", "skip"}:
-        raise ValidationError("Story arc review action must be select or skip")
+    if action not in {"select", "skip", "restore"}:
+        raise ValidationError("Story arc review action must be select, skip, or restore")
+
+    if action in {"skip", "restore"}:
+        if proposed_story_arc_id is not None:
+            raise ValidationError("Only a selected story arc can have a proposed merge target")
+        staged_arc.status = (
+            ImportedStoryArcStatus.SKIPPED
+            if action == "skip"
+            else ImportedStoryArcStatus.NEEDS_REVIEW
+        )
+        staged_arc.selected_for_import = False
+        staged_arc.proposed_story_arc_id = None
+        await session.execute(
+            update(ImportedStoryArcEntry)
+            .where(ImportedStoryArcEntry.imported_story_arc_id == staged_arc.id)
+            .values(selected_for_import=False)
+            .execution_options(synchronize_session="fetch")
+        )
+        await session.flush()
+        return staged_arc
 
     entries = list(
         (
@@ -267,17 +293,6 @@ async def update_import_story_arc_decision(
         .scalars()
         .all()
     )
-
-    if action == "skip":
-        if proposed_story_arc_id is not None:
-            raise ValidationError("A skipped story arc cannot have a proposed merge target")
-        staged_arc.status = ImportedStoryArcStatus.SKIPPED
-        staged_arc.selected_for_import = False
-        staged_arc.proposed_story_arc_id = None
-        for entry in entries:
-            entry.selected_for_import = False
-        await session.flush()
-        return staged_arc
 
     await _validate_merge_target(session, proposed_story_arc_id)
     safety_blocked_arc_ids = await _load_arc_ids_with_current_safety(

@@ -60,7 +60,7 @@ from pullbox.services.import_review_queries import (
 )
 from pullbox.services.import_review_selection import load_import_review_selection_state
 from pullbox.services.import_story_arc_review import (
-    StoryArcReviewAction,
+    StoryArcReviewUpdateAction,
     update_import_story_arc_decision,
 )
 
@@ -315,10 +315,10 @@ class ImportServiceReviewMixin:
         job_id: int,
         imported_story_arc_id: int,
         *,
-        action: StoryArcReviewAction,
+        action: StoryArcReviewUpdateAction,
         proposed_story_arc_id: int | None,
     ) -> ImportedStoryArc:
-        """Persist one staged story-arc select/skip decision."""
+        """Persist one staged story-arc select, skip, or restore decision."""
         return await update_import_story_arc_decision(
             session,
             job_id,

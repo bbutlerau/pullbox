@@ -10,7 +10,7 @@
     {% endfor %}
     {% if review_summary.story_arcs_total %}
     <button type="button" id="import-review-tab-story_arcs" role="tab" tabindex="{{ '0' if active_review_view == 'story_arcs' else '-1' }}" aria-controls="import-review-lane-panel" aria-selected="{{ 'true' if active_review_view == 'story_arcs' else 'false' }}"
-      data-testid="import-review-tab-story-arcs" hx-get="/import/{{ job.id }}/review-partial?status=story_arcs" hx-target="#import-step-review-shell" hx-swap="morph:outerHTML" class="downloads-tab-btn {{ 'is-active' if active_review_view == 'story_arcs' }}">Story Arcs <span class="font-mono text-xs text-current">({{ review_summary.story_arcs_total }})</span></button>
+      data-testid="import-review-tab-story-arcs" hx-get="/import/{{ job.id }}/review-partial?status=story_arcs" hx-target="#import-step-review-shell" hx-swap="morph:outerHTML" class="downloads-tab-btn {{ 'is-active' if active_review_view == 'story_arcs' }}">Story Arcs <span data-import-story-arc-count="{{ review_summary.story_arcs_active }}" class="font-mono text-xs text-current">({{ review_summary.story_arcs_active }})</span></button>
     {% endif %}
   </nav>
 </div>

@@ -221,7 +221,10 @@ class StoryArcReviewDecision(BaseModel):
 class StoryArcReviewDecisionRequest(BaseModel):
     """Update one staged story-arc decision from the Step 3 review UI."""
 
-    action: Literal["select", "skip"] = Field(..., description="Import or skip this arc")
+    action: Literal["select", "skip", "restore"] = Field(
+        ...,
+        description="Import, skip, or restore this arc to review",
+    )
     proposed_story_arc_id: int | None = Field(
         None,
         gt=0,
@@ -229,9 +232,9 @@ class StoryArcReviewDecisionRequest(BaseModel):
     )
 
     @model_validator(mode="after")
-    def validate_skip_has_no_merge_target(self) -> StoryArcReviewDecisionRequest:
-        """A skipped staged arc cannot retain an active merge decision."""
-        if self.action == "skip" and self.proposed_story_arc_id is not None:
+    def validate_non_select_has_no_merge_target(self) -> StoryArcReviewDecisionRequest:
+        """Only selecting an arc may retain an active merge decision."""
+        if self.action != "select" and self.proposed_story_arc_id is not None:
             raise ValueError("proposed_story_arc_id is only valid when action is select")
         return self
 
