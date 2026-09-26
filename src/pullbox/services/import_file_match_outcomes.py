@@ -80,6 +80,19 @@ def _source_evidence_diagnostics(imp_file: ImportedFile) -> dict[str, Any]:
     return evidence
 
 
+def _select_manual_series_match(
+    source_evidence: dict[str, Any],
+    imp_series: ImportedSeries,
+) -> bool:
+    explicit_selection = source_evidence.get("review_selection")
+    if isinstance(explicit_selection, bool):
+        return explicit_selection
+    if imp_series.cv_match_method == "user_override":
+        source_evidence["review_selection"] = True
+        return True
+    return False
+
+
 def apply_matched_file_outcome(
     imp_file: ImportedFile,
     imp_series: ImportedSeries,
@@ -90,6 +103,7 @@ def apply_matched_file_outcome(
 ) -> FileMatchLogEvent:
     """Apply accepted file-match status/diagnostics and return its log event."""
     source_evidence = _source_evidence_diagnostics(imp_file)
+    include_in_import = _select_manual_series_match(source_evidence, imp_series)
     imp_file.matched_issue_id = match_candidate.matched_issue_id
     imp_file.matched_issue_cv_id = match_candidate.matched_issue_cv_id
     imp_file.match_confidence = match_candidate.confidence
@@ -124,7 +138,7 @@ def apply_matched_file_outcome(
 
         target_state = duplicate_target_state(matched_issue)
         imp_file.status = ImportedFileStatus.MATCHED
-        imp_file.include_in_import = source_evidence.get("review_selection") is True
+        imp_file.include_in_import = include_in_import
         imp_file.diagnostics = {
             **source_evidence,
             **_duplicate_file_diagnostics(
@@ -145,7 +159,7 @@ def apply_matched_file_outcome(
         )
 
     imp_file.status = ImportedFileStatus.MATCHED
-    imp_file.include_in_import = source_evidence.get("review_selection") is True
+    imp_file.include_in_import = include_in_import
     if (
         match_candidate.method
         in {

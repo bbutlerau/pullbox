@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Protocol
 from pullbox.core.exceptions import NotFoundError
 from pullbox.models.import_job import ImportedSeries, ImportJob, ImportSeriesStatus
 from pullbox.providers.base import SeriesMetadata
+from pullbox.services.import_file_selection import sync_review_series_selection
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -144,11 +145,7 @@ async def override_cv_id(
         await run_file_matching(session, job, series_ids=[canonical_series_id])
         canonical_item = await session.get(ImportedSeries, canonical_series_id)
         if canonical_item is not None:
-            if (
-                canonical_item.status is ImportSeriesStatus.MATCHED
-                and canonical_item.files_matched > 0
-            ):
-                canonical_item.selected_for_import = True
+            await sync_review_series_selection(session, canonical_item)
             return canonical_item
     if job is not None:
         canonical_item = await session.get(ImportedSeries, canonical_series_id)

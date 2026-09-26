@@ -248,6 +248,7 @@ def test_apply_matched_file_outcome_marks_duplicate_importable_target() -> None:
         comicvine_id=1020,
         title="Issue 20",
         status=IssueStatus.WANTED,
+        issue_type=IssueType.ISSUE,
     )
     imp_file = ImportedFile(file_name="Absolute Batman 020.cbz")
     imp_series = ImportedSeries(raw_series_name="Absolute Batman")
@@ -265,6 +266,65 @@ def test_apply_matched_file_outcome_marks_duplicate_importable_target() -> None:
     assert imp_file.diagnostics["target_state"] == "wanted"
     assert event.name == "import_duplicate_file_importable_match"
     assert event.data["target_state"] == "wanted"
+
+
+@pytest.mark.parametrize("duplicate_series", [False, True])
+def test_manual_series_match_selects_importable_file(duplicate_series: bool) -> None:
+    issue = Issue(
+        id=8,
+        issue_number=20.0,
+        comicvine_id=1020,
+        title="Issue 20",
+        status=IssueStatus.WANTED,
+        issue_type=IssueType.ISSUE,
+    )
+    imp_file = ImportedFile(file_name="Of the Earth 001.cbz")
+    imp_series = ImportedSeries(
+        raw_series_name="Of the Earth",
+        cv_match_method="user_override",
+    )
+
+    apply_matched_file_outcome(
+        imp_file,
+        imp_series,
+        _candidate(issue, has_library_file=False),
+        duplicate_series=duplicate_series,
+        duplicate_target_state=duplicate_target_state,
+    )
+
+    assert imp_file.status == ImportedFileStatus.MATCHED
+    assert imp_file.include_in_import is True
+    assert imp_file.diagnostics["review_selection"] is True
+
+
+def test_manual_series_rematch_preserves_explicit_file_deselection() -> None:
+    issue = Issue(
+        id=8,
+        issue_number=20.0,
+        comicvine_id=1020,
+        title="Issue 20",
+        status=IssueStatus.WANTED,
+    )
+    imp_file = ImportedFile(
+        file_name="Of the Earth 001.cbz",
+        diagnostics={"review_selection": False},
+    )
+    imp_series = ImportedSeries(
+        raw_series_name="Of the Earth",
+        cv_match_method="user_override",
+    )
+
+    apply_matched_file_outcome(
+        imp_file,
+        imp_series,
+        _candidate(issue, has_library_file=False),
+        duplicate_series=True,
+        duplicate_target_state=duplicate_target_state,
+    )
+
+    assert imp_file.status == ImportedFileStatus.MATCHED
+    assert imp_file.include_in_import is False
+    assert imp_file.diagnostics["review_selection"] is False
 
 
 def test_apply_unmatched_file_outcome_marks_new_series_no_match() -> None:

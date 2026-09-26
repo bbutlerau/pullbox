@@ -150,7 +150,9 @@ def classify_review_row(facts: ReviewFacts) -> ReviewRow:
 
 
 def review_row_in_lane(row: ReviewRow, lane: str) -> bool:
-    """Missing references form a cross-lane work queue; other lanes stay primary."""
+    """Ready files and missing references remain visible beside a primary work lane."""
+    if lane == "ready":
+        return row.ready_files > 0
     if lane == "info":
         return row.open_missing_references > 0
     return row.lane == lane

@@ -2970,6 +2970,55 @@ class TestImportShellRouteContracts:
             "}"
         ) in input_css
 
+    async def test_import_review_fix_source_menu_omits_series_matching_actions(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportedSeries
+
+        job_id = await _seed_import_review_job(sec_db)
+        async with sec_db() as session:
+            series = await session.get(ImportedSeries, 1)
+            assert series is not None
+            series.cv_id = 9001
+            series.cv_title = "Review Series 1"
+            session.add(
+                ImportedFile(
+                    import_job_id=job_id,
+                    import_series_id=series.id,
+                    file_path="/tmp/review-1/corrupt.cbz",
+                    file_name="Corrupt Download.cbz",
+                    file_size=694,
+                    file_format="cbz",
+                    status=ImportedFileStatus.SAFETY_BLOCKED,
+                    diagnostics={
+                        "safety_block": {
+                            "category": "archive_inspection_failed",
+                            "code": "archive_inspection_failed",
+                            "reason": "Archive could not be inspected",
+                            "overrideable": False,
+                        }
+                    },
+                )
+            )
+            series_id = series.id
+            await session.commit()
+
+        response = await authenticated_client.get(
+            f"/import/{job_id}/review-partial?status=fix_source&reason=archive_inspection_failed"
+        )
+
+        assert response.status_code == 200
+        assert "Technical detail" not in response.text
+        menu = response.text.split(f'id="import-review-menu-{series_id}"', 1)[1]
+        menu = menu.split("</div>", 1)[0]
+        assert "View files" in menu
+        assert "Skip series" in menu
+        assert "Change ComicVine match" not in menu
+        assert "Not this series" not in menu
+        assert 'data-testid="import-review-unmatch-action"' not in menu
+
     async def test_import_review_needs_series_match_keeps_only_primary_search_action(
         self,
         authenticated_client,

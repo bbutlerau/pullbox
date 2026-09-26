@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from pullbox.ui.import_review_lanes import ReviewFacts, classify_review_row
+from pullbox.ui.import_review_lanes import ReviewFacts, classify_review_row, review_row_in_lane
 
 
 def test_partial_series_keeps_ready_files_while_needing_issue_decisions() -> None:
@@ -15,6 +15,8 @@ def test_partial_series_keeps_ready_files_while_needing_issue_decisions() -> Non
     assert row.reasons == ("needs_issue",)
     assert row.ready_files == 13
     assert row.attention_files == 3
+    assert review_row_in_lane(row, "decide") is True
+    assert review_row_in_lane(row, "ready") is True
 
 
 @pytest.mark.parametrize(
@@ -168,8 +170,9 @@ async def test_workspace_lanes_partition_rows_without_changing_saved_recovery(db
     context = await load_import_review_context(db_session, job, status="decide", page=1, sort=None)
     assert [row.id for row in context["series_items"]] == [partial.id]
     assert context["lane_counts"]["decide"] == 1
+    assert context["lane_counts"]["ready"] == 1
     assert context["lane_counts"]["info"] == 1
-    assert sum(context["lane_counts"].values()) == 2
+    assert sum(context["lane_counts"].values()) == 3
     assert context["review_rows"][partial.id].ready_files == 13
     assert context["review_summary"]["selected_items_total"] == 1
     assert not db_session.dirty
