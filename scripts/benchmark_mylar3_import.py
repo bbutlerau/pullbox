@@ -36,11 +36,12 @@ from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
     ImportedSeries,
-    ImportJob,
     ImportJobStatus,
     ImportSourceType,
 )
+from pullbox.models.library import LibraryRoot
 from pullbox.performance.baseline import current_process_peak_rss_bytes
+from pullbox.schemas.import_job import ImportJobCreate
 from pullbox.services.import_service import ImportService
 
 
@@ -122,12 +123,21 @@ async def _run_benchmark(args: argparse.Namespace, workspace: Path) -> dict[str,
 
     try:
         async with session_factory() as session:
-            job = ImportJob(
-                source_path=str(fixture.db_path),
-                source_type=ImportSourceType.MYLAR3,
-                status=ImportJobStatus.PENDING,
+            destination = workspace / "managed-library"
+            destination.mkdir()
+            root = LibraryRoot(name="Benchmark destination", path=str(destination), enabled=True)
+            session.add(root)
+            await session.flush()
+            # Use Step 1's revalidated identity mapping, not a synthetic scan bypass.
+            job = await service.create_job(
+                session,
+                ImportJobCreate(
+                    source_path=str(fixture.db_path),
+                    source_type=ImportSourceType.MYLAR3,
+                    target_library_root_id=root.id,
+                    mylar3_path_map_confirmed=True,
+                ),
             )
-            session.add(job)
             await session.commit()
 
             started_at = time.monotonic()

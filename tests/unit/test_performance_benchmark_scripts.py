@@ -80,6 +80,25 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def test_mylar_benchmark_confirms_paths_and_reaches_review_without_provider_calls() -> None:
+    report = _run_benchmark(
+        _repo_root(),
+        "scripts/benchmark_mylar3_import.py",
+        "--annual-count",
+        "1",
+        files_per_series=2,
+    )
+
+    assert report["error"] is None
+    assert report["final_status"] == "review"
+    assert report["materialized_series_count"] == report["expected_discovered_series_count"] == 2
+    assert report["materialized_file_count"] == report["matched_file_count"] == 2
+    assert report["provider_call_count"] == 0
+    assert report["archive_safety_inspection_count"] == 2
+    assert report["archive_member_list_read_count"] == 0
+    assert report["archive_member_payload_read_count"] == 0
+
+
 def test_library_navigation_scale_profiles_match_real_world_collections() -> None:
     assert NAVIGATION_SCALE_PROFILES == {
         "ethan": (650, 8_000),
