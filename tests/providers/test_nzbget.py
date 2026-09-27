@@ -10,6 +10,8 @@ Run:
 
 from __future__ import annotations
 
+import gzip
+import io
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,10 +22,64 @@ from pullbox.providers.download.nzbget import (
     NZBGetError,
     _map_group_status,
     _map_history_status,
+    _TimeoutTransport,
 )
 
 # Fake NZB content that passes the content-type / body validation
 _FAKE_NZB_CONTENT = b"<?xml version='1.0'?><nzb>fake</nzb>"
+
+
+def test_xmlrpc_transport_normalizes_response_before_expat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pullbox.core.xml_security import normalize_xml_for_expat
+    from pullbox.providers.download import nzbget
+
+    response = (
+        b"<?xml version='1.0'?><methodResponse><params><param>"
+        b"<value><string>ok</string></value></param></params></methodResponse>"
+    )
+    guarded_payloads: list[bytes | str] = []
+
+    def recording_guard(payload: bytes | str) -> bytes | str:
+        guarded_payloads.append(payload)
+        return normalize_xml_for_expat(payload)
+
+    monkeypatch.setattr(nzbget, "normalize_xml_for_expat", recording_guard, raising=False)
+
+    transport = _TimeoutTransport()
+    transport.verbose = False
+
+    assert transport.parse_response(io.BytesIO(response)) == ("ok",)
+    assert guarded_payloads == [response]
+
+
+def test_xmlrpc_transport_bounds_the_compressed_body_before_gzip_decoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pullbox.providers.download import nzbget
+
+    payload = (
+        b"<?xml version='1.0'?><methodResponse><params><param>"
+        b"<value><string>ok</string></value></param></params></methodResponse>"
+    )
+    compressed = gzip.compress(payload)
+    monkeypatch.setattr(
+        nzbget,
+        "_MAX_XML_RPC_COMPRESSED_RESPONSE_BYTES",
+        len(compressed) - 1,
+        raising=False,
+    )
+
+    class GzipResponse(io.BytesIO):
+        def getheader(self, name: str, default: str = "") -> str:
+            return "gzip" if name == "Content-Encoding" else default
+
+    transport = _TimeoutTransport()
+    transport.verbose = False
+
+    with pytest.raises(ValueError, match=r"(?i)compressed XML-RPC response"):
+        transport.parse_response(GzipResponse(compressed))
 
 
 def _make_client(**kwargs: Any) -> NZBGetClient:

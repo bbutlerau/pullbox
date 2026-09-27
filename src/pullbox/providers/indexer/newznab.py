@@ -17,12 +17,12 @@ from xml.etree import ElementTree
 
 import httpx
 import structlog
-from defusedxml import ElementTree as DefusedElementTree
 from defusedxml.common import DefusedXmlException
 
 from pullbox.core.acquisition import AcquisitionProtocol
 from pullbox.core.issue_numbers import format_issue_number
 from pullbox.core.provider_cooldown import ProviderCooldown, provider_cooldown, retry_after_seconds
+from pullbox.core.xml_security import parse_untrusted_xml
 from pullbox.providers.base import (
     IndexerCapabilities,
     ProviderHealthResult,
@@ -261,7 +261,7 @@ class NewznabIndexer:
     def _parse_search_results(self, xml_text: str) -> list[ReleaseResult]:
         """Parse Newznab RSS search results into ReleaseResult DTOs."""
         try:
-            root = DefusedElementTree.fromstring(xml_text)
+            root = parse_untrusted_xml(xml_text)
         except (ElementTree.ParseError, DefusedXmlException) as exc:
             logger.error("newznab_xml_parse_error", error=str(exc), indexer=self._name)
             return []
@@ -305,7 +305,7 @@ class NewznabIndexer:
 def _check_xml_error(xml_text: str, indexer_name: str) -> None:
     """Check for and raise on Newznab XML error responses."""
     try:
-        root = DefusedElementTree.fromstring(xml_text)
+        root = parse_untrusted_xml(xml_text)
         error_el = root if root.tag == "error" else root.find("error")
         if error_el is not None:
             code = error_el.get("code", "?")
@@ -318,7 +318,7 @@ def _check_xml_error(xml_text: str, indexer_name: str) -> None:
 def _parse_capabilities(xml_text: str) -> IndexerCapabilities:
     """Parse a Newznab ?t=caps XML response."""
     try:
-        root = DefusedElementTree.fromstring(xml_text)
+        root = parse_untrusted_xml(xml_text)
     except (ElementTree.ParseError, DefusedXmlException) as exc:
         raise NewznabError(f"Failed to parse capabilities XML: {exc}") from None
 

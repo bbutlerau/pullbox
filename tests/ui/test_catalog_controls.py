@@ -59,6 +59,14 @@ async def test_metadata_settings_explains_local_storage_and_progress(authenticat
     response = await authenticated_client.get("/settings?tab=metadata")
     assert response.status_code == 200
     assert 'id="catalog-download-progress"' in response.text
+    assert 'class="app-progress"' in response.text
+    assert "app-progress-track" in response.text
+    assert "app-progress-fill--interactive" in response.text
+    assert 'role="progressbar"' in response.text
+    assert "progressPercent" in response.text
+    assert "progressValue" in response.text
+    assert "await this.$nextTick()" in response.text
+    assert "<progress" not in response.text
     assert 'role="status" aria-live="polite"' in response.text
     assert "window.pullboxLiveUpdatesEnabled()" in response.text
     assert "Download catalog" in response.text

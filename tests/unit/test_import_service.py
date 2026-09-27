@@ -4504,7 +4504,7 @@ class TestImportReconciliation:
         mock_series_service: AsyncMock,
         mock_event_bus: AsyncMock,
     ) -> None:
-        """Assigning an issue makes the row importable without selecting it."""
+        """Assigning an issue makes the resolved row ready and selected."""
         job, item, imp_file = await self._seed_reconcile_row(db_session)
         svc = _make_service(
             series_service=mock_series_service,
@@ -4529,13 +4529,15 @@ class TestImportReconciliation:
 
         await db_session.refresh(imp_file)
         assert updated.status == ImportSeriesStatus.MATCHED
-        assert updated.selected_for_import is False
+        assert updated.selected_for_import is True
         assert updated.files_matched == 1
         assert updated.files_no_match == 0
         assert imp_file.status == ImportedFileStatus.MATCHED
+        assert imp_file.include_in_import is True
         assert imp_file.matched_issue_cv_id == 1167175
         assert imp_file.match_confidence == "manual"
         assert imp_file.match_method == "import_reconcile"
+        assert imp_file.diagnostics["review_selection"] is True
         assert imp_file.diagnostics["target_issue_summary"] == {
             "provider_id": "1167175",
             "issue_number": 9.0,
@@ -4805,7 +4807,7 @@ class TestImportReconciliation:
         mock_series_service: AsyncMock,
         mock_event_bus: AsyncMock,
     ) -> None:
-        """A manual provisional issue decision stays unselected until user selection."""
+        """A manual provisional issue decision selects the resolved file and row."""
         job, item, imp_file = await self._seed_reconcile_row(db_session)
         item.raw_series_name = "King Dracula"
         item.raw_year = 2026
@@ -4857,14 +4859,16 @@ class TestImportReconciliation:
 
         await db_session.refresh(imp_file)
         assert updated.status == ImportSeriesStatus.MATCHED
-        assert updated.selected_for_import is False
+        assert updated.selected_for_import is True
         assert updated.files_matched == 1
         assert updated.files_no_match == 0
         assert imp_file.status == ImportedFileStatus.MATCHED
+        assert imp_file.include_in_import is True
         assert imp_file.matched_issue_id is None
         assert imp_file.matched_issue_cv_id is None
         assert imp_file.match_confidence == "manual"
         assert imp_file.match_method == "import_reconcile_provisional_issue"
+        assert imp_file.diagnostics["review_selection"] is True
         assert imp_file.diagnostics["kind"] == "provider_missing_issue_placeholder"
         assert imp_file.diagnostics["target_issue_number"] == 4.0
         assert imp_file.diagnostics["target_issue_type"] == IssueType.ISSUE.value
@@ -4968,12 +4972,13 @@ class TestImportReconciliation:
         await db_session.refresh(imp_file)
         assert updated.status == ImportSeriesStatus.DUPLICATE
         assert updated.series_id == library_series.id
-        assert updated.selected_for_import is False
+        assert updated.selected_for_import is True
         assert updated.files_matched == 1
         assert updated.files_no_match == 0
         assert imp_file.status == ImportedFileStatus.MATCHED
-        assert imp_file.include_in_import is False
+        assert imp_file.include_in_import is True
         assert imp_file.match_method == "import_reconcile_provisional_issue"
+        assert imp_file.diagnostics["review_selection"] is True
         assert imp_file.diagnostics["target_issue_number"] == 73.0
         assert imp_file.diagnostics["target_series_id"] == library_series.id
 
@@ -5172,9 +5177,110 @@ class TestOverrideCvId:
         await db_session.refresh(updated)
         await db_session.refresh(imp_file)
         assert updated.status == ImportSeriesStatus.MATCHED
+        assert updated.selected_for_import is True
         assert imp_file.status == ImportedFileStatus.MATCHED
+        assert imp_file.include_in_import is True
+        assert imp_file.diagnostics["review_selection"] is True
         assert imp_file.matched_issue_cv_id == 1100110
         assert imp_file.match_method == "issue_number"
+
+    @pytest.mark.asyncio
+    async def test_override_selects_wanted_file_for_existing_series(
+        self,
+        db_session: AsyncSession,
+        mock_series_service: AsyncMock,
+        mock_metadata_service: AsyncMock,
+        mock_event_bus: AsyncMock,
+    ) -> None:
+        """A manual series match selects a wanted duplicate-series file."""
+        from pullbox.providers.base import IssueSummary, SeriesMetadata
+
+        meta = SeriesMetadata(
+            provider_id="171000",
+            title="Of the Earth",
+            sort_title="of the earth",
+            year_start=2026,
+            year_end=None,
+            status="Continuing",
+            publisher="Image",
+            description=None,
+            cover_url=None,
+            issue_count=1,
+            comicvine_url="https://comicvine.gamespot.com/of-the-earth/4050-171000/",
+        )
+        mock_metadata_service.get_series_metadata = AsyncMock(return_value=meta)
+        mock_metadata_service._provider.get_issues_for_series = AsyncMock(
+            return_value=[
+                IssueSummary(
+                    provider_id="1200001",
+                    issue_number=1.0,
+                    title="Issue 1",
+                    release_date=None,
+                    cover_url=None,
+                    issue_type="issue",
+                )
+            ]
+        )
+        library_series = Series(
+            title="Of the Earth",
+            sort_title="of the earth",
+            year_start=2026,
+            comicvine_id=171000,
+            issue_count=1,
+        )
+        db_session.add(library_series)
+        await db_session.flush()
+        library_issue = Issue(
+            series_id=library_series.id,
+            comicvine_id=1200001,
+            issue_number=1.0,
+            title="Issue 1",
+            status=IssueStatus.WANTED,
+            issue_type=IssueType.ISSUE,
+        )
+        db_session.add(library_issue)
+
+        job = await _create_job_row(db_session, status=ImportJobStatus.REVIEW)
+        item = await _create_imported_series(
+            db_session,
+            job,
+            name="Of the Earth",
+            year=2026,
+            status=ImportSeriesStatus.NO_MATCH,
+            cv_id=None,
+            cv_match_score=None,
+            cv_match_method=None,
+        )
+        imp_file = ImportedFile(
+            import_job_id=job.id,
+            import_series_id=item.id,
+            file_path="/tmp/Of the Earth 001.cbz",
+            file_name="Of the Earth 001.cbz",
+            file_size=1024,
+            file_format="cbz",
+            parsed_series="Of the Earth",
+            parsed_issue_number=1.0,
+            status=ImportedFileStatus.NO_MATCH,
+        )
+        db_session.add(imp_file)
+        await db_session.flush()
+        svc = ImportService(
+            series_service=mock_series_service,
+            metadata_service=mock_metadata_service,
+            event_bus=mock_event_bus,
+        )
+
+        updated = await svc.override_cv_id(db_session, item.id, 171000)
+
+        await db_session.refresh(updated)
+        await db_session.refresh(imp_file)
+        assert updated.status == ImportSeriesStatus.DUPLICATE
+        assert updated.series_id == library_series.id
+        assert updated.selected_for_import is True
+        assert imp_file.status == ImportedFileStatus.MATCHED
+        assert imp_file.matched_issue_id == library_issue.id
+        assert imp_file.include_in_import is True
+        assert imp_file.diagnostics["review_selection"] is True
 
     @pytest.mark.asyncio
     async def test_override_reconsolidates_matching_logical_group(

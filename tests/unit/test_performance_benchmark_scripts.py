@@ -9,6 +9,7 @@ from typing import Any, cast
 import pytest
 
 from scripts.benchmark_import_metadata_scale import _prepare_database
+from scripts.benchmark_library_navigation import NAVIGATION_SCALE_PROFILES
 
 
 class _RecordingConnection:
@@ -77,6 +78,50 @@ def _run_benchmark(
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
+
+
+def test_library_navigation_scale_profiles_match_real_world_collections() -> None:
+    assert NAVIGATION_SCALE_PROFILES == {
+        "ethan": (650, 8_000),
+        "bigredone": (20_000, 120_000),
+    }
+
+
+def test_library_navigation_benchmark_exercises_summary_and_catalog_pipeline() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/benchmark_library_navigation.py",
+            "--profile",
+            "custom",
+            "--series-count",
+            "3",
+            "--file-count",
+            "7",
+            "--insert-batch-size",
+            "2",
+        ],
+        cwd=_repo_root(),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["profile"] == "custom"
+    assert report["series_count"] == 3
+    assert report["file_count"] == 7
+    assert report["summary_total_files"] == 7
+    assert report["catalog_entry_count"] == 10
+    assert report["browser_row_count"] == 3
+    assert report["library_summary_select_count"] == 2
+    assert report["catalog_select_count"] == 2
+    assert report["filesystem_scan_count"] == 0
+    assert float(report["summary_elapsed_ms"]) >= 0
+    assert float(report["catalog_elapsed_ms"]) >= 0
+    assert float(report["snapshot_elapsed_ms"]) >= 0
 
 
 def test_import_scan_benchmark_exits_cleanly() -> None:

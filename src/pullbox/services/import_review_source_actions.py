@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 from pullbox.core.exceptions import ValidationError
 from pullbox.core.file_safety import (
+    get_allowed_extensions,
     get_archive_size_limit_bytes,
     is_dangerous_file_blocking_enabled,
 )
@@ -38,6 +39,7 @@ from pullbox.services.import_review_recheck import (
     inspect_review_source,
 )
 from pullbox.services.import_review_scope import review_scope
+from pullbox.services.import_safety_diagnostics import normalize_import_safety_diagnostics
 from pullbox.services.import_source_metadata import source_metadata_for_import_file
 from pullbox.services.import_story_arc_resolution import refresh_story_arc_entries_for_import_files
 from pullbox.services.operation_progress import (
@@ -57,6 +59,8 @@ RECHECK_CATEGORIES = frozenset(
         "archive_no_pages",
         "source_changed",
         "source_missing",
+        "unsupported_file_type",
+        "unknown",
     }
 )
 
@@ -85,64 +89,101 @@ async def source_action_progress(
     )
 
 
-async def replacement_candidate(
+MAX_REPLACEMENT_CANDIDATES = 25
+
+
+async def replacement_candidates(
     session: AsyncSession, file: ImportedFile, parent: ImportedSeries
-) -> ImportedFile | None:
-    """Use bounded saved evidence only. The worker must still verify both paths."""
+) -> list[ImportedFile]:
+    """Return bounded, exact saved candidates; the worker still verifies the chosen path."""
+    safety = normalize_import_safety_diagnostics(
+        dict((file.diagnostics or {}).get("safety_block") or {})
+    )
     if (
         not file.comicvine_issue_id
         or file.status is not ImportedFileStatus.SAFETY_BLOCKED
-        or file.diagnostics.get("safety_block", {}).get("category") != "source_missing"
+        or safety["category"] != "source_missing"
     ):
-        return None
-    candidates = list(
-        (
-            await session.scalars(
-                select(ImportedFile)
-                .where(
-                    ImportedFile.import_series_id == parent.id,
-                    ImportedFile.id != file.id,
-                    ImportedFile.comicvine_issue_id == file.comicvine_issue_id,
-                    ImportedFile.file_size > 0,
-                    ImportedFile.status.in_(
-                        [ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED]
-                    ),
-                )
-                .limit(2)
-            )
-        ).all()
+        return []
+    recorded_metadata = source_metadata_for_import_file(parent, file)
+    candidate_query = (
+        select(ImportedFile)
+        .where(
+            ImportedFile.import_series_id == parent.id,
+            ImportedFile.id != file.id,
+            ImportedFile.comicvine_issue_id == file.comicvine_issue_id,
+            ImportedFile.file_size > 0,
+            ImportedFile.status.in_([ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED]),
+        )
+        .order_by(ImportedFile.file_name.asc(), ImportedFile.id.asc())
     )
-    if len(candidates) != 1:
-        return None
-    actual = candidates[0]
-    if Path(actual.file_path).parent != Path(file.file_path).parent or not actual.source_signature:
-        return None
-    if not same_trusted_issue(
-        source_metadata_for_import_file(parent, file),
-        source_metadata_for_import_file(parent, actual),
-    ):
-        return None
-    if await session.scalar(
-        select(LibraryFile.id).where(LibraryFile.file_path == actual.file_path).limit(1)
-    ):
-        return None
-    return actual
+    page_size = MAX_REPLACEMENT_CANDIDATES + 1
+    offset = 0
+    result: list[ImportedFile] = []
+    while len(result) <= MAX_REPLACEMENT_CANDIDATES:
+        candidates = list(
+            (await session.scalars(candidate_query.offset(offset).limit(page_size))).all()
+        )
+        if not candidates:
+            break
+        candidate_paths = [candidate.file_path for candidate in candidates]
+        owned_paths = set(
+            (
+                await session.scalars(
+                    select(LibraryFile.file_path).where(LibraryFile.file_path.in_(candidate_paths))
+                )
+            ).all()
+        )
+        result.extend(
+            candidate
+            for candidate in candidates
+            if Path(candidate.file_path).parent == Path(file.file_path).parent
+            and bool(candidate.source_signature)
+            and candidate.file_path not in owned_paths
+            and same_trusted_issue(
+                recorded_metadata,
+                source_metadata_for_import_file(parent, candidate),
+            )
+        )
+        offset += len(candidates)
+        if len(candidates) < page_size:
+            break
+    return result[:MAX_REPLACEMENT_CANDIDATES]
+
+
+async def replacement_candidate(
+    session: AsyncSession, file: ImportedFile, parent: ImportedSeries
+) -> ImportedFile | None:
+    """Return one candidate only when the saved evidence is unambiguous."""
+    candidates = await replacement_candidates(session, file, parent)
+    return candidates[0] if len(candidates) == 1 else None
 
 
 async def queue_source_action(
-    session: AsyncSession, job_id: int, file_id: int, *, action: str = "recheck", actor_id: int = 1
+    session: AsyncSession,
+    job_id: int,
+    file_id: int,
+    *,
+    action: str = "recheck",
+    actor_id: int = 1,
+    candidate_file_id: int | None = None,
 ) -> None:
     job, parent, file = await load_review_file(session, job_id, file_id)
-    category = file.diagnostics.get("safety_block", {}).get("category")
+    category = normalize_import_safety_diagnostics(
+        dict((file.diagnostics or {}).get("safety_block") or {})
+    )["category"]
     if file.status is not ImportedFileStatus.SAFETY_BLOCKED or category not in RECHECK_CATEGORIES:
         raise ValidationError(
             "This file cannot be rechecked here. Resolve its safety or root setup first."
         )
     if action not in {"recheck", "pair"}:
         raise ValidationError("Unknown source review action.")
-    candidate = await replacement_candidate(session, file, parent) if action == "pair" else None
+    candidates = await replacement_candidates(session, file, parent) if action == "pair" else []
+    if action == "pair" and candidate_file_id is None and len(candidates) == 1:
+        candidate_file_id = candidates[0].id
+    candidate = next((item for item in candidates if item.id == candidate_file_id), None)
     if action == "pair" and candidate is None:
-        raise ValidationError("There is no unique, proven replacement for this reference.")
+        raise ValidationError("Choose one of the verified replacement files and try again.")
     work = {
         "state": "pending",
         "action": action,
@@ -165,6 +206,27 @@ async def queue_source_action(
 def _pair_is_unchanged(recorded: Path, actual: Path, signature: dict[str, Any]) -> None:
     if not unchanged_same_folder_pair(recorded, actual, signature):
         raise ValidationError("The recorded path or replacement changed. Recheck the source first.")
+
+
+def _exact_supported_replacement(source: Path, allowed_extensions: frozenset[str]) -> Path:
+    """Find one same-folder, same-stem converted replacement without guessing identity."""
+    if source.suffix.lower() in allowed_extensions:
+        return source
+    matches: list[Path] = []
+    try:
+        for candidate in source.parent.iterdir():
+            if (
+                candidate != source
+                and candidate.is_file()
+                and candidate.stem.casefold() == source.stem.casefold()
+                and candidate.suffix.lower() in allowed_extensions
+            ):
+                matches.append(candidate)
+                if len(matches) > 1:
+                    return source
+    except OSError:
+        return source
+    return matches[0] if len(matches) == 1 else source
 
 
 async def process_source_action(
@@ -204,6 +266,12 @@ async def process_source_action(
         roots = await _retry_source_roots(session, job, file_ids=[inspected.id])
         block_dangerous = await is_dangerous_file_blocking_enabled(session)
         limit = await get_archive_size_limit_bytes(session)
+        allowed_extensions = frozenset(await get_allowed_extensions(session))
+        safety_category = str(
+            normalize_import_safety_diagnostics(
+                dict((file.diagnostics or {}).get("safety_block") or {})
+            )["category"]
+        )
         valid = (
             original_scope == work.get("scope")
             and job.status is ImportJobStatus.REVIEW
@@ -219,6 +287,10 @@ async def process_source_action(
         try:
             if candidate:
                 await asyncio.to_thread(_pair_is_unchanged, recorded_path, source_path, signature)
+            elif safety_category == "unsupported_file_type":
+                source_path = await asyncio.to_thread(
+                    _exact_supported_replacement, source_path, allowed_extensions
+                )
             resolved_roots = await asyncio.to_thread(
                 lambda: [(root, root.resolve()) for root in roots]
             )
@@ -232,6 +304,7 @@ async def process_source_action(
                 max_archive_size=limit,
                 accept_replaced_files=candidate is None,
                 sidecars={},
+                allowed_extensions=allowed_extensions,
             )
             if candidate:
                 metadata, content, _signature = result
@@ -295,13 +368,28 @@ async def process_source_action(
                     "mylar3_path_reconciliation": evidence,
                 }
             else:
+                previous_path = Path(file.file_path)
                 previous = dict(file.diagnostics)
                 previous_signature = dict(file.source_signature)
                 _apply_file(file, metadata, content, fresh_signature)
+                if source_path != previous_path:
+                    file.file_path = str(source_path)
+                    file.file_name = source_path.name
+                    file.file_format = source_path.suffix.lower().lstrip(".")
                 file.source_signature = {**previous_signature, **file.source_signature}
                 file.diagnostics = {
                     **file.diagnostics,
                     "review_source_previous": previous.get("safety_block"),
+                    **(
+                        {
+                            "review_source_replacement": {
+                                "previous_file_name": previous_path.name,
+                                "replacement_file_name": source_path.name,
+                            }
+                        }
+                        if source_path != previous_path
+                        else {}
+                    ),
                     **(
                         {"review_selection": previous["review_selection"]}
                         if "review_selection" in previous

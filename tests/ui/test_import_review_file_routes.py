@@ -2,6 +2,7 @@
 
 import re
 from html import unescape
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -102,6 +103,65 @@ async def test_source_preview_does_not_scan_and_post_only_queues(
         assert file.diagnostics["review_source_action"]["state"] == "pending"
 
 
+async def test_missing_reference_preview_selects_from_proven_replacements(
+    authenticated_client, sec_db, tmp_path, monkeypatch
+):
+    from copy import deepcopy
+
+    from pullbox.core.library_file_ownership import build_file_identity_signature
+    from pullbox.models.import_job import ImportedFile
+    from pullbox.tasks import import_task
+    from tests.unit.test_import_path_reconciliation import _saved
+
+    trigger = Mock()
+    monkeypatch.setattr(import_task, "trigger_import_review_source_action", trigger)
+    async with sec_db() as session:
+        job, series, missing, first = await _saved(session, tmp_path)
+        second_path = tmp_path / "Firefly Bad Company (2019)" / "Firefly Bad Company 001 alt.cbz"
+        second_path.write_bytes(Path(first.file_path).read_bytes())
+        second = ImportedFile(
+            import_job_id=job.id,
+            import_series_id=series.id,
+            comicvine_issue_id=first.comicvine_issue_id,
+            parsed_issue_number=first.parsed_issue_number,
+            parsed_year=first.parsed_year,
+            file_path=str(second_path),
+            file_name=second_path.name,
+            file_size=second_path.stat().st_size,
+            file_format="cbz",
+            source_signature=build_file_identity_signature(second_path),
+            status=ImportedFileStatus.MATCHED,
+            matched_issue_cv_id=first.matched_issue_cv_id,
+            match_method="comicinfo",
+            diagnostics=deepcopy(first.diagnostics),
+        )
+        session.add(second)
+        await session.commit()
+        job_id, missing_id, second_id = job.id, missing.id, second.id
+
+    preview = await authenticated_client.get(f"/import/{job_id}/files/{missing_id}/source")
+    assert preview.status_code == 200
+    assert "Choose the file that replaces this stale Mylar reference" in preview.text
+    assert "Firefly Bad Company 001 (2019).cbz" in preview.text
+    assert "Firefly Bad Company 001 alt.cbz" in preview.text
+    assert "dropdown-select-contract" in preview.text
+
+    result = await authenticated_client.post(
+        f"/import/{job_id}/files/{missing_id}/source",
+        data={
+            "token": token(preview.text),
+            "source_action": "pair",
+            "candidate_file_id": second_id,
+        },
+        headers=csrf(authenticated_client),
+    )
+    assert result.status_code == 200, result.text
+    trigger.assert_called_once_with(job_id, missing_id)
+    async with sec_db() as session:
+        missing = await session.get(ImportedFile, missing_id)
+        assert missing.diagnostics["review_source_action"]["candidate_id"] == second_id
+
+
 async def test_inline_issue_choices_are_bounded_and_use_the_same_scoped_assignment(
     authenticated_client, sec_db, monkeypatch
 ):
@@ -121,11 +181,19 @@ async def test_inline_issue_choices_are_bounded_and_use_the_same_scoped_assignme
     response = await authenticated_client.get(url)
     assert response.status_code == 200
     assert 'data-testid="import-review-issue-choices"' in response.text
+    assert 'data-testid="import-review-issue-choices-viewport"' in response.text
+    assert 'data-visible-rows="10"' in response.text
+    assert 'tabindex="0"' in response.text
+    assert 'aria-label="Issue choices for Review Series 1 #1.cbz"' in response.text
     assert response.text.count('data-testid="import-review-use-issue"') == 25
     assert 'role="dialog"' not in response.text
+    assert 'data-testid="import-review-issue-pagination"' in response.text
+    assert ">Next</button>" in response.text
     assert "issue_page=2" in response.text
     second = await authenticated_client.get(url + "&issue_page=2")
     assert second.text.count('data-testid="import-review-use-issue"') == 6
+    assert 'data-testid="import-review-issue-pagination"' in second.text
+    assert ">Previous</button>" in second.text
     filtered = await authenticated_client.get(url + "&q=Issue%2031")
     assert filtered.text.count('data-testid="import-review-use-issue"') == 1
     assert 'value="231"' in filtered.text

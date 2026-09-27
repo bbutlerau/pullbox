@@ -1,16 +1,47 @@
 {% from "components/dropdown_select.html" import dropdown_select %}
 
 <section data-testid="import-review-story-arcs" aria-labelledby="import-story-arc-review-heading">
-  <div class="border-b border-pb-border px-4 py-4">
-    <h3 id="import-story-arc-review-heading" class="text-sm font-semibold text-pb-text">
-      Story arcs detected for this import
-    </h3>
-    <p class="mt-1 text-xs leading-5 text-pb-text-sec">
-      Choose whether to create or merge each arc. Missing entries stay in reading order; safety and identity conflicts must be fixed before selection.
-    </p>
-    <p class="mt-1 text-xs leading-5 text-pb-text-sec">
-      Import logical arc and memberships independently from the optional choice to create or reference a separate arc folder.
-    </p>
+  <div class="flex flex-col gap-3 border-b border-pb-border px-4 py-4 sm:flex-row sm:items-start sm:justify-between">
+    <div>
+      <h3 id="import-story-arc-review-heading" class="text-sm font-semibold text-pb-text">
+        {{ 'Skipped story arcs' if story_arc_skipped else 'Story arcs detected for this import' }}
+      </h3>
+      <p class="mt-1 text-xs leading-5 text-pb-text-sec">
+        {% if story_arc_skipped %}
+        Restore an arc to return it to active review.
+        {% else %}
+        Choose whether to create or merge each arc. Missing entries stay in reading order; safety and identity conflicts must be fixed before selection.
+        {% endif %}
+      </p>
+      {% if not story_arc_skipped %}
+      <p class="mt-1 text-xs leading-5 text-pb-text-sec">
+        Import logical arc and memberships independently from the optional choice to create or reference a separate arc folder.
+      </p>
+      {% endif %}
+    </div>
+    {% if story_arc_skipped %}
+    <button
+      type="button"
+      data-testid="import-story-arc-show-active"
+      hx-get="/import/{{ job.id }}/review-partial?status=story_arcs"
+      hx-target="#import-step-review-shell"
+      hx-swap="morph:outerHTML"
+      hx-sync="#import-step-review-shell:replace"
+      hx-push-url="false"
+      class="btn-ghost btn-sm shrink-0"
+    >Back to active arcs</button>
+    {% elif review_summary.story_arcs_skipped %}
+    <button
+      type="button"
+      data-testid="import-story-arc-show-skipped"
+      hx-get="/import/{{ job.id }}/review-partial?status=story_arcs&amp;story_arc_skipped=true"
+      hx-target="#import-step-review-shell"
+      hx-swap="morph:outerHTML"
+      hx-sync="#import-step-review-shell:replace"
+      hx-push-url="false"
+      class="btn-ghost btn-sm shrink-0"
+    >Review skipped ({{ review_summary.story_arcs_skipped }})</button>
+    {% endif %}
   </div>
 
   <div class="overflow-x-auto">
@@ -46,7 +77,11 @@
           <td>
             <p class="font-medium text-pb-text">{{ arc.name }}</p>
             <p class="mt-0.5 text-[11px] text-pb-text-dim">
+              {% if arc.status.value == 'skipped' %}
+              Excluded from this import
+              {% else %}
               {{ 'Merge into ' ~ arc.proposed_story_arc_name if arc.proposed_story_arc_name else 'Create a new canonical story arc' }}
+              {% endif %}
             </p>
           </td>
           <td>
@@ -63,6 +98,7 @@
               {% if arc.entries_skipped %}<span>{{ arc.entries_skipped }} skipped</span>{% endif %}
             </div>
             <p class="mt-1 text-[11px] text-pb-text-dim">{{ arc.entries_total }} entries total</p>
+            {% if arc.status.value != 'skipped' %}
             <button
               type="button"
               data-testid="import-story-arc-review-entries-{{ arc.id }}"
@@ -76,8 +112,12 @@
             >
               {{ 'Reviewing entries' if story_arc_selected_id == arc.id else 'Review entries' }}
             </button>
+            {% endif %}
           </td>
           <td>
+            {% if arc.status.value == 'skipped' %}
+            <span class="pill pill-neutral">Not selected</span>
+            {% else %}
             <label for="import-story-arc-target-{{ arc.id }}" class="sr-only">Import target for {{ arc.name }}</label>
             {% set arc_target_options = [("", "Create new story arc")] %}
             {% for candidate in arc.merge_candidates %}
@@ -93,13 +133,22 @@
               wrap_options=true,
               class_name="min-w-48 text-xs"
             ) }}
+            {% endif %}
           </td>
           <td class="is-right">
             <fieldset aria-label="Story arc decision for {{ arc.name }}" class="flex flex-wrap justify-end gap-2">
+              {% if arc.status.value == 'skipped' %}
+              <button
+                type="button"
+                data-testid="import-story-arc-restore-{{ arc.id }}"
+                @click="updateStoryArcDecision({{ arc.id }}, 'restore', null, $event.currentTarget)"
+                class="btn-primary btn-sm"
+              >Restore</button>
+              {% else %}
               <button
                 type="button"
                 data-testid="import-story-arc-select-{{ arc.id }}"
-                @click="updateStoryArcDecision({{ arc.id }}, 'select', document.querySelector('[data-testid=&quot;import-story-arc-target-{{ arc.id }}&quot;] [data-dropdown-select-input]'))"
+                @click="updateStoryArcDecision({{ arc.id }}, 'select', document.querySelector('[data-testid=&quot;import-story-arc-target-{{ arc.id }}&quot;] [data-dropdown-select-input]'), $event.currentTarget)"
                 {% if arc.selection_blocked %}disabled{% endif %}
                 class="btn-primary btn-sm disabled:cursor-not-allowed disabled:opacity-40"
               >
@@ -108,11 +157,12 @@
               <button
                 type="button"
                 data-testid="import-story-arc-skip-{{ arc.id }}"
-                @click="updateStoryArcDecision({{ arc.id }}, 'skip', null)"
+                @click="updateStoryArcDecision({{ arc.id }}, 'skip', null, $event.currentTarget)"
                 class="btn-ghost btn-sm"
               >
-                {{ 'Skipped' if arc.status.value == 'skipped' else 'Skip' }}
+                Skip
               </button>
+              {% endif %}
             </fieldset>
             {% if arc.selection_block_reason %}
             <p class="mt-2 max-w-64 text-right text-[11px] leading-4 text-pb-warning">
@@ -121,6 +171,7 @@
             {% endif %}
           </td>
         </tr>
+        {% if arc.status.value != 'skipped' %}
         {% set policy = arc.policy_review %}
         <tr data-import-story-arc-policy-row="{{ arc.id }}">
           <td colspan="6" class="bg-pb-card-hover/25 px-4 py-4">
@@ -285,10 +336,11 @@
             </section>
           </td>
         </tr>
+        {% endif %}
         {% else %}
         <tr>
           <td colspan="6" class="px-4 py-8 text-center text-pb-text-dim">
-            No story arcs were staged for this import.
+            {{ 'No skipped story arcs.' if story_arc_skipped else 'No story arcs were staged for this import.' }}
           </td>
         </tr>
         {% endfor %}
@@ -299,6 +351,7 @@
   {% if story_arc_selected_item %}
   <section
     data-testid="import-story-arc-entry-review"
+    data-import-story-arc-entry-review="{{ story_arc_selected_item.id }}"
     aria-labelledby="import-story-arc-entry-review-heading"
     class="border-t border-pb-border"
   >
@@ -362,7 +415,7 @@
             class_name="min-w-40 text-xs"
           ) }}
         </div>
-        <button type="submit" class="btn-secondary btn-sm">Apply filter</button>
+        <button type="submit" data-testid="import-story-arc-entry-filter-apply" class="btn-primary btn-sm">Apply filter</button>
       </form>
     </div>
 

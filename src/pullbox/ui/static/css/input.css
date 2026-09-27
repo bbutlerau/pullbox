@@ -7287,6 +7287,22 @@
     overflow-wrap: anywhere;
     text-overflow: clip;
   }
+  .import-review-issue-choices-viewport {
+    max-height: calc(2.25rem + (10 * 2.5rem));
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
+  .import-review-issue-choices-viewport .downloads-table th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
+  .import-review-issue-choices-viewport .downloads-table td {
+    padding-block: 0.25rem;
+  }
+  .import-review-issue-choices-viewport .downloads-table tbody tr {
+    height: 2.5rem;
+  }
   .dropdown-select-panel-wrap .dropdown-select-option {
     align-items: flex-start;
   }
@@ -8465,13 +8481,13 @@ input[type="range"].range-pb::-moz-range-thumb {
 .issue-search-empty-copy {
   margin-top: 0.25rem;
   font-size: 0.78rem;
-  color: var(--pb-text-sec);
+  color: var(--pb-text-secondary);
 }
 .downloads-release-name {
   display: block;
   max-width: 260px;
   font-weight: 600;
-  color: var(--pb-text);
+  color: var(--pb-text-primary);
 }
 .downloads-release-meta {
   margin-top: 0.2rem;
@@ -8670,6 +8686,26 @@ input[type="range"].range-pb::-moz-range-thumb {
 .downloads-action-btn:hover {
   border-color: var(--pb-interactive);
   background: color-mix(in srgb, var(--pb-info) 10%, transparent);
+  color: var(--pb-interactive);
+}
+.import-review-row-menu-item {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 8px 12px;
+  color: var(--pb-text);
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.25rem;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 140ms ease, color 140ms ease;
+}
+.import-review-row-menu-item:hover,
+.import-review-row-menu-item:focus-visible {
+  background: var(--pb-interactive-dim);
   color: var(--pb-interactive);
 }
 .downloads-action-btn.is-danger:hover {

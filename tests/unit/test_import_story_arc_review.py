@@ -28,7 +28,11 @@ from pullbox.models.story_arc import (
     StoryArcSourceKind,
 )
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
-from pullbox.schemas.import_job import ConfirmImportRequest, StoryArcReviewDecision
+from pullbox.schemas.import_job import (
+    ConfirmImportRequest,
+    StoryArcReviewDecision,
+    StoryArcReviewDecisionRequest,
+)
 from pullbox.services import library_root_management
 
 
@@ -124,6 +128,11 @@ def test_confirm_schema_adds_deduplicated_story_arc_decisions_without_reusing_se
             proposed_story_arc_id=4,
         )
 
+    restored = StoryArcReviewDecisionRequest(action="restore")
+    assert restored.action == "restore"
+    with pytest.raises(PydanticValidationError, match="proposed_story_arc_id"):
+        StoryArcReviewDecisionRequest(action="restore", proposed_story_arc_id=4)
+
 
 @pytest.mark.asyncio
 async def test_story_arc_select_and_skip_persist_only_staging_decisions(db_session: Any) -> None:
@@ -179,6 +188,18 @@ async def test_story_arc_select_and_skip_persist_only_staging_decisions(db_sessi
     assert skipped.status == ImportedStoryArcStatus.SKIPPED
     assert skipped.selected_for_import is False
     assert skipped.proposed_story_arc_id is None
+    assert all(entry.selected_for_import is False for entry in entries)
+
+    restored = await update_import_story_arc_decision(
+        db_session,
+        job.id,
+        staged.id,
+        action="restore",
+        proposed_story_arc_id=None,
+    )
+    assert restored.status == ImportedStoryArcStatus.NEEDS_REVIEW
+    assert restored.selected_for_import is False
+    assert restored.proposed_story_arc_id is None
     assert all(entry.selected_for_import is False for entry in entries)
 
 
@@ -342,6 +363,44 @@ async def test_story_arc_review_page_is_paginated_and_preserves_order_and_counts
 
 
 @pytest.mark.asyncio
+async def test_story_arc_review_page_exposes_skipped_arcs_in_a_separate_view(
+    db_session: Any,
+) -> None:
+    from pullbox.services.import_story_arc_review import load_import_story_arc_review_page
+
+    job = ImportJob(
+        source_path="/tmp/mylar.db",
+        source_type=ImportSourceType.MYLAR3,
+        status=ImportJobStatus.REVIEW,
+    )
+    db_session.add(job)
+    await db_session.flush()
+    await _stage_arc(db_session, job, name="Keep reviewing", source_ordinal=1)
+    await _stage_arc(
+        db_session,
+        job,
+        name="Skipped arc",
+        source_ordinal=2,
+        status=ImportedStoryArcStatus.SKIPPED,
+    )
+
+    page = await load_import_story_arc_review_page(db_session, job.id)
+
+    assert page.total == 1
+    assert [item.name for item in page.items] == ["Keep reviewing"]
+
+    skipped_page = await load_import_story_arc_review_page(
+        db_session,
+        job.id,
+        skipped_only=True,
+    )
+
+    assert skipped_page.total == 1
+    assert [item.name for item in skipped_page.items] == ["Skipped arc"]
+    assert skipped_page.items[0].status is ImportedStoryArcStatus.SKIPPED
+
+
+@pytest.mark.asyncio
 async def test_review_summary_keeps_story_arcs_out_of_ready_import_totals(db_session: Any) -> None:
     from pullbox.ui.import_review_summary import load_import_review_summary
 
@@ -359,15 +418,24 @@ async def test_review_summary_keeps_story_arcs_out_of_ready_import_totals(db_ses
     )
     staged.status = ImportedStoryArcStatus.READY
     staged.selected_for_import = True
+    await _stage_arc(
+        db_session,
+        job,
+        name="Skipped arc",
+        source_ordinal=2,
+        status=ImportedStoryArcStatus.SKIPPED,
+    )
     await db_session.flush()
 
     summary = await load_import_review_summary(db_session, job)
 
     assert summary["series_total"] == 0
-    assert summary["story_arcs_total"] == 1
+    assert summary["story_arcs_total"] == 2
+    assert summary["story_arcs_active"] == 1
+    assert summary["story_arcs_skipped"] == 1
     assert summary["story_arcs_selected"] == 1
-    assert summary["story_arc_entries_total"] == 2
-    assert summary["story_arc_entries_resolved"] == 1
+    assert summary["story_arc_entries_total"] == 3
+    assert summary["story_arc_entries_resolved"] == 2
     assert summary["story_arc_entries_missing"] == 1
     assert summary["selected_series_total"] == 0
     assert summary["selected_items_total"] == 0

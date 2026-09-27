@@ -6,7 +6,7 @@ LANE_DESCRIPTIONS = {
     "fix_source": "Fix the source, then recheck. Ready files do not have to wait.",
     "blocked": "These files cannot import safely. Replace them or leave them out.",
     "ready": "Matched files ready for your library. Choose what to import.",
-    "info": "Missing references and files already handled. Nothing here blocks ready files.",
+    "info": "Resolve stale file references by pairing, rechecking, or skipping them.",
     "story_arcs": "Optional reading lists. Canonical comics import independently.",
 }
 
@@ -18,8 +18,7 @@ FILTER_LABELS = {
     "single_page_comic": "One-page archives",
     "decompression_size_limit": "Large files",
     "duplicate_copy_confirm": "Duplicate copies",
-    "source_missing": "Stale Mylar references",
-    "already_handled": "Already handled",
+    "source_missing": "Missing references",
 }
 
 REASON_DESCRIPTIONS = {
@@ -38,12 +37,17 @@ REASON_DESCRIPTIONS = {
     "outside_approved_root": "Register or map the source in import setup before continuing.",
     "zero_byte": "An empty file cannot contain a comic. Replace it or skip it.",
     "archive_no_pages": "No readable comic pages were found in this archive.",
-    "dangerous_path_or_payload": "Unsafe archive content cannot be allowed once.",
-    "unsupported_file_type": "This file is not a supported comic archive.",
+    "dangerous_path_or_payload": "Unsafe archive content cannot be allowed.",
+    "unsupported_file_type": (
+        "This file type is not supported. Convert or replace it, then recheck it."
+    ),
+    "unknown": (
+        "Pullbox could not establish that this file is safe to import. Repair or replace it, "
+        "then recheck it."
+    ),
     "source_missing": (
         "The saved filename is not on disk. Pair a proven replacement or skip the reference."
     ),
-    "already_handled": "These files were skipped, already owned, or handled by the import.",
     "ready": "The saved issue matches are ready. Original files remain protected.",
     "preparing_match": "Your decision was saved. Matching continues in the background.",
 }

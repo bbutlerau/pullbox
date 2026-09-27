@@ -15,6 +15,7 @@ from pullbox.services.dashboard_intelligence_service import (
     _download_client_label,
     _hour_bucket_start,
 )
+from pullbox.ui import dashboard_routes
 
 
 def _storage(**overrides: object) -> SimpleNamespace:
@@ -367,3 +368,49 @@ async def test_best_effort_cache_write_contains_non_lock_failures(
         )
     else:
         service._log_cache_error.assert_not_called()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_dashboard_route_records_navigation_phase_timings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    templates = SimpleNamespace(
+        TemplateResponse=lambda _request, template, context: SimpleNamespace(
+            template_name=template,
+            context=context,
+        )
+    )
+    monkeypatch.setattr(dashboard_routes, "_get_templates", lambda: templates)
+    monkeypatch.setattr(
+        dashboard_routes,
+        "_build_context",
+        lambda request, user=None, **kwargs: {"request": request, "user": user, **kwargs},
+    )
+    monkeypatch.setattr(
+        dashboard_routes,
+        "load_dashboard_intelligence",
+        AsyncMock(return_value=SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        dashboard_routes,
+        "build_dashboard_view",
+        AsyncMock(return_value=SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        dashboard_routes,
+        "load_dashboard_continue_reading",
+        AsyncMock(return_value=()),
+    )
+    request = SimpleNamespace(state=SimpleNamespace())
+
+    response = await dashboard_routes.dashboard(
+        request,
+        SimpleNamespace(id=1),
+        AsyncMock(),
+    )
+
+    assert response.template_name == "pages/dashboard.html"
+    assert isinstance(request.state.dashboard_intelligence_ms, float)
+    assert isinstance(request.state.dashboard_view_ms, float)
+    assert isinstance(request.state.dashboard_reading_ms, float)
+    assert isinstance(request.state.dashboard_render_ms, float)

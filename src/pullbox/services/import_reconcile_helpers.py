@@ -263,10 +263,11 @@ def apply_reconcile_decisions(
             imp_file.matched_issue_cv_id = None
             imp_file.match_confidence = "manual"
             imp_file.match_method = PROVIDER_MISSING_ISSUE_PLACEHOLDER_METHOD
-            imp_file.include_in_import = False
+            imp_file.include_in_import = True
             imp_file.error_message = None
             imp_file.diagnostics = {
                 **dict(imp_file.diagnostics or {}),
+                "review_selection": True,
                 "kind": PROVIDER_MISSING_ISSUE_PLACEHOLDER_KIND,
                 "target_state": "provisional_issue_target",
                 "target_series_cv_id": item.user_selected_cv_id or item.cv_id,
@@ -298,10 +299,11 @@ def apply_reconcile_decisions(
         imp_file.matched_issue_cv_id = decision.issue_cv_id
         imp_file.match_confidence = "manual"
         imp_file.match_method = "import_reconcile"
-        imp_file.include_in_import = False
+        imp_file.include_in_import = True
         imp_file.error_message = None
         imp_file.diagnostics = {
             **dict(imp_file.diagnostics or {}),
+            "review_selection": True,
             "kind": "import_reconcile",
             "resolution": "assigned",
             "target_issue_summary": {

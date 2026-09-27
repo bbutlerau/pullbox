@@ -1,9 +1,11 @@
 {% from "components/dropdown_select.html" import dropdown_select %}
-<div class="modal-shell" x-data='importReviewFileActionData({jobId: {{ job.id }}, fileId: {{ file.id }}, action: {{ action|tojson }}})' x-show="open" x-init="$nextTick(() => $refs.fileDialog.focus())" @keydown.escape.window="close()" @keydown.tab="trapImportReviewDialog($event, $refs.fileDialog)" data-testid="import-review-file-action">
+{% set selected_candidate = candidate if candidate is defined else none %}
+{% set replacement_candidates = candidates if candidates is defined else [] %}
+<div class="modal-shell" x-data='importReviewFileActionData({jobId: {{ job.id }}, fileId: {{ file.id }}, action: {{ action|tojson }}, candidateId: {{ (selected_candidate.id|string if selected_candidate else "")|tojson }}})' x-show="open" x-init="$nextTick(() => $refs.fileDialog.focus())" @keydown.escape.window="close()" @keydown.tab="trapImportReviewDialog($event, $refs.fileDialog)" data-testid="import-review-file-action">
   <div class="modal-backdrop" @click="close()"></div>
   <form class="modal-panel max-w-xl" x-ref="fileDialog" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="review-file-action-title" hx-boost="false" @submit.prevent="submit($el)" @click.outside="if (!$event.target.closest('[data-dropdown-select-panel]')) close()">
     <div class="modal-header">
-      <h3 id="review-file-action-title" class="text-base font-semibold text-pb-text">{% if action == 'assign' %}Choose the correct issue{% else %}Recheck source{% endif %}</h3>
+      <h3 id="review-file-action-title" class="text-base font-semibold text-pb-text">{% if action == 'assign' %}Choose the correct issue{% elif replacement_candidates %}Pair to file{% else %}Recheck recorded path{% endif %}</h3>
       <button type="button" class="icon-btn icon-btn-sm" aria-label="Close dialog" @click="close()" :disabled="selecting">&times;</button>
     </div>
     <div class="modal-body space-y-4 p-5">
@@ -18,10 +20,18 @@
       {{ dropdown_select(name="issue_cv_id", trigger_id="review-file-issue-dropdown-trigger", options=choices.options, local_model="issueId", class_name="w-full") }}
       {% else %}
       <input type="hidden" name="source_action" value="{{ source_action }}">
-      {% if candidate %}
-      <p class="text-sm text-pb-text-sec">A possible replacement has the same exact ComicVine issue identity:</p>
-      <p class="break-words text-sm text-pb-text">{{ candidate.file_name }}</p>
-      <p class="text-sm text-pb-text-sec">Pullbox will verify that the old file is absent and the replacement is unchanged, safe, and the same issue before pairing them. Nothing is moved, deleted, or silently skipped.</p>
+      {% if replacement_candidates %}
+      <p class="text-sm text-pb-text-sec">Choose the file that replaces this stale Mylar reference. Only files with the same exact ComicVine issue identity are shown.</p>
+      {% if selected_candidate %}
+      <input type="hidden" name="candidate_file_id" value="{{ selected_candidate.id }}">
+      <p class="break-words text-sm text-pb-text">{{ selected_candidate.file_name }}</p>
+      {% else %}
+      {% set replacement_choices = namespace(options=[["", "Choose a replacement file"]]) %}
+      {% for replacement in replacement_candidates %}{% set replacement_choices.options = replacement_choices.options + [[replacement.id, replacement.file_name]] %}{% endfor %}
+      <label for="review-file-replacement-dropdown-trigger" class="block text-sm text-pb-text">Replacement file</label>
+      {{ dropdown_select(name="candidate_file_id", trigger_id="review-file-replacement-dropdown-trigger", options=replacement_choices.options, local_model="candidateId", class_name="w-full", wrap_options=true) }}
+      {% endif %}
+      <p class="text-sm text-pb-text-sec">Pullbox will verify that the recorded file is absent and the replacement is unchanged, safe, and the same issue before pairing them. Nothing is moved, deleted, or silently skipped.</p>
       {% else %}
       <p class="text-sm text-pb-text-sec">After you repair access or replace the file at its recorded location, Pullbox will inspect it again in the background. A changed file must pass fresh safety and matching checks. This does not grant a safety exception or skip the file.</p>
       {% endif %}
@@ -34,7 +44,7 @@
       {% if action == 'assign' %}
       <button type="submit" class="btn-primary" :disabled="selecting || !issueId" x-text="selecting ? 'Assigning...' : 'Assign issue'">Assign issue</button>
       {% else %}
-      <button type="submit" class="btn-primary" :disabled="selecting">{{ 'Verify and pair' if candidate else 'Recheck source' }}</button>
+      <button type="submit" class="btn-primary" :disabled="selecting{% if replacement_candidates %} || !candidateId{% endif %}">{{ 'Verify and pair' if replacement_candidates else 'Recheck recorded path' }}</button>
       {% endif %}
     </div>
   </form>

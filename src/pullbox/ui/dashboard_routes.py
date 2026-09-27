@@ -1,6 +1,7 @@
 """Dashboard page and HTMX UI routes."""
 
 import shutil
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -189,10 +190,23 @@ async def dashboard(
     session: DbSession,
 ) -> Response:
     """Render the dashboard as an executive operations briefing."""
+    phase_started = time.monotonic()
     dashboard_payload = await load_dashboard_intelligence(session, allow_rollup_refresh=True)
+    request.state.dashboard_intelligence_ms = round(
+        (time.monotonic() - phase_started) * 1000,
+        2,
+    )
+
+    phase_started = time.monotonic()
     dashboard_view = await build_dashboard_view(session, dashboard_payload)
+    request.state.dashboard_view_ms = round((time.monotonic() - phase_started) * 1000, 2)
+
+    phase_started = time.monotonic()
     continue_reading = await load_dashboard_continue_reading(session, user_id=user.id)
-    return _templates().TemplateResponse(
+    request.state.dashboard_reading_ms = round((time.monotonic() - phase_started) * 1000, 2)
+
+    phase_started = time.monotonic()
+    response = _templates().TemplateResponse(
         request,
         "pages/dashboard.html",
         _ctx(
@@ -203,6 +217,8 @@ async def dashboard(
             continue_reading=continue_reading,
         ),
     )
+    request.state.dashboard_render_ms = round((time.monotonic() - phase_started) * 1000, 2)
+    return response
 
 
 async def load_dashboard_continue_reading(

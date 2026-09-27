@@ -204,6 +204,11 @@ async def assign_review_file(
             value.is_preferred = False
     await session.flush()
     await recompute_file_counters(session, job, series_ids=list({old_series_id, target.id}))
+    if target.status is ImportSeriesStatus.MATCHED and file.status in {
+        ImportedFileStatus.MATCHED,
+        ImportedFileStatus.CONFIRMED,
+    }:
+        target.selected_for_import = True
     for row in (parent, target):
         row.file_count = row.files_total
         if not row.files_total:

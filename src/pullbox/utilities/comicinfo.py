@@ -19,10 +19,10 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-from defusedxml import ElementTree as DefusedET
 from defusedxml.common import DefusedXmlException
 
 from pullbox.core.comicinfo_sanitizer import scrub_stale_retailer_value
+from pullbox.core.xml_security import parse_untrusted_xml
 
 logger = structlog.get_logger(__name__)
 
@@ -164,7 +164,7 @@ def _parse_existing_comicinfo(
     xml_content: str,
 ) -> tuple[dict[str, str], list[ET.Element]]:
     """Parse existing ComicInfo.xml into known-field data plus extra nodes."""
-    root = DefusedET.fromstring(xml_content)
+    root = parse_untrusted_xml(xml_content)
     existing_data: dict[str, str] = {}
     extra_nodes: list[ET.Element] = []
 

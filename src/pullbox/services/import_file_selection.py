@@ -22,6 +22,29 @@ def set_review_file_selection(file: ImportedFile, selected: bool) -> None:
     file.diagnostics = {**dict(file.diagnostics or {}), "review_selection": selected}
 
 
+async def sync_review_series_selection(
+    session: AsyncSession,
+    series: ImportedSeries,
+) -> None:
+    """Select a ready series only when at least one importable file is selected."""
+    if series.status not in {ImportSeriesStatus.MATCHED, ImportSeriesStatus.DUPLICATE}:
+        series.selected_for_import = False
+        await session.flush()
+        return
+    await session.flush()
+    selected_file_id = await session.scalar(
+        select(ImportedFile.id)
+        .where(
+            ImportedFile.import_series_id == series.id,
+            ImportedFile.status.in_([ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED]),
+            ImportedFile.include_in_import.is_(True),
+        )
+        .limit(1)
+    )
+    series.selected_for_import = selected_file_id is not None
+    await session.flush()
+
+
 async def defer_excluded_review_files(session: AsyncSession, job_id: int) -> set[int]:
     """At confirmation, retain opted-out files as actionable Follow-up decisions."""
     files = list(

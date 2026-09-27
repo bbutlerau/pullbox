@@ -1,4 +1,4 @@
-        {% if safety_failure_summary and (active_reason in safety_reason_keys or active_review_view == 'safety_blocked') %}
+        {% if safety_failure_summary and active_reason != 'decompression_size_limit' and (active_reason in safety_reason_keys or active_review_view == 'safety_blocked') %}
         <div data-testid="import-review-safety-category-summary" class="grid gap-3 border-b border-pb-border p-4 {{ '' if active_reason == 'single_page_comic' else 'lg:grid-cols-2' }}">
           {% for safety_category in safety_failure_summary if not active_reason or safety_category.category == active_reason %}
           {% set bulk_preview_for_category = safety_bulk_preview if safety_bulk_preview is defined and safety_bulk_preview and safety_bulk_preview.category.value == safety_category.category else none %}

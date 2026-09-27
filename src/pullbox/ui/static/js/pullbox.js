@@ -2183,8 +2183,11 @@ function handleImportReviewTabKey(event) {
 }
 
 function positionImportReviewMenu(menu, event) {
-  if (event.newState !== 'open') { return; }
   var trigger = document.querySelector('[popovertarget="' + menu.id + '"]');
+  if (trigger) {
+    trigger.setAttribute("aria-expanded", event.newState === "open" ? "true" : "false");
+  }
+  if (event.newState !== 'open') { return; }
   if (!trigger) { return; }
   var rect = trigger.getBoundingClientRect();
   menu.style.left = Math.max(8, Math.min(window.innerWidth - 232, rect.right - 224)) + 'px';
@@ -2714,6 +2717,7 @@ function importCvSearchModalData(config) {
 function importReviewFileActionData(config) {
   var state = importCvSearchModalData(config);
   state.issueId = "";
+  state.candidateId = config.candidateId == null ? "" : String(config.candidateId);
   state.error = "";
   state.submit = async function (form) {
     if (this.selecting) return;
@@ -7521,6 +7525,7 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
     importGateOpen: false,
     importGateTrigger: null,
     reviewActionPending: false,
+    storyArcDecisionPending: {},
     reviewSameComicGroups: [],
     reviewCopyChoices: {},
     confirmError: "",
@@ -7788,9 +7793,27 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       }
     },
 
-    updateStoryArcDecision: async function (id, action, targetElement) {
+    removeStoryArcReviewRows: function (id) {
+      var selectors = [
+        '[data-import-story-arc-row="' + id + '"]',
+        '[data-import-story-arc-policy-row="' + id + '"]',
+        '[data-import-story-arc-entry-review="' + id + '"]',
+      ];
+      selectors.forEach(function (selector) {
+        var element = document.querySelector(selector);
+        if (element) {
+          element.remove();
+        }
+      });
+    },
+
+    updateStoryArcDecision: async function (id, action, targetElement, triggerElement) {
       var numericId = Number(id);
-      if (!Number.isFinite(numericId) || ["select", "skip"].indexOf(action) === -1) {
+      if (
+        !Number.isFinite(numericId) ||
+        ["select", "skip", "restore"].indexOf(action) === -1 ||
+        this.storyArcDecisionPending[numericId]
+      ) {
         return;
       }
 
@@ -7800,6 +7823,14 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
         if (!Number.isFinite(proposedStoryArcId)) {
           proposedStoryArcId = null;
         }
+      }
+
+      var button = triggerElement || null;
+      var originalLabel = button ? button.textContent : "";
+      this.storyArcDecisionPending[numericId] = true;
+      if (button) {
+        button.disabled = true;
+        button.textContent = action === "skip" ? "Skipping..." : "Saving...";
       }
 
       try {
@@ -7827,8 +7858,28 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
           throw new Error(error.detail || "Failed to update story arc decision.");
         }
 
-        await this.refreshReviewSummary();
-        await this.refreshSeriesReview();
+        if (action === "skip") {
+          this.removeStoryArcReviewRows(numericId);
+          var reviewData = this;
+          if (typeof showToast === "function") {
+            showToast({
+              message: "Story arc skipped.",
+              level: "success",
+              actionLabel: "Undo",
+              onAction: function () {
+                return reviewData.updateStoryArcDecision(numericId, "restore", null, null);
+              },
+            });
+          }
+          Promise.all([this.refreshReviewSummary(), this.refreshSeriesReviewQuietly()]).catch(
+            function () {},
+          );
+        } else {
+          await Promise.all([this.refreshReviewSummary(), this.refreshSeriesReview()]);
+          if (action === "restore" && typeof showToast === "function") {
+            showToast({ message: "Story arc restored to review.", level: "success" });
+          }
+        }
       } catch (err) {
         if (typeof showToast === "function") {
           showToast({
@@ -7836,6 +7887,12 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
               err && err.message ? err.message : "Failed to update story arc decision.",
             level: "error",
           });
+        }
+      } finally {
+        delete this.storyArcDecisionPending[numericId];
+        if (button && button.isConnected) {
+          button.disabled = false;
+          button.textContent = originalLabel;
         }
       }
     },
@@ -8262,6 +8319,9 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       var sortInput = document.querySelector("#import-step-review-shell input[name='review_sort']");
       var pageInput = document.querySelector("#import-step-review-shell input[name='review_page']");
       var reasonInput = document.querySelector("#import-step-review-shell input[name='review_reason']");
+      var skippedArcsInput = document.querySelector(
+        "#import-step-review-shell input[name='review_story_arc_skipped']",
+      );
 
       if (statusInput && statusInput.value) {
         params.set("status", statusInput.value);
@@ -8273,6 +8333,9 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
         params.set("page", pageInput.value);
       }
       if (reasonInput && reasonInput.value) { params.set("reason", reasonInput.value); }
+      if (skippedArcsInput && skippedArcsInput.value) {
+        params.set("story_arc_skipped", skippedArcsInput.value);
+      }
 
       var query = params.toString();
       return query ? url + "?" + query : url;
@@ -8349,6 +8412,34 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
 
     skipReviewFile: function (seriesId, fileId, button) {
       return this.applyReviewAction("/api/v1/import/" + this.jobId + "/series/" + seriesId + "/reconcile", "POST", { decisions: [{ imported_file_id: fileId, action: "skip" }] }, button);
+    },
+
+    toggleReviewIssueChoices: function (fileId, url, button) {
+      var panelId = "import-review-issue-choices-" + String(fileId);
+      var panel = document.getElementById(panelId);
+      if (!panel || !button) { return; }
+
+      var shouldOpen = button.getAttribute("aria-expanded") !== "true";
+      button.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+      panel.hidden = !shouldOpen;
+      if (!shouldOpen || panel.dataset.importReviewIssueChoicesLoaded === "true") { return; }
+
+      panel.setAttribute("aria-busy", "true");
+      var request = htmx.ajax("GET", url, { target: "#" + panelId, swap: "outerHTML" });
+      if (!request || typeof request.then !== "function") { return; }
+      request.then(function () {
+        var refreshed = document.getElementById(panelId);
+        if (!refreshed) { return; }
+        refreshed.hidden = button.getAttribute("aria-expanded") !== "true";
+        refreshed.removeAttribute("aria-busy");
+      }).catch(function () {
+        var current = document.getElementById(panelId);
+        button.setAttribute("aria-expanded", "false");
+        if (current) {
+          current.hidden = true;
+          current.removeAttribute("aria-busy");
+        }
+      });
     },
 
     keepSuggestedCopies: function (resolutions, button) {
@@ -20775,7 +20866,7 @@ function replayQueuedToast() {
 
 /**
  * Show a toast notification.
- * @param {object} detail - { message: string, level: "success"|"error"|"warning"|"info", id?: string, persistent?: boolean, spinner?: boolean }
+ * @param {object} detail - { message: string, level: "success"|"error"|"warning"|"info", id?: string, persistent?: boolean, spinner?: boolean, actionLabel?: string, onAction?: Function }
  */
 function showToast(detail) {
   if (_pbAuthRedirectState.active) return;
@@ -20830,6 +20921,21 @@ function showToast(detail) {
     escapeHtml(detail.message || "") +
     "</span>" +
     '<button onclick="dismissToast(this.parentElement)" class="ml-2 opacity-70 hover:opacity-100">&times;</button>';
+
+  if (detail.actionLabel && typeof detail.onAction === "function") {
+    var actionButton = document.createElement("button");
+    actionButton.type = "button";
+    actionButton.className =
+      "rounded-md border border-white/60 px-2 py-1 text-xs font-semibold text-white hover:bg-white/15 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white";
+    actionButton.textContent = detail.actionLabel;
+    actionButton.addEventListener("click", function () {
+      actionButton.disabled = true;
+      Promise.resolve(detail.onAction()).finally(function () {
+        dismissToast(el);
+      });
+    });
+    el.insertBefore(actionButton, el.lastElementChild);
+  }
 
   container.appendChild(el);
 

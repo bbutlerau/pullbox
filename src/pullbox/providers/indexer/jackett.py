@@ -15,10 +15,10 @@ from xml.etree import ElementTree
 
 import httpx
 import structlog
-from defusedxml import ElementTree as DefusedElementTree
 from defusedxml.common import DefusedXmlException
 
 from pullbox.core.url_validation import normalize_peer_base_url
+from pullbox.core.xml_security import parse_untrusted_xml
 from pullbox.providers.base import ProviderHealthResult
 
 if TYPE_CHECKING:
@@ -88,7 +88,7 @@ class JackettClient:
             raise JackettError("Jackett response exceeded the 1 MiB safety limit")
 
         try:
-            root = DefusedElementTree.fromstring(content)
+            root = parse_untrusted_xml(content)
         except (ElementTree.ParseError, DefusedXmlException):
             raise JackettError("Jackett returned an invalid indexer response") from None
 

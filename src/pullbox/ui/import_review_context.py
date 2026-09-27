@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import func, or_, select
 
+from pullbox.core.file_safety import DEFAULT_ALLOWED_EXTENSIONS
 from pullbox.models.import_job import (
     ImportedFile,
     ImportedFileStatus,
@@ -15,6 +16,7 @@ from pullbox.models.import_job import (
     ImportSeriesStatus,
 )
 from pullbox.models.library import LibraryRoot
+from pullbox.models.series import Series
 from pullbox.services.import_duplicates import duplicate_merge_is_actionable
 from pullbox.services.import_file_conflicts import classify_conflict_group
 from pullbox.services.import_review_selection import load_import_review_selection_state
@@ -26,7 +28,13 @@ from pullbox.services.import_story_arc_review import (
 )
 from pullbox.services.library_root_management import list_library_roots
 from pullbox.ui.import_conflict_review import _load_import_conflict_review_context
-from pullbox.ui.import_review_lanes import LANES, REASONS, load_review_rows
+from pullbox.ui.import_review_lanes import (
+    LANES,
+    REASONS,
+    load_review_rows,
+    review_row_decision_files,
+    review_row_in_lane,
+)
 from pullbox.ui.import_review_summary import (
     load_import_review_summary,
     load_import_safety_failure_summary,
@@ -134,6 +142,37 @@ async def _load_duplicate_selected_file_counts(
         _object_to_int(series_id): _object_to_int(count)
         for series_id, count in counts.items()
         if _object_to_int(series_id) > 0
+    }
+
+
+async def _load_library_series_cv_ids_by_imported_series_id(
+    session: AsyncSession,
+    series_items: list[ImportedSeries],
+) -> dict[int, int]:
+    """Resolve provider IDs for review rows already linked to library series."""
+    library_series_ids = {
+        int(item.series_id) for item in series_items if item.series_id is not None
+    }
+    if not library_series_ids:
+        return {}
+
+    rows = (
+        await session.execute(
+            select(Series.id, Series.comicvine_id).where(
+                Series.id.in_(library_series_ids),
+                Series.comicvine_id.is_not(None),
+            )
+        )
+    ).all()
+    cv_ids_by_library_series_id = {
+        int(series_id): int(comicvine_id)
+        for series_id, comicvine_id in rows
+        if comicvine_id is not None
+    }
+    return {
+        int(item.id): cv_ids_by_library_series_id[int(item.series_id)]
+        for item in series_items
+        if item.series_id is not None and int(item.series_id) in cv_ids_by_library_series_id
     }
 
 
@@ -308,6 +347,34 @@ def _build_safety_file_display_name_by_file_id(
     return result
 
 
+def _build_safety_file_extension_by_file_id(
+    files_by_series_id: Mapping[int, list[ImportedFile]],
+) -> dict[int, str]:
+    """Return a bounded display-only extension without exposing source paths."""
+    result: dict[int, str] = {}
+    for files in files_by_series_id.values():
+        for imp_file in files:
+            normalized = str(imp_file.file_name).replace("\\", "/").rstrip("/")
+            leaf = normalized.rsplit("/", maxsplit=1)[-1]
+            raw_extension = leaf.rsplit(".", maxsplit=1)[-1] if "." in leaf else ""
+            safe_extension = "".join(
+                character
+                for character in raw_extension
+                if character.isascii() and (character.isalnum() or character in "-_")
+            )
+            result[imp_file.id] = f".{safe_extension.lower()}" if safe_extension else "no extension"
+    return result
+
+
+def _supported_import_file_types_label() -> str:
+    preferred_order = (".cbz", ".cbr", ".cb7", ".cbt", ".pdf", ".epub")
+    extensions = [item for item in preferred_order if item in DEFAULT_ALLOWED_EXTENSIONS]
+    extensions.extend(sorted(DEFAULT_ALLOWED_EXTENSIONS.difference(extensions)))
+    if len(extensions) < 2:
+        return extensions[0] if extensions else "a configured comic file type"
+    return f"{', '.join(extensions[:-1])}, and {extensions[-1]}"
+
+
 async def _load_inline_conflicts(
     session: AsyncSession, job_id: int, series_ids: list[int]
 ) -> dict[int, list[dict[str, object]]]:
@@ -373,6 +440,7 @@ async def load_import_review_context(
     page: int,
     sort: str | None,
     story_arc_id: int | None = None,
+    story_arc_skipped: bool = False,
     arc_entry_state: StoryArcEntryResolutionFilter = StoryArcEntryResolutionFilter.ALL,
     arc_entry_page: int = 1,
     reason: str | None = None,
@@ -382,7 +450,9 @@ async def load_import_review_context(
     job_id = int(job.id)
     current_view, requested_series_status = _resolve_review_view(status)
     review_rows = await load_review_rows(session, job_id)
-    lane_counts = {lane: sum(row.lane == lane for row in review_rows.values()) for lane in LANES}
+    lane_counts = {
+        lane: sum(review_row_in_lane(row, lane) for row in review_rows.values()) for lane in LANES
+    }
     if status in LANES or not status:
         current_view = status or next(
             (lane for lane, count in lane_counts.items() if count), "ready"
@@ -391,7 +461,10 @@ async def load_import_review_context(
     active_lane = current_view if current_view in LANES else ""
     active_reason = reason if reason in REASONS else None
     reason_counts = {
-        key: sum(row.lane == active_lane and key in row.reasons for row in review_rows.values())
+        key: sum(
+            review_row_in_lane(row, active_lane) and key in row.reasons
+            for row in review_rows.values()
+        )
         for key in REASONS
     }
     page_size = 25
@@ -401,6 +474,7 @@ async def load_import_review_context(
     library_roots: list[LibraryRoot] = []
     conflict_review_ctx: dict[str, object] | None = None
     matched_file_targets_by_series_id: dict[int, list[dict[str, object]]] = {}
+    library_series_cv_ids_by_imported_series_id: dict[int, int] = {}
     review_file_groups_by_series_id: dict[int, list[dict[str, object]]] = {}
     story_arc_items: tuple[ImportedStoryArcReviewRow, ...] = ()
     story_arc_total = 0
@@ -435,6 +509,7 @@ async def load_import_review_context(
             job_id,
             page=page,
             page_size=page_size,
+            skipped_only=story_arc_skipped,
         )
         story_arc_items = story_arc_page.items
         story_arc_total = story_arc_page.total
@@ -442,9 +517,13 @@ async def load_import_review_context(
         page = story_arc_page.page
         page_size = story_arc_page.page_size
         normalized_sort = "source_order"
-        story_arc_selected_item = next(
-            (item for item in story_arc_items if item.id == story_arc_id),
-            story_arc_items[0] if story_arc_items else None,
+        story_arc_selected_item = (
+            None
+            if story_arc_skipped
+            else next(
+                (item for item in story_arc_items if item.id == story_arc_id),
+                story_arc_items[0] if story_arc_items else None,
+            )
         )
         if story_arc_selected_item is not None:
             story_arc_entry_page_result = await load_import_story_arc_entry_review_page(
@@ -487,7 +566,7 @@ async def load_import_review_context(
             matching_ids = [
                 series_id
                 for series_id in ordered_ids
-                if review_rows[series_id].lane == active_lane
+                if review_row_in_lane(review_rows[series_id], active_lane)
                 and (not active_reason or active_reason in review_rows[series_id].reasons)
             ]
             total = len(matching_ids)
@@ -517,6 +596,9 @@ async def load_import_review_context(
             visible_series_ids,
         )
         if visible_series_ids:
+            library_series_cv_ids_by_imported_series_id = (
+                await _load_library_series_cv_ids_by_imported_series_id(session, series_items)
+            )
             matched_file_targets_by_series_id = await _load_import_review_matched_file_targets(
                 session,
                 job_id,
@@ -595,9 +677,7 @@ async def load_import_review_context(
         "job": job,
         "one_page_review": one_page_review,
         "review_rows": review_rows,
-        "review_open_series": sum(
-            row.decision_files > 0 or row.updating for row in review_rows.values()
-        ),
+        "review_open_series": sum(row.decision_files > 0 for row in review_rows.values()),
         "inline_conflicts": await _load_inline_conflicts(
             session, job_id, [item.id for item in series_items]
         ),
@@ -606,7 +686,7 @@ async def load_import_review_context(
         "review_reasons": REASONS,
         "lane_counts": lane_counts,
         "lane_file_counts": {
-            lane: sum(row.decision_files for row in review_rows.values() if row.lane == lane)
+            lane: sum(review_row_decision_files(row, lane) for row in review_rows.values())
             for lane in LANES
         },
         "reason_counts": reason_counts,
@@ -618,6 +698,7 @@ async def load_import_review_context(
         },
         "story_arc_items": story_arc_items,
         "story_arc_total": story_arc_total,
+        "story_arc_skipped": story_arc_skipped,
         "story_arc_selected_item": story_arc_selected_item,
         "story_arc_selected_id": (
             story_arc_selected_item.id if story_arc_selected_item is not None else None
@@ -652,8 +733,15 @@ async def load_import_review_context(
         "safety_file_display_name_by_file_id": _build_safety_file_display_name_by_file_id(
             safety_blocked_files_by_series_id
         ),
+        "safety_file_extension_by_file_id": _build_safety_file_extension_by_file_id(
+            safety_blocked_files_by_series_id
+        ),
+        "supported_import_file_types_label": _supported_import_file_types_label(),
         "safety_rematch_pending": safety_rematch_pending,
         "matched_file_targets_by_series_id": matched_file_targets_by_series_id,
+        "library_series_cv_ids_by_imported_series_id": (
+            library_series_cv_ids_by_imported_series_id
+        ),
         "review_file_groups_by_series_id": review_file_groups_by_series_id,
     }
     if conflict_review_ctx:

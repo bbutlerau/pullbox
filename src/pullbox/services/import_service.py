@@ -53,6 +53,7 @@ from pullbox.services.import_event_logging import (
 from pullbox.services.import_file_registration_adapters import (
     build_import_library_file_adapters,
 )
+from pullbox.services.import_file_selection import sync_review_series_selection
 from pullbox.services.import_job_actions import (
     next_action_sequence as next_import_action_sequence,
 )
@@ -905,6 +906,7 @@ class ImportService(
         diagnostics = dict(refreshed.diagnostics or {})
         if diagnostics.pop("rematch_pending", None) is not None:
             refreshed.diagnostics = diagnostics
+        await sync_review_series_selection(session, refreshed)
         await session.flush()
         await self._log_event(
             session,

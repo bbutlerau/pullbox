@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from pullbox.services.catalog.contract import CatalogError, valid_version
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 TABLES = {
@@ -82,10 +83,23 @@ def open_readonly(path: Path) -> sqlite3.Connection:
     return db
 
 
-def file_sha256(path: Path) -> str:
+def file_sha256(
+    path: Path,
+    progress: Callable[[int, int], None] | None = None,
+) -> str:
     safe_path(path)
+    total = path.stat().st_size
+    current = 0
+    digest = hashlib.sha256()
+    if progress:
+        progress(0, total)
     with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+            current += len(chunk)
+            if progress:
+                progress(current, total)
+    return digest.hexdigest()
 
 
 def read_manifest(db: sqlite3.Connection, table: str = "dataset_manifest") -> dict[str, Any]:
@@ -94,14 +108,22 @@ def read_manifest(db: sqlite3.Connection, table: str = "dataset_manifest") -> di
     return {str(k): json.loads(v) for k, v in db.execute(MANIFEST_QUERIES[table])}
 
 
-def logical_hash(db: sqlite3.Connection) -> str:
+def logical_hash(
+    db: sqlite3.Connection,
+    progress: Callable[[int, int], None] | None = None,
+    total: int = 0,
+) -> str:
     digest = hashlib.sha256()
+    current = 0
     for table in TABLES:
         for row in db.execute(CONTENT_QUERIES[table]):
             digest.update(table.encode() + b"\0")
             digest.update(
                 json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode() + b"\n"
             )
+            current += 1
+            if progress and (current % 1000 == 0 or current == total):
+                progress(current, total)
     return digest.hexdigest()
 
 
@@ -124,7 +146,11 @@ def _check_database(db: sqlite3.Connection, application_id: int, allowed: set[st
         raise CatalogError("Catalog contains unsupported database objects.")
 
 
-def validate_snapshot(path: Path, version: str) -> dict[str, Any]:
+def validate_snapshot(
+    path: Path,
+    version: str,
+    progress: Callable[[int, int], None] | None = None,
+) -> dict[str, Any]:
     """Recompute logical content before allowing a new catalog to become active."""
     valid_version(version)
     try:
@@ -146,9 +172,11 @@ def validate_snapshot(path: Path, version: str) -> dict[str, Any]:
             if cutoff.tzinfo is None or cutoff.strftime("%Y%m%dT%H%M%SZ") != version:
                 raise CatalogError("Catalog source timestamp is invalid.")
             counts = {table: db.execute(COUNT_QUERIES[table]).fetchone()[0] for table in TABLES}
-            if counts != manifest.get("counts") or logical_hash(db) != manifest.get(
-                "content_sha256"
-            ):
+            total = sum(counts.values())
+            if progress:
+                progress(0, total)
+            content_hash = logical_hash(db, progress, total)
+            if counts != manifest.get("counts") or content_hash != manifest.get("content_sha256"):
                 raise CatalogError("Catalog content checksum failed. Retry the download.")
             if db.execute("SELECT COUNT(*) FROM series_fts").fetchone()[0] != counts["series"]:
                 raise CatalogError("Catalog search index is incomplete.")

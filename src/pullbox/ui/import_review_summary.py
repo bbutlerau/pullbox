@@ -6,7 +6,7 @@ from collections import Counter
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, cast
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 
 from pullbox.models.import_job import (
     ImportedFile,
@@ -59,11 +59,34 @@ async def load_import_review_summary(
         for status, count in series_counts_result.all()
     }
 
+    block = ImportedFile.diagnostics["safety_block"]
+    safety_fields = [block[key].as_string() for key in ("category", "code", "kind", "reason")]
+    # Selection checkboxes are not decisions. Only saved review outcomes count.
+    reviewed = case(
+        (
+            or_(
+                ImportedFile.status.in_([ImportedFileStatus.CONFIRMED, ImportedFileStatus.SKIPPED]),
+                ImportedSeries.status == ImportSeriesStatus.SKIPPED,
+                ImportedSeries.cv_match_method == "user_override",
+                ImportedFile.match_method.in_(["manual_override", "import_reconcile"]),
+                ImportedFile.match_confidence == "manual",
+                ImportedFile.diagnostics["review_decision"].as_boolean().is_(True),
+                ImportedFile.diagnostics["safety_exception"]["allowed_once"].as_boolean().is_(True),
+                ImportedFile.diagnostics["review_source_action"]["state"]
+                .as_string()
+                .in_(["matching", "completed"]),
+                ImportedFile.diagnostics["metadata_repaired"].as_boolean().is_(True),
+            ),
+            True,
+        ),
+        else_=False,
+    )
     file_counts_result = await session.execute(
         select(
             ImportedFile.status,
             ImportedSeries.status,
-            ImportedFile.diagnostics["safety_block"]["code"].as_string(),
+            *safety_fields,
+            reviewed,
             func.count(ImportedFile.id),
         )
         .join(ImportedSeries, ImportedSeries.id == ImportedFile.import_series_id)
@@ -71,11 +94,13 @@ async def load_import_review_summary(
         .group_by(
             ImportedFile.status,
             ImportedSeries.status,
-            ImportedFile.diagnostics["safety_block"]["code"].as_string(),
+            *safety_fields,
+            reviewed,
         )
     )
     file_counts: Counter[str] = Counter()
     settled_count = 0
+    decisions_made = 0
     missing_references = 0
     missing_blocked = 0
     settled_file_statuses = {
@@ -86,15 +111,39 @@ async def load_import_review_summary(
         ImportedFileStatus.ALREADY_OWNED,
         ImportedFileStatus.IMPORTED,
     }
-    for status, parent_status, safety_code, count in file_counts_result.all():
+    for (
+        status,
+        parent_status,
+        category,
+        code,
+        kind,
+        reason,
+        had_decision,
+        count,
+    ) in file_counts_result.all():
         file_counts[status.value] += count
-        if safety_code == "source_missing":
+        safety = normalize_import_safety_diagnostics(
+            {"category": category, "code": code, "kind": kind, "reason": reason}
+        )
+        if safety["category"] == ImportSafetyCategory.SOURCE_MISSING.value:
             missing_references += count
-            if status == ImportedFileStatus.SAFETY_BLOCKED:
+            if status in settled_file_statuses or parent_status in {
+                ImportSeriesStatus.SKIPPED,
+                ImportSeriesStatus.IMPORTED,
+            }:
+                settled_count += count
+                if had_decision:
+                    decisions_made += count
+            elif status == ImportedFileStatus.SAFETY_BLOCKED:
                 missing_blocked += count
             continue
-        if status in settled_file_statuses or parent_status == ImportSeriesStatus.SKIPPED:
+        if status in settled_file_statuses or parent_status in {
+            ImportSeriesStatus.SKIPPED,
+            ImportSeriesStatus.IMPORTED,
+        }:
             settled_count += count
+            if had_decision:
+                decisions_made += count
 
     duplicate_file_counts_result = await session.execute(
         select(ImportedFile.status, func.count(ImportedFile.id))
@@ -164,6 +213,11 @@ async def load_import_review_summary(
         status.value if hasattr(status, "value") else str(status): int(count)
         for status, count in story_arc_counts_result.all()
     }
+    story_arcs_active = sum(
+        count
+        for status, count in story_arc_counts.items()
+        if status != ImportedStoryArcStatus.SKIPPED.value
+    )
     story_arc_entry_counts_result = await session.execute(
         select(ImportedStoryArcEntry.resolution_state, func.count(ImportedStoryArcEntry.id))
         .join(
@@ -223,9 +277,12 @@ async def load_import_review_summary(
         file_counts.get(status.value, 0) for status in attention_file_statuses
     )
 
+    open_files = sum(file_counts.values()) - settled_count
     row_summary = {
         "review_files_settled": settled_count,
-        "review_files_open": sum(file_counts.values()) - missing_references - settled_count,
+        "review_files_open": open_files,
+        "review_decisions_made": decisions_made,
+        "review_decisions_total": decisions_made + open_files,
         "series_total": sum(series_counts.values()),
         "series_in_library": series_counts.get(ImportSeriesStatus.DUPLICATE.value, 0),
         "series_matched": series_counts.get(ImportSeriesStatus.MATCHED.value, 0),
@@ -262,11 +319,12 @@ async def load_import_review_summary(
         "selected_items_total": _object_to_int(selection_state["selected_item_count"]),
         "selected_files_total": matched_selected_file_count + duplicate_selected_count,
         "importable_items_total": _object_to_int(selection_state["importable_item_count"]),
-        "ready_to_import_total": _object_to_int(selection_state["importable_item_count"]),
+        "ready_to_import_total": _object_to_int(selection_state["selected_item_count"]),
         "needs_attention_total": needs_attention_series_total,
-        "needs_attention_files_total": needs_attention_files_total - missing_blocked,
+        "needs_attention_files_total": needs_attention_files_total,
         "resolved_file_conflict_groups": resolved_file_conflict_groups,
         "story_arcs_total": sum(story_arc_counts.values()),
+        "story_arcs_active": story_arcs_active,
         "story_arcs_detected": story_arc_counts.get(ImportedStoryArcStatus.DETECTED.value, 0),
         "story_arcs_needs_review": story_arc_counts.get(
             ImportedStoryArcStatus.NEEDS_REVIEW.value,

@@ -15,6 +15,7 @@ from pullbox.models.import_job import (
     ImportJobStatus,
     ImportSeriesStatus,
 )
+from pullbox.services.import_file_selection import sync_review_series_selection
 from pullbox.services.import_reconcile_helpers import (
     apply_reconcile_decisions,
     build_reconcile_file_rows,
@@ -143,16 +144,13 @@ async def reconcile_import_series_decisions(
     unresolved_count = int(item.files_no_match or 0) + pending_count
     if keep_duplicate_row:
         item.status = ImportSeriesStatus.DUPLICATE
-        item.selected_for_import = False
     elif unresolved_count > 0:
         item.status = ImportSeriesStatus.NO_MATCH
-        item.selected_for_import = False
     elif item.files_matched > 0:
         item.status = ImportSeriesStatus.MATCHED
-        item.selected_for_import = False
     else:
         item.status = ImportSeriesStatus.SKIPPED
-        item.selected_for_import = False
+    await sync_review_series_selection(session, item)
 
     await recompute_series_counters(session, job)
     await session.flush()

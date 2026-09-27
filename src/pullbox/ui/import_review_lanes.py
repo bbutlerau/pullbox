@@ -23,7 +23,7 @@ LANES = {
     "fix_source": "Fix source",
     "blocked": "Cannot import",
     "ready": "Ready",
-    "info": "Info",
+    "info": "Missing references",
 }
 
 # The same labels can describe a saved outcome in review and in Follow-up.
@@ -46,7 +46,7 @@ REASONS = {
     "failed": ("File needs another inspection", "View details", "fix_source"),
     "dangerous_path_or_payload": ("Unsafe archive content", "View details", "blocked"),
     "unsupported_file_type": ("Unsupported file type", "View details", "blocked"),
-    "unknown": ("Safety could not be established", "View details", "blocked"),
+    "unknown": ("Safety could not be established", "View details", "fix_source"),
     "source_missing": ("Recorded file not found", "View details", "info"),
     "already_handled": ("Already handled", "View details", "info"),
     "ready": ("Ready to import", "View files", "ready"),
@@ -67,6 +67,7 @@ class ReviewFacts:
     identity_conflict: bool = False
     safety_counts: dict[str, int] = field(default_factory=dict)
     missing_references: int = 0
+    pending_files: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +82,7 @@ class ReviewRow:
 
     @property
     def decision_files(self) -> int:
-        return max(0, self.attention_files - self.open_missing_references)
+        return self.attention_files
 
     @property
     def label(self) -> str:
@@ -97,13 +98,14 @@ def classify_review_row(facts: ReviewFacts) -> ReviewRow:
     reasons: list[str] = []
     if facts.status in {"skipped", "imported"}:
         return ReviewRow(
-            "info", ("already_handled",), 0, 0, missing_references=facts.missing_references
+            "handled", ("already_handled",), 0, 0, missing_references=facts.missing_references
         )
     if facts.kind in {"series_conflict", "source_layout_review"}:
         reasons.append(facts.kind)
     elif (
         (facts.status == "no_match" and not facts.safety_counts and not facts.approved_files)
         or facts.unmatched_files
+        or (facts.pending_files and not facts.pending)
         or (facts.approved_files and not facts.pending)
     ):
         reasons.append("needs_issue" if facts.known_target else "needs_series")
@@ -118,8 +120,12 @@ def classify_review_row(facts: ReviewFacts) -> ReviewRow:
         reasons.append("failed")
     if facts.pending:
         reasons.append("preparing_match")
+    if not reasons and not facts.ready_files:
+        return ReviewRow(
+            "handled", ("already_handled",), 0, 0, missing_references=facts.missing_references
+        )
     if not reasons:
-        reasons.append("ready" if facts.ready_files else "already_handled")
+        reasons.append("ready")
     order = list(LANES)
     reasons = sorted(dict.fromkeys(reasons), key=lambda reason: order.index(REASONS[reason][2]))
     # Missing references can accompany useful files without making the files wait.
@@ -132,6 +138,7 @@ def classify_review_row(facts: ReviewFacts) -> ReviewRow:
         tuple(reasons),
         facts.ready_files,
         facts.unmatched_files
+        + facts.pending_files
         + facts.approved_files
         + facts.conflict_files
         + facts.failed_files
@@ -140,6 +147,24 @@ def classify_review_row(facts: ReviewFacts) -> ReviewRow:
         max(facts.missing_references, facts.safety_counts.get("source_missing", 0)),
         facts.safety_counts.get("source_missing", 0),
     )
+
+
+def review_row_in_lane(row: ReviewRow, lane: str) -> bool:
+    """Ready files and missing references remain visible beside a primary work lane."""
+    if lane == "ready":
+        return row.ready_files > 0
+    if lane == "info":
+        return row.open_missing_references > 0
+    return row.lane == lane
+
+
+def review_row_decision_files(row: ReviewRow, lane: str) -> int:
+    """Partition unresolved files across lanes even when a series appears twice."""
+    if lane == "info":
+        return row.open_missing_references
+    if row.lane != lane:
+        return 0
+    return max(0, row.decision_files - row.open_missing_references)
 
 
 async def load_review_rows(session: AsyncSession, job_id: int) -> dict[int, ReviewRow]:
@@ -152,6 +177,7 @@ async def load_review_rows(session: AsyncSession, job_id: int) -> dict[int, Revi
     category = block["category"].as_string()
     code = block["code"].as_string()
     reason = block["reason"].as_string()
+    kind = block["kind"].as_string()
     conflict_class = ImportedFile.diagnostics["conflict_class"].as_string()
     groups = await session.execute(
         select(
@@ -160,6 +186,7 @@ async def load_review_rows(session: AsyncSession, job_id: int) -> dict[int, Revi
             category,
             code,
             reason,
+            kind,
             conflict_class,
             func.count(),
         )
@@ -170,17 +197,37 @@ async def load_review_rows(session: AsyncSession, job_id: int) -> dict[int, Revi
             category,
             code,
             reason,
+            kind,
             conflict_class,
         )
     )
-    for series_id, status, raw_category, raw_code, raw_reason, group_class, count in groups:
-        status_counts[series_id][status.value] += count
-        if raw_code == "source_missing":
+    for (
+        series_id,
+        status,
+        raw_category,
+        raw_code,
+        raw_reason,
+        raw_kind,
+        group_class,
+        count,
+    ) in groups:
+        normalized = normalize_import_safety_diagnostics(
+            {"category": raw_category, "code": raw_code, "reason": raw_reason, "kind": raw_kind}
+        )
+        if normalized["category"] == "source_missing":
             missing_references[series_id] += count
+            if status in {
+                ImportedFileStatus.SAFETY_BLOCKED,
+                ImportedFileStatus.SAFETY_APPROVED,
+                ImportedFileStatus.PENDING,
+                ImportedFileStatus.NO_MATCH,
+                ImportedFileStatus.CONFLICT,
+                ImportedFileStatus.FAILED,
+            }:
+                safety_counts[series_id]["source_missing"] += count
+            continue
+        status_counts[series_id][status.value] += count
         if status.value == "safety_blocked":
-            normalized = normalize_import_safety_diagnostics(
-                {"category": raw_category, "code": raw_code, "reason": raw_reason or raw_code or ""}
-            )
             safety_counts[series_id][str(normalized["category"])] += count
         if status.value == "conflict" and group_class in {"series_mismatch", "year_disagreement"}:
             identity_conflicts.add(series_id)
@@ -212,6 +259,7 @@ async def load_review_rows(session: AsyncSession, job_id: int) -> dict[int, Revi
                 identity_conflict=series_id in identity_conflicts,
                 safety_counts=dict(safety_counts[series_id]),
                 missing_references=missing_references[series_id],
+                pending_files=counts["pending"],
             )
         )
     return rows

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import suppress
 from typing import Annotated
@@ -230,6 +231,7 @@ async def series_detail(
     return_to: str | None = Query(None),
 ) -> Response:
     """Render the series detail page with issues."""
+    query_started = time.monotonic()
     result = await session.execute(
         select(Series)
         .options(
@@ -241,6 +243,10 @@ async def series_detail(
     )
     series = result.unique().scalar_one_or_none()
     if series is None:
+        request.state.series_detail_query_ms = round(
+            (time.monotonic() - query_started) * 1000,
+            2,
+        )
         return RedirectResponse(url="/series", status_code=302)
 
     issues_ctx = await load_series_issues_context(
@@ -260,8 +266,13 @@ async def series_detail(
         )
     ).scalar_one()
     delete_context = await SeriesService.build_delete_context(session, [series_id])
+    request.state.series_detail_query_ms = round(
+        (time.monotonic() - query_started) * 1000,
+        2,
+    )
 
-    return _templates().TemplateResponse(
+    render_started = time.monotonic()
+    response = _templates().TemplateResponse(
         request,
         "pages/series_detail.html",
         _ctx(
@@ -279,6 +290,11 @@ async def series_detail(
             **issues_ctx,
         ),
     )
+    request.state.series_detail_render_ms = round(
+        (time.monotonic() - render_started) * 1000,
+        2,
+    )
+    return response
 
 
 @issue_router.get("/issues/{issue_id}", response_class=HTMLResponse, include_in_schema=False)

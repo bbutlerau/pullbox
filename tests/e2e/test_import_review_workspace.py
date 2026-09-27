@@ -29,9 +29,6 @@ def test_copy_choice_can_open_file_reassignment_without_losing_review(
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.goto(f"{seeded_server}/import?tab=collection&resume_job_id={job_id}&resume_step=3")
     page.get_by_test_id("import-review-lane-confirm").click()
-    expect(page.get_by_test_id("import-review-conflict-counts")).to_have_text(
-        "Across this import: 2 issue groups involving 4 files in 2 series."
-    )
     row = page.locator("[data-import-review-series-row]").filter(has_text="Review Series 7")
     expander = row.locator("td:last-child > [data-import-review-expand-action]")
     expander.click()
@@ -68,7 +65,57 @@ def test_copy_choice_can_open_file_reassignment_without_losing_review(
     assert errors == []
 
 
-def test_series_file_inventory_preserves_review_and_focus(authed_page, seeded_server, browser_name):
+def test_choose_issue_button_toggles_the_inline_issue_list(
+    authed_page, seeded_server, copy_review_job
+):
+    page = authed_page
+    errors = []
+    requests = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.goto(
+        f"{seeded_server}/import?tab=collection&resume_job_id={copy_review_job}&resume_step=3"
+    )
+    page.get_by_test_id("import-review-lane-decide").click()
+    page.get_by_test_id("import-review-reason-needs_issue").click()
+    row = page.locator("[data-import-review-series-row]").filter(has_text="Review Series 10")
+    expander = row.locator("td:last-child > [data-import-review-expand-action]")
+    expander.click()
+    trigger = row.get_by_test_id("import-review-choose-issue")
+    panel_id = trigger.get_attribute("aria-controls")
+    assert panel_id is not None
+
+    def issue_choices(route):
+        requests.append(route.request.url)
+        route.fulfill(
+            content_type="text/html",
+            body=(
+                f'<div id="{panel_id}" data-testid="import-review-issue-choices" '
+                'data-import-review-issue-choices-loaded="true">Issue choices</div>'
+            ),
+        )
+
+    page.route(f"**/import/{copy_review_job}/files/*/assign?*", issue_choices)
+    panel = page.locator(f"#{panel_id}")
+
+    trigger.click()
+    expect(trigger).to_have_attribute("aria-expanded", "true")
+    expect(panel).to_be_visible()
+    expect(panel).to_have_text("Issue choices")
+
+    trigger.click()
+    expect(trigger).to_have_attribute("aria-expanded", "false")
+    expect(panel).to_be_hidden()
+
+    trigger.click()
+    expect(trigger).to_have_attribute("aria-expanded", "true")
+    expect(panel).to_be_visible()
+    expect(expander).to_have_attribute("aria-expanded", "true")
+    assert len(requests) == 1
+    assert "cv_id=410" in requests[0]
+    assert errors == []
+
+
+def test_missing_reference_series_preserves_review_focus(authed_page, seeded_server, browser_name):
     from pullbox.database import get_session_factory
     from tests.e2e.conftest import _run_async_blocking
     from tests.ui.test_import_review_files_inventory import _seed_inventory
@@ -81,11 +128,9 @@ def test_series_file_inventory_preserves_review_and_focus(authed_page, seeded_se
     page.get_by_test_id("import-review-lane-decide").click()
     page.get_by_test_id("import-review-reason-needs_series").click()
     row = page.locator(f'[data-import-review-series-row="{series_id}"]')
-    expect(page.get_by_test_id("import-review-missing-references")).to_contain_text(
-        "1 missing file reference tracked separately"
-    )
     expect(row.locator('[aria-label="0 of 26 files matched"]')).to_have_text("0/26")
     expect(row.get_by_text("1 missing reference", exact=True)).to_be_visible()
+    expect(page.get_by_role("tab", name="Missing references (1)")).to_be_visible()
     output = Path(__file__).resolve().parents[2] / "test-results/review-workspace"
     output.mkdir(parents=True, exist_ok=True)
     for theme in ("light", "dark"):
@@ -96,64 +141,10 @@ def test_series_file_inventory_preserves_review_and_focus(authed_page, seeded_se
     expander.click()
     expect(row.get_by_text("Files in this folder", exact=True)).to_have_count(0)
     expect(row.get_by_test_id("import-review-series-file-details")).to_have_count(0)
-    page.evaluate("""() => {
-        window.inventoryShell = document.getElementById('import-step-review-shell');
-        window.inventoryUrl = window.location.href;
-        window.inventoryScroll = document.getElementById('content')?.scrollTop || 0;
-    }""")
-    trigger = row.get_by_test_id("import-review-more-actions")
-    trigger.click()
-    menu = page.locator("[popover]:popover-open")
-    expect(menu.get_by_role("button")).to_have_text(["View files"])
-    menu.get_by_role("button", name="View files", exact=True).click()
-    modal = page.get_by_test_id("import-review-files-modal")
-    dialog = modal.get_by_role("dialog", name="Files recorded for Unknown Series")
-    expect(dialog).to_be_visible()
-    expect(dialog).to_be_focused()
-    expect(dialog.locator("[data-import-review-inventory-file]")).to_have_count(25)
-    expect(dialog).to_contain_text("Missing reference")
-    page.evaluate(
-        "window.inventoryDialog = document.querySelector('[data-testid=import-review-files-modal]')"
-    )
-    dialog.get_by_test_id("series-pagination-next").click()
-    expect(dialog.locator("[data-import-review-inventory-file]")).to_have_count(2)
-    assert page.evaluate(
-        "window.inventoryDialog === document.querySelector('[data-testid=import-review-files-modal]')"
-    )
-    expect(dialog).to_be_focused()
-    close = dialog.get_by_role("button", name="Close", exact=True)
-    assert close.evaluate(
-        "el => parseFloat(getComputedStyle(el).borderTopWidth) >= 1 && el.getBoundingClientRect().height >= 28"
-    )
-    close.focus()
-    page.keyboard.press("Tab")
-    expect(dialog.get_by_test_id("series-pagination-prev")).to_be_focused()
-    page.keyboard.press("Shift+Tab")
-    expect(close).to_be_focused()
-    for theme in ("light", "dark"):
-        page.evaluate("theme => applyTheme(theme)", theme)
-        page.add_script_tag(path="node_modules/axe-core/axe.min.js")
-        assert (
-            page.evaluate("""async () => (await axe.run('[data-testid=import-review-files-modal]', {
-            runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21aa'] }
-        })).violations.map(v => v.id)""")
-            == []
-        )
-    close.click()
-    expect(modal).to_have_count(0)
-    expect(trigger).to_be_focused()
     expect(expander).to_have_attribute("aria-expanded", "true")
-    assert page.evaluate("""() => window.inventoryShell === document.getElementById('import-step-review-shell') &&
-        window.inventoryUrl === window.location.href &&
-        window.inventoryScroll === (document.getElementById('content')?.scrollTop || 0)""")
+    expect(row.get_by_test_id("import-review-more-actions")).to_have_count(0)
     page.set_viewport_size({"width": 390, "height": 844})
-    trigger.click()
-    page.locator("[popover]:popover-open").get_by_role("button", name="View files").click()
-    expect(modal).to_be_visible()
-    assert dialog.evaluate("el => el.getBoundingClientRect().right <= window.innerWidth")
-    page.keyboard.press("Escape")
-    expect(modal).to_have_count(0)
-    expect(trigger).to_be_focused()
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     assert errors == []
 
 
@@ -182,7 +173,11 @@ def test_one_page_review_shortcuts_and_file_decisions_preserve_the_row(
     expect(detail).to_be_visible()
     expect(detail.get_by_role("button", name="Allow", exact=True)).to_have_count(2)
     expect(detail.get_by_role("button", name="View File", exact=True)).to_have_count(2)
-    expect(page.get_by_test_id("import-review-one-page-allow")).to_contain_text("Allow All")
+    expect(
+        page.get_by_test_id("import-review-one-page-allow").get_by_role(
+            "button", name="Allow All (2)", exact=True
+        )
+    ).to_be_visible()
     expect(page.get_by_test_id("import-review-more-actions")).to_have_count(0)
     expect(page.get_by_test_id("import-review-one-page-more")).to_have_count(0)
     expect(page.get_by_role("button", name="Change series", exact=True)).to_have_count(0)
@@ -238,16 +233,18 @@ def test_one_page_review_shortcuts_and_file_decisions_preserve_the_row(
     expect(detail.get_by_role("button", name="Skip", exact=True)).to_have_count(1)
     expect(detail.locator("[data-import-review-file-outcome]")).to_have_text("Skipped")
     expect(detail).to_be_visible()
-    expect(page.get_by_test_id("import-review-one-page-allow")).to_contain_text("Allow All")
+    expect(
+        page.get_by_test_id("import-review-one-page-allow").get_by_role(
+            "button", name="Allow", exact=True
+        )
+    ).to_be_visible()
     assert page.evaluate("""() =>
         window.onePageShell === document.getElementById('import-step-review-shell') &&
         window.onePageFiles === document.querySelector('[data-testid="import-review-one-page-files"]')
     """)
     page.set_viewport_size({"width": 390, "height": 844})
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
-    page.get_by_test_id("import-review-one-page-skip").get_by_role(
-        "button", name="Skip All"
-    ).click()
+    page.get_by_test_id("import-review-one-page-skip").get_by_role("button", name="Skip").click()
     expect(detail).to_have_count(0)
     expect(page.get_by_test_id("import-review-workspace-table")).to_contain_text(
         "Nothing to review"
@@ -370,7 +367,7 @@ def test_review_file_modal_submits_without_boosted_navigation(authed_page, seede
     )
     modal = page.get_by_test_id("import-review-file-action")
     expect(modal).to_be_visible()
-    modal.get_by_role("button", name="Recheck source", exact=True).click()
+    modal.get_by_role("button", name="Recheck recorded path", exact=True).click()
     expect(modal).not_to_be_visible()
     expect(page.get_by_test_id("import-review-lane-ready")).to_be_visible()
     assert page.evaluate("window.reviewBoostedSubmits") == 0
@@ -405,11 +402,9 @@ def test_review_lanes_and_refresh_preserve_controls(authed_page, seeded_server, 
     menu_trigger.click()
     menu = page.locator("[popover]:popover-open")
     expect(menu).to_be_visible()
-    menu.get_by_role("button", name="Skip series", exact=True).click()
-    skip_dialog = page.get_by_role("dialog", name="Skip this series?")
-    expect(skip_dialog).to_be_visible()
-    skip_dialog.get_by_role("button", name="Cancel", exact=True).click()
-    expect(skip_dialog).not_to_be_visible()
+    expect(menu.get_by_role("menuitem", name="View files", exact=True)).to_be_visible()
+    page.keyboard.press("Escape")
+    expect(menu).not_to_be_visible()
     expect(action).to_have_attribute("aria-expanded", "true")
     page.evaluate("""async () => {
         await Alpine.$data(window.reviewShell).refreshSeriesReview();
@@ -482,11 +477,14 @@ def test_inline_issue_choice_submits_only_its_file_without_navigation(authed_pag
         job={"id": 1},
         file={"id": 1, "file_name": "Needs issue.cbz"},
         series={"provider_id": "20", "title": "Test series"},
-        issues=[{"provider_id": "201", "issue_number": 1, "title": "First issue"}],
+        issues=[
+            {"provider_id": str(200 + number), "issue_number": number, "title": f"Issue {number}"}
+            for number in range(1, 26)
+        ],
         token="scoped-test-token",
         query="",
         issue_page=1,
-        issue_page_count=1,
+        issue_page_count=2,
     )
     submissions = []
 
@@ -506,7 +504,15 @@ def test_inline_issue_choice_submits_only_its_file_without_navigation(authed_pag
     )
     panel = page.get_by_test_id("import-review-issue-choices")
     expect(panel).to_be_visible()
-    panel.get_by_role("button", name="Use this", exact=True).click()
+    viewport = panel.get_by_test_id("import-review-issue-choices-viewport")
+    pagination = panel.get_by_test_id("import-review-issue-pagination")
+    expect(viewport.get_by_test_id("import-review-use-issue")).to_have_count(25)
+    expect(pagination.get_by_role("button", name="Next", exact=True)).to_be_visible()
+    assert viewport.evaluate("el => el.scrollHeight > el.clientHeight")
+    assert pagination.evaluate(
+        "el => !el.closest('[data-testid=\"import-review-issue-choices-viewport\"]')"
+    )
+    viewport.get_by_role("button", name="Use this", exact=True).first.click()
     expect(panel).not_to_be_visible()
     assert len(submissions) == 1
     assert 'name="issue_cv_id"\r\n\r\n201' in submissions[0]

@@ -13,7 +13,6 @@ import stat
 from typing import TYPE_CHECKING
 from xml.etree import ElementTree as ET
 
-from defusedxml import ElementTree as DefusedET
 from defusedxml.common import DefusedXmlException
 
 if TYPE_CHECKING:
@@ -23,6 +22,7 @@ import structlog
 
 from pullbox.config import get_settings
 from pullbox.core.secret_validation import WeakApplicationSecretError, validate_application_secret
+from pullbox.core.xml_security import parse_untrusted_xml
 
 logger = structlog.get_logger(__name__)
 
@@ -73,13 +73,10 @@ class ConfigFileProvider:
         Returns None-like behavior is handled by callers checking file existence.
         """
         try:
-            tree = DefusedET.parse(self._config_path)
+            root = parse_untrusted_xml(self._config_path.read_bytes())
         except (ET.ParseError, DefusedXmlException) as exc:
             raise ConfigFileError(f"Malformed config.xml at {self._config_path}: {exc}") from exc
 
-        root = tree.getroot()
-        if root is None:
-            raise ConfigFileError(f"Missing <Config> root element in {self._config_path}")
         if root.tag != "Config":
             raise ConfigFileError(
                 f"Expected <Config> root element, found <{root.tag}> in {self._config_path}"

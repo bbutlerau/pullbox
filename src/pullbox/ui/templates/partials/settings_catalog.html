@@ -7,8 +7,25 @@
       <span x-show="state.source_cutoff_at" x-cloak> · Data through <span x-text="date(state.source_cutoff_at)"></span></span>
     </div>
     <div x-show="busy" x-cloak class="space-y-2">
-      <label for="catalog-download-progress" class="text-sm text-pb-text-sec" x-text="progressLabel"></label>
-      <progress id="catalog-download-progress" class="w-full" :max="state.bytes_total || 1" :value="state.phase === 'downloading' && state.bytes_total ? state.bytes_downloaded : null"></progress>
+      <p id="catalog-download-progress-label" class="text-sm text-pb-text-sec">
+        <span x-text="progressLabel"></span>
+        <span x-show="hasMeasuredProgress" x-cloak> · <span x-text="progressValue"></span></span>
+      </p>
+      <div id="catalog-download-progress" class="app-progress">
+        <div class="app-progress-track">
+          <div
+            class="app-progress-fill app-progress-fill--interactive"
+            :class="{ 'is-indeterminate': !hasMeasuredProgress }"
+            :style="hasMeasuredProgress ? 'width: ' + progressPercent + '%' : 'width: 35%'"
+            role="progressbar"
+            aria-labelledby="catalog-download-progress-label"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            :aria-valuenow="hasMeasuredProgress ? progressPercent : null"
+          ></div>
+        </div>
+        <span class="app-progress-value app-progress-value--interactive" x-text="hasMeasuredProgress ? progressPercent + '%' : ''"></span>
+      </div>
       <p class="text-xs text-pb-text-dim">You can leave this page while Pullbox works.</p>
     </div>
     <p x-show="error || state.error" x-cloak role="alert" class="text-sm text-pb-danger" x-text="error || state.error"></p>
@@ -35,12 +52,24 @@ function catalogSettings() {
       if (this.queued) return 'Waiting for the catalog task';
       return ({not_downloaded:'Catalog not downloaded',current:'Local catalog ready',checking:'Checking for updates',downloading:'Downloading catalog',verifying:'Verifying catalog',decompressing:'Unpacking catalog',installing:'Installing verified catalog',interrupted:'Download interrupted — ready to resume',failed:this.state.installed_version ? 'Update failed; the installed catalog is still available' : 'Catalog download failed'})[this.state.phase] || 'Loading catalog status';
     },
-    get progressLabel() { return this.state.phase === 'downloading' ? this.size(this.state.bytes_downloaded) + ' of ' + this.size(this.state.bytes_total) : this.label; },
+    get hasMeasuredProgress() { return Number(this.state.progress_total || 0) > 0; },
+    get progressPercent() { return this.hasMeasuredProgress ? Math.min(100, Math.max(0, Math.round((Number(this.state.progress_current || 0) / Number(this.state.progress_total)) * 100))) : 0; },
+    get progressLabel() {
+      if (this.queued) return 'Waiting for the catalog task';
+      if (this.state.phase === 'verifying' && this.state.progress_unit === 'bytes') return 'Verifying downloaded file';
+      if (this.state.phase === 'verifying' && this.state.progress_unit === 'records') return 'Verifying catalog records';
+      return this.label;
+    },
+    get progressValue() {
+      if (!this.hasMeasuredProgress) return '';
+      if (this.state.progress_unit === 'records') return Number(this.state.progress_current || 0).toLocaleString() + ' of ' + Number(this.state.progress_total || 0).toLocaleString() + ' records';
+      return this.size(this.state.progress_current) + ' of ' + this.size(this.state.progress_total);
+    },
     size(n) { return ((n || 0) / 1048576).toFixed(1) + ' MiB'; },
     date(value) { return value ? new Date(value).toLocaleString() : 'Not yet'; },
     async init() {
       await this.refresh();
-      this.timer = setInterval(() => { if (window.pullboxLiveUpdatesEnabled()) this.refresh(); }, 4000);
+      this.timer = setInterval(() => { if (window.pullboxLiveUpdatesEnabled()) this.refresh(); }, 1000);
     },
     destroy() { clearInterval(this.timer); },
     async refresh() {
@@ -56,6 +85,7 @@ function catalogSettings() {
     },
     async download() {
       this.queued = true; this.error = '';
+      await this.$nextTick();
       try {
         const response = await fetch('/api/v1/catalog/sync', {method:'POST',headers:{'X-CSRF-Token':{{ csrf_token | tojson }}}});
         if (!response.ok) throw new Error('Catalog update could not be queued. Please retry.');

@@ -9,9 +9,6 @@
     <button type="button" class="btn-ghost btn-sm" hx-get="/import/{{ job.id }}/series/{{ item.id }}/review-restore" hx-target="#cv-search-modal" hx-swap="innerHTML">Put back in review</button>
   </section>
   {% else %}
-  {% if known_series_target and reason_key not in ('needs_series', 'series_conflict', 'needs_issue') and (item.cv_url or item.user_selected_cv_id or item.cv_id) %}
-  <p class="text-xs text-pb-text-sec">ComicVine match: <a data-testid="import-review-cv-id-link" class="text-pb-interactive hover:underline" href="{{ item.cv_url or ('https://comicvine.gamespot.com/volume/4050-' ~ (item.user_selected_cv_id or item.cv_id) ~ '/') }}" target="_blank" rel="noopener noreferrer">{{ item.cv_title or item.raw_series_name }} &middot; {{ item.user_selected_cv_id or item.cv_id }}</a></p>
-  {% endif %}
   {% if reason_key in ('needs_series', 'series_conflict', 'needs_issue') %}
   <div class="grid gap-5 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
     <section class="space-y-3">
@@ -20,13 +17,13 @@
         <dt class="text-pb-text-dim">Title</dt><dd class="text-pb-text">{{ item.raw_series_name }}</dd>
         <dt class="text-pb-text-dim">Year</dt><dd>{{ item.raw_year or 'Unknown' }}</dd>
         <dt class="text-pb-text-dim">Threshold</dt><dd>{{ (job.cv_match_threshold * 100)|round|int }}%</dd>
-        {% if known_series_target %}<dt class="text-pb-text-dim">ComicVine</dt><dd><a data-testid="import-review-cv-id-link" class="text-pb-interactive hover:underline" href="{{ item.cv_url or ('https://comicvine.gamespot.com/volume/4050-' ~ (item.user_selected_cv_id or item.cv_id) ~ '/') }}" target="_blank" rel="noopener noreferrer">{{ item.cv_title or item.raw_series_name }} &middot; {{ item.user_selected_cv_id or item.cv_id or 'Known library series' }}</a></dd>{% endif %}
+        {% if known_cv_id %}<dt class="text-pb-text-dim">ComicVine</dt><dd><a data-testid="import-review-cv-id-link" class="text-pb-interactive hover:underline" href="{{ item.cv_url or ('https://comicvine.gamespot.com/volume/4050-' ~ known_cv_id ~ '/') }}" target="_blank" rel="noopener noreferrer">{{ item.cv_title or item.raw_series_name }} &middot; {{ known_cv_id }}</a></dd>{% elif known_series_target %}<dt class="text-pb-text-dim">Series</dt><dd>{{ item.cv_title or item.raw_series_name }}</dd>{% endif %}
         <dt class="text-pb-text-dim">Result</dt><dd class="leading-5">{{ series_diagnostics.get('rejection_reason') or review_reasons[reason_key][0] }}</dd>
       </dl>
-      <div class="flex flex-wrap gap-2">
+      {% if reason_key != 'needs_series' %}<div class="flex flex-wrap gap-2">
         <button type="button" class="btn-ghost btn-sm" data-testid="import-review-search-cv-action" onclick='return openImportCvSearchModal({jobId: {{ job.id }}, seriesId: {{ item.id }}, query: {{ item.raw_series_name|tojson|forceescape }} })'>{{ 'Change ComicVine match' if known_series_target else 'Search ComicVine' }}</button>
         {% if known_series_target %}<button type="button" class="btn-ghost btn-sm" @click="{{ 'unmatchDuplicateSeries' if item.status.value == 'duplicate' else 'unmatchSeriesMatch' }}({{ item.id }})">Not this series</button>{% endif %}
-      </div>
+      </div>{% endif %}
     </section>
     <section class="min-w-0 space-y-3">
       {% if reason_key in ('needs_series', 'series_conflict') %}
@@ -45,8 +42,11 @@
       {% for file in group.rows %}<div class="rounded-lg border border-pb-border bg-pb-card/70 p-3">
         <div class="flex flex-wrap items-center justify-between gap-2"><span class="font-mono text-xs text-pb-text [overflow-wrap:anywhere]">{{ file.file_name }}</span><span class="text-xs text-pb-text-dim">{{ file.file_size|filesize }}</span></div>
         {% if file.status == 'skipped' %}<span class="pill pill-neutral" data-import-review-file-outcome="{{ file.id }}">Skipped</span>{% else %}
-        <div class="mt-2 flex flex-wrap gap-2"><button type="button" class="btn-primary btn-sm" hx-get="{% if item.user_selected_cv_id or item.cv_id %}/import/{{ job.id }}/files/{{ file.id }}/assign?cv_id={{ item.user_selected_cv_id or item.cv_id }}&inline=true{% else %}/import/{{ job.id }}/series/{{ item.id }}/cv-search?file_id={{ file.id }}{% endif %}" hx-target="{{ '#import-review-issue-choices-' ~ file.id if item.user_selected_cv_id or item.cv_id else '#cv-search-modal' }}" hx-swap="{{ 'outerHTML' if item.user_selected_cv_id or item.cv_id else 'innerHTML' }}">Choose issue</button><button type="button" class="btn-ghost btn-sm" data-testid="import-review-reassign-file" hx-get="/import/{{ job.id }}/series/{{ item.id }}/cv-search?file_id={{ file.id }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Different series</button><button type="button" class="btn-ghost btn-sm" :disabled="reviewActionPending" @click="skipReviewFile({{ item.id }}, {{ file.id }}, $event.currentTarget)">Skip this file</button></div>
-        <div id="import-review-issue-choices-{{ file.id }}"></div>{% endif %}
+        {% set issue_choices_url = ('/import/' ~ job.id ~ '/files/' ~ file.id ~ '/assign?cv_id=' ~ known_cv_id ~ '&inline=true') if known_cv_id else none %}
+        <div class="mt-2 flex flex-wrap gap-2"><button type="button" class="btn-primary btn-sm" data-testid="import-review-choose-issue"
+          {% if issue_choices_url %}aria-expanded="false" aria-controls="import-review-issue-choices-{{ file.id }}" @click='toggleReviewIssueChoices({{ file.id }}, {{ issue_choices_url|tojson|forceescape }}, $event.currentTarget)'
+          {% else %}hx-get="/import/{{ job.id }}/series/{{ item.id }}/cv-search?file_id={{ file.id }}" hx-target="#cv-search-modal" hx-swap="innerHTML"{% endif %}>Choose issue</button><button type="button" class="btn-ghost btn-sm" data-testid="import-review-reassign-file" hx-get="/import/{{ job.id }}/series/{{ item.id }}/cv-search?file_id={{ file.id }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Different series</button><button type="button" class="btn-ghost btn-sm" :disabled="reviewActionPending" @click="skipReviewFile({{ item.id }}, {{ file.id }}, $event.currentTarget)">Skip this file</button></div>
+        {% if issue_choices_url %}<div id="import-review-issue-choices-{{ file.id }}" hidden></div>{% endif %}{% endif %}
       </div>{% endfor %}{% endfor %}
       <button type="button" class="btn-ghost btn-sm" data-testid="import-review-reconcile-action" hx-get="/import/{{ job.id }}/series/{{ item.id }}/reconcile" hx-target="#cv-search-modal" hx-swap="innerHTML">Review all issue decisions</button>
       {% endif %}
@@ -63,12 +63,19 @@
     <div class="flex flex-wrap items-start justify-between gap-3">
       <div class="min-w-0 flex-1">
         <h4 class="break-words text-sm font-medium text-pb-text">{{ safety_file_display_name_by_file_id.get(file.id, 'File') }}</h4>
+        {% if block.get('category') == 'decompression_size_limit' %}<p class="mt-1 text-xs text-pb-text-dim" data-testid="import-review-safety-file-size">{{ file.file_size|filesize }}</p>{% endif %}
+        {% if block.get('category') == 'unsupported_file_type' %}
+        <p class="mt-1 text-xs leading-5 text-pb-text-sec">The {{ safety_file_extension_by_file_id.get(file.id, 'current') }} file type is not supported. Pullbox can import {{ supported_import_file_types_label }} files. Convert or replace this file with a supported type, then recheck it.</p>
+        {% elif block.get('category') == 'unknown' %}
+        <p class="mt-1 text-xs leading-5 text-pb-text-sec">Pullbox could not establish that this file is safe to import. Repair or replace it, then recheck it.</p>
+        {% else %}
         <p class="mt-1 text-xs leading-5 text-pb-text-sec">{{ block.get('reason', 'This file needs another inspection before importing.') }}</p>
-        {% if block.get('code') %}<details class="mt-2 text-xs text-pb-text-dim"><summary class="cursor-pointer">Inspection details</summary><p>Code: {{ block.code }}</p></details>{% endif %}
-        {% if block.get('category') == 'source_missing' %}<p class="mt-1 text-xs text-pb-text-dim">You can continue with ready files. This saved Mylar reference remains available in Follow-up.</p>{% endif %}
+        {% endif %}
+        {% if block.get('code') and block.get('category') not in ('dangerous_path_or_payload', 'unsupported_file_type', 'decompression_size_limit') %}<details class="mt-2 text-xs text-pb-text-dim"><summary class="cursor-pointer">Inspection details</summary><p>Code: {{ block.code }}</p></details>{% endif %}
+        {% if block.get('category') == 'source_missing' %}<p class="mt-1 text-xs text-pb-text-dim">Pair a verified file, restore the recorded path and recheck it, or skip this stale reference.</p>{% endif %}
         {% if block.get('category') == 'outside_approved_root' %}<button type="button" class="btn-ghost btn-sm mt-2" @click="window.dispatchEvent(new CustomEvent('wizard:advance', {detail: {step: 1}}))">Review import setup</button>{% endif %}
       </div>
-      <div class="flex flex-wrap gap-2">
+      {% if block.get('category') != 'decompression_size_limit' or file.status.value != 'safety_blocked' %}<div class="flex flex-wrap gap-2">
         {% if source_work.get('state') in ('pending', 'matching') %}
           <div class="w-48 space-y-2" role="status"><span class="text-xs text-pb-text-sec">Verifying source</span><div class="app-progress-track" role="progressbar" aria-label="Verifying source"><div class="app-progress-fill is-indeterminate" style="width:35%"></div></div></div>
         {% elif file.status.value not in ('safety_blocked', 'safety_approved') %}
@@ -77,19 +84,19 @@
           {% if row.updating %}<span class="pill pill-info" title="Preparing this file for matching"><svg data-testid="import-review-safety-rematch-spinner" class="h-3 w-3 animate-spin motion-reduce:animate-none" viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2" opacity=".25"/><path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2"/></svg>Preparing match</span>
           {% else %}<span class="pill pill-info">Approved &middot; match needed</span>{% endif %}
         {% else %}
-          {% if block.get('category') in ('permission_unreadable', 'archive_inspection_failed', 'zero_byte', 'archive_no_pages', 'source_changed', 'source_missing') %}
-          <button type="button" class="btn-primary btn-sm" data-testid="import-review-recheck-source" hx-get="/import/{{ job.id }}/files/{{ file.id }}/source" hx-target="#cv-search-modal" hx-swap="innerHTML">{{ 'Pair or recheck' if block.get('category') == 'source_missing' else 'Recheck source' }}</button>
+          {% if block.get('category') in ('permission_unreadable', 'archive_inspection_failed', 'zero_byte', 'archive_no_pages', 'source_changed', 'source_missing', 'unknown') %}
+          <button type="button" class="btn-primary btn-sm" data-testid="import-review-recheck-source" hx-get="/import/{{ job.id }}/files/{{ file.id }}/source" hx-target="#cv-search-modal" hx-swap="innerHTML">{{ 'Resolve reference' if block.get('category') == 'source_missing' else 'Recheck source' }}</button>
           {% endif %}
           {% if block.get('overrideable') is sameas true %}
           <button type="button" class="btn-primary btn-sm" data-testid="import-review-allow-safety-file"
             hx-post="/import/{{ job.id }}/files/{{ file.id }}/safety/allow-once?status={{ active_review_view }}{% if active_reason %}&reason={{ active_reason }}{% endif %}&sort={{ sort }}&page={{ page }}"
             hx-target="#import-step-review-shell" hx-swap="morph:outerHTML">Allow once</button>
           {% endif %}
-          <button type="button" class="btn-ghost btn-sm" data-testid="import-review-skip-safety-file"
+          {% if block.get('category') not in ('dangerous_path_or_payload', 'unsupported_file_type') %}<button type="button" class="btn-ghost btn-sm" data-testid="import-review-skip-safety-file"
             hx-post="/import/{{ job.id }}/files/{{ file.id }}/safety/skip?status={{ active_review_view }}{% if active_reason %}&reason={{ active_reason }}{% endif %}&sort={{ sort }}&page={{ page }}"
-            hx-target="#import-step-review-shell" hx-swap="morph:outerHTML">Skip</button>
+            hx-target="#import-step-review-shell" hx-swap="morph:outerHTML">{{ 'Skip reference' if block.get('category') == 'source_missing' else 'Skip' }}</button>{% endif %}
         {% endif %}
-      </div>
+      </div>{% endif %}
     </div>
     {% if source_work.get('state') == 'failed' %}<p class="mt-2 text-xs text-pb-warning">{{ source_work.get('error') }}</p>{% endif %}
   </section>

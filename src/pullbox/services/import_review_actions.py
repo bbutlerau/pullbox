@@ -83,9 +83,9 @@ def apply_safety_allow_once_to_file(
     imp_file.status = (
         ImportedFileStatus.CONFIRMED if retry_import else ImportedFileStatus.SAFETY_APPROVED
     )
-    imp_file.include_in_import = bool(retry_import)
     imp_file.error_message = None
     imp_file.diagnostics = diagnostics
+    set_review_file_selection(imp_file, True)
 
 
 async def resolve_conflict(
@@ -414,6 +414,91 @@ async def skip_safety_blocked_file(
     await recompute_series_counters(session, job)
     await session.flush()
     return imp_file
+
+
+async def acknowledge_dangerous_files(
+    session: AsyncSession,
+    job_id: int,
+    imported_series_id: int,
+    *,
+    actor_id: int,
+    recompute_file_counters: RecomputeFileCounters,
+    recompute_series_counters: RecomputeSeriesCounters,
+) -> int:
+    """Exclude dangerous files in one review row without suppressing safe siblings."""
+    job = await session.get(ImportJob, job_id)
+    if job is None:
+        raise NotFoundError("ImportJob", job_id)
+    if job.status != ImportJobStatus.REVIEW:
+        raise ValidationError("Job must be in REVIEW state to acknowledge dangerous files")
+
+    imported_series = await session.get(ImportedSeries, imported_series_id)
+    if imported_series is None or imported_series.import_job_id != job_id:
+        raise NotFoundError("ImportedSeries", imported_series_id)
+
+    blocked_files = list(
+        (
+            await session.scalars(
+                sa_select(ImportedFile)
+                .where(
+                    ImportedFile.import_job_id == job_id,
+                    ImportedFile.import_series_id == imported_series_id,
+                    ImportedFile.status == ImportedFileStatus.SAFETY_BLOCKED,
+                )
+                .order_by(ImportedFile.id)
+            )
+        ).all()
+    )
+    dangerous_files: list[ImportedFile] = []
+    for imp_file in blocked_files:
+        diagnostics = imp_file.diagnostics or {}
+        safety_block = diagnostics.get("safety_block")
+        if not isinstance(safety_block, Mapping):
+            continue
+        normalized = normalize_import_safety_diagnostics(safety_block)
+        if normalized["category"] == ImportSafetyCategory.DANGEROUS_PATH_OR_PAYLOAD.value:
+            dangerous_files.append(imp_file)
+
+    if not dangerous_files:
+        raise ValidationError("No dangerous files remain to acknowledge for this series")
+
+    acknowledged_at = datetime.now(UTC).isoformat()
+    for imp_file in dangerous_files:
+        apply_safety_skip_to_file(imp_file)
+        diagnostics = dict(imp_file.diagnostics or {})
+        diagnostics.update(
+            {
+                "resolution": "dangerous_content_acknowledged",
+                "dangerous_content_acknowledgement": {
+                    "actor_id": actor_id,
+                    "acknowledged_at": acknowledged_at,
+                    "category": ImportSafetyCategory.DANGEROUS_PATH_OR_PAYLOAD.value,
+                },
+            }
+        )
+        imp_file.match_method = "dangerous_content_acknowledged"
+        imp_file.diagnostics = diagnostics
+
+    await refresh_story_arc_entries_for_import_files(
+        session,
+        import_job_id=job_id,
+        import_file_ids=[imp_file.id for imp_file in dangerous_files],
+    )
+    await recompute_file_counters(session, job, [imported_series_id])
+    remaining_file_id = await session.scalar(
+        sa_select(ImportedFile.id)
+        .where(
+            ImportedFile.import_series_id == imported_series_id,
+            ImportedFile.status != ImportedFileStatus.SKIPPED,
+        )
+        .limit(1)
+    )
+    if remaining_file_id is None:
+        imported_series.status = ImportSeriesStatus.SKIPPED
+        imported_series.selected_for_import = False
+    await recompute_series_counters(session, job)
+    await session.flush()
+    return len(dangerous_files)
 
 
 def apply_safety_skip_to_file(imp_file: ImportedFile) -> None:

@@ -144,23 +144,64 @@ async def decide_one_page_archives(
     )
 
 
+@router.post(
+    "/import/{job_id}/series/{series_id}/dangerous/acknowledge",
+    include_in_schema=False,
+)
+async def acknowledge_dangerous_files(
+    job_id: int,
+    series_id: int,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    status: str = Query("blocked"),
+    page: int = Query(1, ge=1),
+    sort: str | None = Query(None),
+) -> Response:
+    from fastapi import HTTPException
+
+    from pullbox.composition.services import build_import_control_service
+    from pullbox.core.exceptions import ValidationError
+    from pullbox.ui.import_routes import _render_import_review_partial
+
+    service = build_import_control_service()
+    try:
+        await service.acknowledge_dangerous_files(
+            session,
+            job_id,
+            series_id,
+            actor_id=user.id,
+        )
+    except ValidationError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=exc.message) from exc
+    await session.commit()
+    return await _render_import_review_partial(
+        job_id, request, user, session, status=status, page=page, sort=sort
+    )
+
+
 @router.get("/import/{job_id}/files/{file_id}/source", include_in_schema=False)
 async def preview_source_action(
     job_id: int, file_id: int, request: Request, user: InteractiveOperatorUser, session: DbSession
 ) -> Response:
-    from pullbox.services.import_review_source_actions import replacement_candidate
+    from pullbox.services.import_review_source_actions import replacement_candidates
     from pullbox.ui.import_routes import _ctx, _templates
 
     job, parent, file = await load_review_file(session, job_id, file_id)
-    candidate = await replacement_candidate(session, file, parent)
-    action = "pair" if candidate is not None else "recheck"
+    candidates = await replacement_candidates(session, file, parent)
+    action = "pair" if candidates else "recheck"
+    candidate_scopes = [
+        {"id": candidate.id, "scope": review_scope(job, parent, candidate)}
+        for candidate in candidates
+    ]
     token = await sign_review_scope(
         session,
         {
             "actor": user.id,
             "action": action,
             "scope": review_scope(job, parent, file),
-            "candidate_scope": review_scope(job, parent, candidate) if candidate else None,
+            "candidate_scopes": candidate_scopes,
         },
     )
     return _templates().TemplateResponse(
@@ -171,7 +212,8 @@ async def preview_source_action(
             user,
             job=job,
             file=file,
-            candidate=candidate,
+            candidates=candidates,
+            candidate=candidates[0] if len(candidates) == 1 else None,
             source_action=action,
             token=token,
             action="source",
@@ -187,17 +229,22 @@ async def apply_source_action(
     session: DbSession,
     source_action: Annotated[str, Form()],
     token: Annotated[str, Form()],
+    candidate_file_id: Annotated[int | None, Form()] = None,
 ) -> Response:
     from pullbox.services.import_review_source_actions import (
         queue_source_action,
-        replacement_candidate,
+        replacement_candidates,
     )
     from pullbox.tasks.import_task import trigger_import_review_source_action
 
     job, parent, file = await load_review_file(session, job_id, file_id)
-    candidate = (
-        await replacement_candidate(session, file, parent) if source_action == "pair" else None
+    candidates = (
+        await replacement_candidates(session, file, parent) if source_action == "pair" else []
     )
+    candidate_scopes = [
+        {"id": candidate.id, "scope": review_scope(job, parent, candidate)}
+        for candidate in candidates
+    ]
     await verify_review_scope(
         session,
         token,
@@ -205,10 +252,17 @@ async def apply_source_action(
             "actor": user.id,
             "action": source_action,
             "scope": review_scope(job, parent, file),
-            "candidate_scope": review_scope(job, parent, candidate) if candidate else None,
+            "candidate_scopes": candidate_scopes,
         },
     )
-    await queue_source_action(session, job_id, file_id, action=source_action, actor_id=user.id)
+    await queue_source_action(
+        session,
+        job_id,
+        file_id,
+        action=source_action,
+        actor_id=user.id,
+        candidate_file_id=candidate_file_id,
+    )
     await session.commit()
     trigger_import_review_source_action(job_id, file_id)
     return JSONResponse(

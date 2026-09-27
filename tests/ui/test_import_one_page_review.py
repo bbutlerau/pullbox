@@ -49,9 +49,15 @@ def _token(html, action):
     return match.group(1)
 
 
-@pytest.mark.parametrize("count,label", [(1, "Allow All"), (2, "Allow All")])
+@pytest.mark.parametrize(
+    ("count", "allow_label", "skip_label"),
+    [
+        (1, "Allow", "Skip"),
+        (2, "Allow All (2)", "Skip All (2)"),
+    ],
+)
 async def test_one_page_review_is_compact_and_has_explicit_series_actions(
-    authenticated_client, sec_db, count, label
+    authenticated_client, sec_db, count, allow_label, skip_label
 ):
     seeded = await _seed_one_page_job(sec_db, count)
     response = await _review(authenticated_client, seeded)
@@ -62,8 +68,14 @@ async def test_one_page_review_is_compact_and_has_explicit_series_actions(
     assert "Review one by one" not in html
     assert 'data-testid="import-review-one-page-review"' not in html
     assert 'data-testid="import-review-one-page-helper"' in html
-    assert label in html
-    assert re.search(r">\s*Skip All\s*</button>", html)
+    allow_control = html.split('data-testid="import-review-one-page-allow"', 1)[1].split(
+        "</form>", 1
+    )[0]
+    skip_control = html.split('data-testid="import-review-one-page-skip"', 1)[1].split(
+        "</form>", 1
+    )[0]
+    assert re.search(rf">\s*{re.escape(allow_label)}\s*</button>", allow_control)
+    assert re.search(rf">\s*{re.escape(skip_label)}\s*</button>", skip_control)
     assert 'data-testid="import-review-more-actions"' not in html
     assert 'data-testid="import-review-one-page-files"' in html
     assert "1.7 MB" in html
@@ -123,7 +135,7 @@ async def test_series_shortcut_only_changes_its_one_page_files(
         )
         assert [file.status for file in files[:2]] == [expected, expected]
         assert all(file.status == ImportedFileStatus.SAFETY_BLOCKED for file in files[2:])
-        assert not any(file.include_in_import for file in files[:2])
+        assert all(file.include_in_import is (action == "allow") for file in files[:2])
         for file_id in other["file_ids"]:
             assert (
                 await session.get(ImportedFile, file_id)

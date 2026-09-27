@@ -98,8 +98,10 @@ _RETRYABLE_CATEGORIES = frozenset(
         ImportSafetyCategory.ZERO_BYTE,
         ImportSafetyCategory.ARCHIVE_NO_PAGES,
         ImportSafetyCategory.OUTSIDE_APPROVED_ROOT,
+        ImportSafetyCategory.UNSUPPORTED_FILE_TYPE,
         ImportSafetyCategory.SOURCE_CHANGED,
         ImportSafetyCategory.SOURCE_MISSING,
+        ImportSafetyCategory.UNKNOWN,
     }
 )
 
@@ -209,6 +211,7 @@ def classify_import_safety_failure(
             "path traversal",
             "dangerous executable",
             "dangerous file",
+            "dangerous path",
             "dangerous payload",
             "unsafe path component",
             "unsafe archive member",
@@ -219,7 +222,11 @@ def classify_import_safety_failure(
         category = ImportSafetyCategory.DANGEROUS_PATH_OR_PAYLOAD
         if normalized_code in _DANGEROUS_CODES:
             stable_code = normalized_code
-        elif "path traversal" in normalized_reason or "unsafe path" in normalized_reason:
+        elif (
+            "path traversal" in normalized_reason
+            or "unsafe path" in normalized_reason
+            or "dangerous path" in normalized_reason
+        ):
             stable_code = "dangerous_archive_path"
         else:
             stable_code = "dangerous_payload"

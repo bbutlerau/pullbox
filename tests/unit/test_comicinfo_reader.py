@@ -14,7 +14,11 @@ if TYPE_CHECKING:
     from pytest import MonkeyPatch
 
 
-def _make_cbz(path: Path, xml_content: str | None = None, filename: str = "ComicInfo.xml") -> None:
+def _make_cbz(
+    path: Path,
+    xml_content: bytes | str | None = None,
+    filename: str = "ComicInfo.xml",
+) -> None:
     """Create a CBZ file with optional ComicInfo.xml."""
     with zipfile.ZipFile(path, "w") as zf:
         if xml_content is not None:
@@ -227,6 +231,29 @@ class TestMalformedXml:
         result = read_comicinfo(cbz)
 
         assert result is None
+
+    def test_malformed_utf16_surrogate_is_rejected(self, tmp_path: Path) -> None:
+        cbz = tmp_path / "malformed-utf16.cbz"
+        payload = (
+            b"\xff\xfe<\x00C\x00o\x00m\x00i\x00c\x00I\x00n\x00f\x00o\x00>\x00"
+            b"\x00\xd8<\x00/\x00C\x00o\x00m\x00i\x00c\x00I\x00n\x00f\x00o\x00>\x00"
+        )
+        _make_cbz(cbz, payload)
+
+        assert read_comicinfo(cbz) is None
+
+    def test_valid_utf16_comicinfo_remains_supported(self, tmp_path: Path) -> None:
+        cbz = tmp_path / "valid-utf16.cbz"
+        xml = (
+            '<?xml version="1.0" encoding="UTF-16"?>'
+            "<ComicInfo><Series>Fritzi Ritz</Series></ComicInfo>"
+        )
+        _make_cbz(cbz, b"\xff\xfe" + xml.encode("utf-16-le"))
+
+        result = read_comicinfo(cbz)
+
+        assert result is not None
+        assert result.series_name == "Fritzi Ritz"
 
 
 class TestVolumeYear:

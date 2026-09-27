@@ -25,6 +25,7 @@ from pullbox.models.story_arc import (
 )
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
 from pullbox.services.import_review_actions import (
+    acknowledge_dangerous_files,
     allow_safety_blocked_file_once,
     bulk_update_file_selection,
     bulk_update_series_selection,
@@ -791,7 +792,8 @@ async def test_allow_safety_blocked_file_once_keeps_file_in_safety_review_until_
     )
 
     assert updated_file.status == ImportedFileStatus.SAFETY_APPROVED
-    assert updated_file.include_in_import is False
+    assert updated_file.include_in_import is True
+    assert updated_file.diagnostics["review_selection"] is True
     assert updated_file.error_message is None
     assert imported.selected_for_import is False
     assert updated_file.diagnostics["safety_exception"]["allowed_once"] is True
@@ -1018,6 +1020,43 @@ async def test_skip_safety_blocked_file_marks_file_skipped_and_unselects_series(
     assert updated_file.include_in_import is False
     assert imported.selected_for_import is False
     assert updated_file.diagnostics["resolution"] == "skipped"
+
+
+async def test_acknowledging_only_dangerous_files_closes_the_empty_series(
+    db_session: AsyncSession,
+) -> None:
+    job = await _create_job_row(db_session)
+    imported = await _create_imported_series(
+        db_session,
+        job,
+        status=ImportSeriesStatus.NO_MATCH,
+        selected_for_import=True,
+    )
+    dangerous = _make_file(
+        job,
+        imported,
+        name="dangerous.cbz",
+        status=ImportedFileStatus.SAFETY_BLOCKED,
+    )
+    dangerous.diagnostics = {
+        "safety_block": {"category": "dangerous_path_or_payload", "overrideable": False}
+    }
+    db_session.add(dangerous)
+    await db_session.flush()
+
+    acknowledged = await acknowledge_dangerous_files(
+        db_session,
+        job.id,
+        imported.id,
+        actor_id=1,
+        recompute_file_counters=AsyncMock(),
+        recompute_series_counters=AsyncMock(),
+    )
+
+    assert acknowledged == 1
+    assert dangerous.status is ImportedFileStatus.SKIPPED
+    assert imported.status is ImportSeriesStatus.SKIPPED
+    assert imported.selected_for_import is False
 
 
 async def test_skip_safety_file_keeps_series_match_while_another_safety_item_remains(

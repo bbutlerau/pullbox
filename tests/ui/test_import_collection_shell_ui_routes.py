@@ -856,6 +856,16 @@ class TestImportShellRouteContracts:
         assert "data-import-review-import-button" in template
         assert 'data-testid="import-review-subtabs"' in template
 
+    async def test_import_review_hero_accents_only_the_open_file_count(self) -> None:
+        template = Path("src/pullbox/ui/templates/partials/import_review_overview.html").read_text()
+
+        assert (
+            '<span class="text-pb-warning">&middot; '
+            "{{ review_summary.review_files_open }} "
+            "{{ 'file' if review_summary.review_files_open == 1 else 'files' }}</span> "
+            "{{ 'needs' if review_summary.review_files_open == 1 else 'need' }} you"
+        ) in template
+
     async def test_import_review_row_expansion_is_stable_and_action_scoped(self) -> None:
         script = Path("src/pullbox/ui/static/js/pullbox.js").read_text()
         template = Path(
@@ -1799,8 +1809,8 @@ class TestImportShellRouteContracts:
 
         assert response.status_code == 200
         assert 'data-testid="import-review-workspace-table"' in response.text
-        assert 'href="https://comicvine.gamespot.com/review-series-1/4050-9001/"' in response.text
-        assert 'data-testid="import-review-cv-id-link"' in response.text
+        assert "4050-None" not in response.text
+        assert "4050-410" in response.text
         assert "Test Publisher" in response.text
         assert "ready series" in response.text
         assert "Follow-up" in response.text
@@ -2100,8 +2110,8 @@ class TestImportShellRouteContracts:
             r'data-testid="import-review-lane-confirm"[\s\S]*?</button>', response.text
         )
         assert conflict_filter is not None
-        assert ">2</span>" in conflict_filter.group(0)
-        assert ">4</span>" not in conflict_filter.group(0)
+        assert ">(2)</span>" in conflict_filter.group(0)
+        assert ">(4)</span>" not in conflict_filter.group(0)
 
     async def test_import_review_conflicts_view_expands_file_keep_choices_by_default(
         self,
@@ -2613,7 +2623,7 @@ class TestImportShellRouteContracts:
         assert "2 already owned" in response.text
         assert "Only missing issues can be added" in response.text
 
-    async def test_import_review_duplicate_rows_show_not_this_series_action(
+    async def test_import_review_duplicate_rows_with_issue_work_hide_series_menu(
         self,
         authenticated_client,
         sec_db,
@@ -2625,9 +2635,8 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert 'data-testid="import-review-unmatch-action"' in response.text
-        assert "Not this series" in response.text
-        assert "unmatchDuplicateSeries(" in response.text
+        assert "Some files need an issue match" in response.text
+        assert 'data-testid="import-review-unmatch-action"' not in response.text
 
     async def test_import_review_matched_rows_show_not_this_series_action(
         self,
@@ -2845,7 +2854,18 @@ class TestImportShellRouteContracts:
         assert 'hx-get="/import/' in response.text
         assert "/reconcile" in response.text
         assert "Match issues" in response.text
-        assert "Not this series" in response.text
+        assert 'data-testid="import-review-more-actions"' not in response.text
+        known_series_row = response.text.split(f'data-import-review-series-row="{series.id}"', 1)[
+            1
+        ].split("</tbody>", 1)[0]
+        choose_issue = re.search(
+            r'<button[^>]*data-testid="import-review-choose-issue"[^>]*>', known_series_row
+        )
+        assert choose_issue is not None
+        assert 'aria-expanded="false"' in choose_issue.group(0)
+        assert 'aria-controls="import-review-issue-choices-' in choose_issue.group(0)
+        assert "toggleReviewIssueChoices(" in choose_issue.group(0)
+        assert "hx-get=" not in choose_issue.group(0)
 
     async def test_import_review_needs_issue_match_includes_duplicate_rows(
         self,
@@ -2864,7 +2884,141 @@ class TestImportShellRouteContracts:
         assert "Match issues" in response.text
         assert "Already in library" in response.text
 
-    async def test_import_review_needs_series_match_view_keeps_comicvine_search(
+    async def test_import_review_same_comic_rows_omit_more_actions_menu(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from sqlalchemy import select
+
+        from pullbox.models.import_job import ImportedFile, ImportedSeries
+
+        job_id = await _seed_import_review_job(sec_db)
+        async with sec_db() as session:
+            series = await session.get(ImportedSeries, 7)
+            assert series is not None
+            files = list(
+                (
+                    await session.scalars(
+                        select(ImportedFile).where(ImportedFile.import_series_id == series.id)
+                    )
+                ).all()
+            )
+            for file in files:
+                if file.status.value == "conflict":
+                    file.diagnostics = {
+                        **file.diagnostics,
+                        "conflict_class": "series_mismatch",
+                    }
+            await session.commit()
+
+        response = await authenticated_client.get(
+            f"/import/{job_id}/review-partial?status=decide&reason=same_comic_review"
+        )
+
+        assert response.status_code == 200
+        assert "Files disagree about the comic" in response.text
+        row = response.text.split(f'data-import-review-series-row="{series.id}"', 1)[1]
+        row = row.split("</tbody>", 1)[0]
+        assert 'data-testid="import-review-more-actions"' not in row
+
+    async def test_import_review_duplicate_copy_actions_preserve_styled_menu_options(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from pullbox.models.import_job import ImportedSeries
+
+        job_id = await _seed_import_review_job(sec_db)
+        async with sec_db() as session:
+            series = await session.get(ImportedSeries, 7)
+            assert series is not None
+            series.cv_id = 507
+            series.cv_title = "Review Series 7"
+            await session.commit()
+
+        response = await authenticated_client.get(
+            f"/import/{job_id}/review-partial?status=confirm&reason=duplicate_copy_confirm"
+        )
+
+        assert response.status_code == 200
+        assert "Choose which copy to import" in response.text
+        row = response.text.split('data-import-review-series-row="7"', 1)[1]
+        row = row.split("</tbody>", 1)[0]
+        assert "Keep suggested" in row
+        change = re.search(r'<button[^>]*data-testid="import-review-change-copies"[^>]*>', row)
+        assert change is not None
+        assert "btn-ghost" in change.group(0)
+        assert "btn-sm" in change.group(0)
+        assert 'data-testid="import-review-more-actions"' in row
+        assert 'data-testid="import-review-copy-menu"' in row
+        assert 'role="menu"' in row
+        assert 'role="menuitem"' in row
+        assert row.count('class="import-review-row-menu-item"') == 4
+        assert "Change ComicVine match" in row
+        assert "Not this series" in row
+        assert "View files" in row
+        assert "Skip series" in row
+        assert "Skip this row" not in row
+        input_css = Path("src/pullbox/ui/static/css/input.css").read_text(encoding="utf-8")
+        assert (
+            ".import-review-row-menu-item:hover,\n"
+            ".import-review-row-menu-item:focus-visible {\n"
+            "  background: var(--pb-interactive-dim);\n"
+            "  color: var(--pb-interactive);\n"
+            "}"
+        ) in input_css
+
+    async def test_import_review_fix_source_menu_omits_series_matching_actions(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportedSeries
+
+        job_id = await _seed_import_review_job(sec_db)
+        async with sec_db() as session:
+            series = await session.get(ImportedSeries, 1)
+            assert series is not None
+            series.cv_id = 9001
+            series.cv_title = "Review Series 1"
+            session.add(
+                ImportedFile(
+                    import_job_id=job_id,
+                    import_series_id=series.id,
+                    file_path="/tmp/review-1/corrupt.cbz",
+                    file_name="Corrupt Download.cbz",
+                    file_size=694,
+                    file_format="cbz",
+                    status=ImportedFileStatus.SAFETY_BLOCKED,
+                    diagnostics={
+                        "safety_block": {
+                            "category": "archive_inspection_failed",
+                            "code": "archive_inspection_failed",
+                            "reason": "Archive could not be inspected",
+                            "overrideable": False,
+                        }
+                    },
+                )
+            )
+            series_id = series.id
+            await session.commit()
+
+        response = await authenticated_client.get(
+            f"/import/{job_id}/review-partial?status=fix_source&reason=archive_inspection_failed"
+        )
+
+        assert response.status_code == 200
+        assert "Technical detail" not in response.text
+        menu = response.text.split(f'id="import-review-menu-{series_id}"', 1)[1]
+        menu = menu.split("</div>", 1)[0]
+        assert "View files" in menu
+        assert "Skip series" in menu
+        assert "Change ComicVine match" not in menu
+        assert "Not this series" not in menu
+        assert 'data-testid="import-review-unmatch-action"' not in menu
+
+    async def test_import_review_needs_series_match_keeps_only_primary_search_action(
         self,
         authenticated_client,
         sec_db,
@@ -2877,11 +3031,13 @@ class TestImportShellRouteContracts:
 
         assert response.status_code == 200
         assert "Search ComicVine" in response.text
-        assert 'data-testid="import-review-search-cv-action"' in response.text
+        assert 'data-testid="import-review-primary-action"' in response.text
+        assert 'data-testid="import-review-search-cv-action"' not in response.text
+        assert 'data-testid="import-review-more-actions"' not in response.text
         assert 'data-testid="import-review-reconcile-action"' not in response.text
         assert "Candidate Series 11" in response.text
 
-    async def test_import_review_safety_blocked_view_shows_allow_and_skip_actions(
+    async def test_import_review_large_file_filter_shows_direct_actions_without_summary_card(
         self,
         authenticated_client,
         sec_db,
@@ -2917,24 +3073,33 @@ class TestImportShellRouteContracts:
             await session.commit()
 
         response = await authenticated_client.get(
-            f"/import/{job_id}/review-partial?status=safety_blocked"
+            f"/import/{job_id}/review-partial?status=decide&reason=decompression_size_limit"
         )
 
         assert response.status_code == 200
         assert "Large file needs approval" in response.text
         assert "Oversized Omnibus.cbz" in response.text
-        assert 'data-testid="import-review-safety-category-summary"' in response.text
+        assert 'data-testid="import-review-safety-category-summary"' not in response.text
         assert 'data-testid="import-review-safety-category-details"' not in response.text
-        assert "Decompression-size limit" in response.text
-        assert "Code: archive_decompressed_size_limit" in response.text
-        assert "Retry alone will not help" in response.text
-        assert "A one-time exception is available for eligible files" in response.text
+        assert "Decompression-size limit" not in response.text
+        assert "Code: archive_decompressed_size_limit" not in response.text
+        assert "Inspection details" not in response.text
+        assert "Retry alone will not help" not in response.text
+        assert "A one-time exception is available for eligible files" not in response.text
         assert "/tmp/review-1/oversized.cbz" not in response.text
-        assert 'data-testid="import-review-allow-safety-file"' in response.text
-        assert 'data-testid="import-review-skip-safety-file"' in response.text
+        assert response.text.count('data-testid="import-review-allow-safety-file"') == 1
+        assert response.text.count('data-testid="import-review-skip-safety-file"') == 1
+        assert ">Allow</button>" in response.text
+        assert ">Skip</button>" in response.text
+        assert ">Allow once</button>" not in response.text
+        assert ">Review file</button>" not in response.text
+        assert 'data-testid="import-review-primary-action"' not in response.text
+        assert 'data-testid="import-review-more-actions"' not in response.text
+        assert 'data-testid="import-review-expand"' in response.text
+        assert 'data-testid="import-review-safety-file-size">4.0 GB</p>' in response.text
         assert f'hx-post="/import/{job_id}/files/' in response.text
-        assert "/safety/allow-once?status=safety_blocked" in response.text
-        assert "/safety/skip?status=safety_blocked" in response.text
+        assert "/safety/allow-once?status=decide&reason=decompression_size_limit" in response.text
+        assert "/safety/skip?status=decide&reason=decompression_size_limit" in response.text
         assert 'hx-target="#import-step-review-shell"' in response.text
 
     async def test_import_review_non_overrideable_safety_block_hides_allow_action(
@@ -3331,7 +3496,7 @@ class TestImportShellRouteContracts:
             refreshed_file = await session.get(ImportedFile, blocked_file_id)
             assert refreshed_file is not None
             assert refreshed_file.status == ImportedFileStatus.SAFETY_APPROVED
-            assert refreshed_file.include_in_import is False
+            assert refreshed_file.include_in_import is True
             assert refreshed_file.diagnostics["safety_exception"]["allowed_once"] is True
 
     async def test_import_review_duplicate_filter_shows_deliberate_file_selection(
@@ -3409,7 +3574,7 @@ class TestImportShellRouteContracts:
         assert 'data-import-review-selectable="7"' in response.text
         assert 'aria-label="Select Review Series 7 for import"' in response.text
 
-    async def test_import_review_non_importable_status_rows_are_not_selectable(
+    async def test_import_review_terminal_status_rows_leave_the_active_lanes(
         self,
         authenticated_client,
         sec_db,
@@ -3427,7 +3592,7 @@ class TestImportShellRouteContracts:
         response = await authenticated_client.get(f"/import/{job_id}/review-partial?status=info")
 
         assert response.status_code == 200
-        assert "Review Series 6" in response.text
+        assert "Review Series 6" not in response.text
         assert 'data-import-review-selectable="6"' not in response.text
         assert 'aria-label="Select Review Series 6 for import"' not in response.text
 

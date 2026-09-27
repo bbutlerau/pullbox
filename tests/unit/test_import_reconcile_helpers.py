@@ -81,7 +81,8 @@ def test_apply_reconcile_decisions_assigns_selected_issue() -> None:
     assert imp_file.matched_issue_cv_id == 1116296
     assert imp_file.match_confidence == "manual"
     assert imp_file.match_method == "import_reconcile"
-    assert imp_file.include_in_import is False
+    assert imp_file.include_in_import is True
+    assert imp_file.diagnostics["review_selection"] is True
     assert imp_file.diagnostics["existing"] == "kept"
     assert imp_file.diagnostics["resolution"] == "assigned"
     assert imp_file.diagnostics["target_issue_summary"]["title"] == "Final Sacrifice"
@@ -138,7 +139,8 @@ def test_apply_reconcile_decisions_creates_provisional_target() -> None:
     assert imp_file.matched_issue_cv_id is None
     assert imp_file.match_confidence == "manual"
     assert imp_file.match_method == PROVIDER_MISSING_ISSUE_PLACEHOLDER_METHOD
-    assert imp_file.include_in_import is False
+    assert imp_file.include_in_import is True
+    assert imp_file.diagnostics["review_selection"] is True
     assert imp_file.diagnostics["existing"] == "kept"
     assert imp_file.diagnostics["kind"] == PROVIDER_MISSING_ISSUE_PLACEHOLDER_KIND
     assert imp_file.diagnostics["target_issue_number"] == 4.0

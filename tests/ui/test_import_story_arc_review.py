@@ -78,6 +78,11 @@ async def test_story_arc_review_partial_is_paginated_and_keeps_arc_counts_separa
 
     assert response.status_code == 200
     assert 'data-testid="import-review-tab-story-arcs"' in response.text
+    story_arc_tab = response.text.split('data-testid="import-review-tab-story-arcs"', 1)[1].split(
+        "</button>", 1
+    )[0]
+    assert 'data-import-story-arc-count="1"' in story_arc_tab
+    assert "(1)" in story_arc_tab
     assert 'data-testid="import-review-story-arcs"' in response.text
     assert "Story arcs detected for this import" in response.text
     assert "Knightfall" in response.text
@@ -90,6 +95,8 @@ async def test_story_arc_review_partial_is_paginated_and_keeps_arc_counts_separa
     assert "Create new story arc" in response.text
     assert 'data-testid="import-story-arc-select-' in response.text
     assert 'data-testid="import-story-arc-skip-' in response.text
+    assert "'skip', null, $event.currentTarget" in response.text
+    assert 'data-import-story-arc-count="1"' in response.text
     assert 'data-testid="import-story-arc-pagination"' in response.text
     assert 'data-testid="import-review-pagination"' not in response.text
 
@@ -134,6 +141,62 @@ async def test_story_arc_review_context_does_not_place_arc_ids_in_series_selecti
     assert context["selected_series_ids"] == []
     assert [item.id for item in context["story_arc_items"]] == [arc.id]
     assert context["story_arc_total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_story_arc_review_keeps_skipped_arcs_reachable_for_restore(
+    authenticated_client,
+    sec_db,
+) -> None:  # type: ignore[no-untyped-def]
+    from pullbox.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
+    from pullbox.models.story_arc import ImportedStoryArcStatus, StoryArcSourceKind
+    from pullbox.models.story_arc_import import ImportedStoryArc
+
+    async with sec_db() as session:
+        job = ImportJob(
+            source_path="/tmp/mylar.db",
+            source_type=ImportSourceType.MYLAR3,
+            status=ImportJobStatus.REVIEW,
+        )
+        active = ImportedStoryArc(
+            import_job=job,
+            source_kind=StoryArcSourceKind.MYLAR3,
+            source_key="mylar3:active",
+            source_ordinal=1,
+            name="Active arc",
+            status=ImportedStoryArcStatus.NEEDS_REVIEW,
+        )
+        skipped = ImportedStoryArc(
+            import_job=job,
+            source_kind=StoryArcSourceKind.MYLAR3,
+            source_key="mylar3:skipped",
+            source_ordinal=2,
+            name="Skipped arc",
+            status=ImportedStoryArcStatus.SKIPPED,
+        )
+        session.add_all([job, active, skipped])
+        await session.commit()
+        job_id = int(job.id)
+        skipped_id = int(skipped.id)
+
+    active_response = await authenticated_client.get(
+        f"/import/{job_id}/review-partial?status=story_arcs"
+    )
+    assert active_response.status_code == 200
+    assert "Active arc" in active_response.text
+    assert "Skipped arc" not in active_response.text
+    assert 'data-testid="import-story-arc-show-skipped"' in active_response.text
+    assert "Review skipped (1)" in active_response.text
+
+    skipped_response = await authenticated_client.get(
+        f"/import/{job_id}/review-partial?status=story_arcs&story_arc_skipped=true"
+    )
+    assert skipped_response.status_code == 200
+    assert "Skipped arc" in skipped_response.text
+    assert "Active arc" not in skipped_response.text
+    assert f'data-testid="import-story-arc-restore-{skipped_id}"' in skipped_response.text
+    assert "'restore', null, $event.currentTarget" in skipped_response.text
+    assert 'data-testid="import-story-arc-show-active"' in skipped_response.text
 
 
 @pytest.mark.asyncio
@@ -328,6 +391,10 @@ async def test_story_arc_review_partial_shows_entry_evidence_without_private_pat
     assert response.status_code == 200
     assert 'data-testid="import-story-arc-entry-review"' in response.text
     assert 'data-testid="import-story-arc-entry-filter"' in response.text
+    assert (
+        'data-testid="import-story-arc-entry-filter-apply" class="btn-primary btn-sm"'
+        in response.text
+    )
     assert response.text.count('data-dropdown-select-contract="v1"') >= 5
     assert "<select" not in response.text
     assert "Source order 1" in response.text

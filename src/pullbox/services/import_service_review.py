@@ -13,6 +13,9 @@ from pullbox.services.import_file_review import (
     repair_file_metadata as repair_import_file_metadata,
 )
 from pullbox.services.import_review_actions import (
+    acknowledge_dangerous_files as acknowledge_import_dangerous_files,
+)
+from pullbox.services.import_review_actions import (
     allow_safety_blocked_file_once as allow_import_safety_blocked_file_once,
 )
 from pullbox.services.import_review_actions import (
@@ -57,7 +60,7 @@ from pullbox.services.import_review_queries import (
 )
 from pullbox.services.import_review_selection import load_import_review_selection_state
 from pullbox.services.import_story_arc_review import (
-    StoryArcReviewAction,
+    StoryArcReviewUpdateAction,
     update_import_story_arc_decision,
 )
 
@@ -312,10 +315,10 @@ class ImportServiceReviewMixin:
         job_id: int,
         imported_story_arc_id: int,
         *,
-        action: StoryArcReviewAction,
+        action: StoryArcReviewUpdateAction,
         proposed_story_arc_id: int | None,
     ) -> ImportedStoryArc:
-        """Persist one staged story-arc select/skip decision."""
+        """Persist one staged story-arc select, skip, or restore decision."""
         return await update_import_story_arc_decision(
             session,
             job_id,
@@ -398,6 +401,24 @@ class ImportServiceReviewMixin:
             await self._recompute_series_counters(session, job)
             await session.flush()
         return imported_series
+
+    async def acknowledge_dangerous_files(
+        self: ImportServiceReviewContext,
+        session: AsyncSession,
+        job_id: int,
+        imported_series_id: int,
+        *,
+        actor_id: int,
+    ) -> int:
+        """Acknowledge dangerous files while retaining valid siblings for import."""
+        return await acknowledge_import_dangerous_files(
+            session,
+            job_id,
+            imported_series_id,
+            actor_id=actor_id,
+            recompute_file_counters=self._recompute_file_counters_for_review_action,
+            recompute_series_counters=self._recompute_series_counters,
+        )
 
     async def unmatch_duplicate_series(
         self: ImportServiceReviewContext,
