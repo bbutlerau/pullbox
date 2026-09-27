@@ -1,11 +1,12 @@
 """Reject invalid catalogs and reproduce cumulative updates from the weekly base."""
 
+import hashlib
 import sqlite3
 
 import pytest
 
 from pullbox.services.catalog.contract import CatalogError
-from pullbox.services.catalog.database import apply_catalog_patch, validate_snapshot
+from pullbox.services.catalog.database import apply_catalog_patch, file_sha256, validate_snapshot
 from tests.catalog_fixtures import build_patch, build_snapshot
 
 
@@ -14,6 +15,37 @@ def test_validates_snapshot_content_and_identity(tmp_path):
     expected = build_snapshot(path)
     result = validate_snapshot(path, "20260913T050000Z")
     assert result == expected
+
+
+def test_file_checksum_reports_actual_bytes(tmp_path):
+    path = tmp_path / "catalog.bin"
+    path.write_bytes(b"catalog" * 500_000)
+    updates = []
+
+    digest = file_sha256(path, lambda current, total: updates.append((current, total)))
+
+    assert digest == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert updates[0] == (0, path.stat().st_size)
+    assert updates[-1] == (path.stat().st_size, path.stat().st_size)
+
+
+def test_snapshot_validation_reports_actual_records(tmp_path):
+    path = tmp_path / "base.db"
+    expected = build_snapshot(path)
+    updates = []
+
+    validate_snapshot(
+        path,
+        "20260913T050000Z",
+        lambda current, total: updates.append((current, total)),
+    )
+
+    record_count = sum(expected["counts"].values())
+    assert updates[0] == (0, record_count)
+    assert updates[-1] == (record_count, record_count)
+    assert [current for current, _total in updates] == sorted(
+        current for current, _total in updates
+    )
 
 
 @pytest.mark.parametrize(

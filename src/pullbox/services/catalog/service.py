@@ -41,7 +41,7 @@ from pullbox.services.catalog.storage import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
     from pathlib import Path
 
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -59,6 +59,9 @@ class CatalogStatus(BaseModel):
     target_version: str | None = None
     bytes_downloaded: int = 0
     bytes_total: int = 0
+    progress_current: int = 0
+    progress_total: int = 0
+    progress_unit: str | None = None
     catalog_size_bytes: int = 0
     last_checked_at: datetime | None = None
     last_updated_at: datetime | None = None
@@ -118,6 +121,27 @@ class CatalogService:
     def status(self) -> CatalogStatus:
         return self._state.model_copy(deep=True)
 
+    def _set_progress(
+        self,
+        phase: str,
+        *,
+        current: int = 0,
+        total: int = 0,
+        unit: str | None = None,
+    ) -> None:
+        self._state.phase = phase
+        self._state.progress_current = current
+        self._state.progress_total = total
+        self._state.progress_unit = unit
+
+    def _progress_reporter(self, unit: str) -> Callable[[int, int], None]:
+        def report(current: int, total: int) -> None:
+            self._state.progress_current = current
+            self._state.progress_total = total
+            self._state.progress_unit = unit
+
+        return report
+
     async def set_automatic_updates(self, enabled: bool) -> None:
         self._state.automatic_updates = enabled
         await self._save()
@@ -150,7 +174,8 @@ class CatalogService:
                     self._state.attempt_started_at = datetime.now(UTC)
                     await disk_work(cleanup, self.root)
                     self._state.requested = True
-                    self._state.phase, self._state.error = "checking", None
+                    self._set_progress("checking")
+                    self._state.error = None
                     await self._save()
                     async with httpx.AsyncClient(
                         timeout=httpx.Timeout(60, connect=15),
@@ -159,7 +184,7 @@ class CatalogService:
                     ) as client:
                         changed = await self._update(client)
                     await disk_work(lambda: cleanup(self.root, completed=True))
-                    self._state.phase = "current"
+                    self._set_progress("current")
                     self._state.last_checked_at = datetime.now(UTC)
                     await self._save()
                     logger.info(
@@ -169,7 +194,7 @@ class CatalogService:
                     )
                     return changed
                 except asyncio.CancelledError:
-                    self._state.phase = "interrupted"
+                    self._set_progress("interrupted")
                     await self._save()
                     raise
                 except (CatalogError, httpx.HTTPError, OSError) as exc:
@@ -179,7 +204,8 @@ class CatalogService:
                         else "Catalog download failed. Check the API connection and "
                         "available disk space, then retry."
                     )
-                    self._state.phase, self._state.error = "failed", message
+                    self._set_progress("failed")
+                    self._state.error = message
                     await self._save()
                     logger.warning("catalog_update_failed", reason=message)
                     raise CatalogError(message) from exc
@@ -222,7 +248,12 @@ class CatalogService:
             offset = 0
         if shutil.disk_usage(directory).free < artifact.size_bytes - offset + 64 * 1024 * 1024:
             raise CatalogError("Not enough disk space to download the catalog.")
-        self._state.phase = "downloading"
+        self._set_progress(
+            "downloading",
+            current=offset,
+            total=artifact.size_bytes,
+            unit="bytes",
+        )
         self._state.bytes_downloaded, self._state.bytes_total = offset, artifact.size_bytes
         await self._save()
         if offset < artifact.size_bytes:
@@ -250,12 +281,18 @@ class CatalogService:
                             raise CatalogError("Catalog download exceeded its signed size.")
                         await disk_work(stream.write, chunk)
                         self._state.bytes_downloaded = offset
+                        self._state.progress_current = offset
                     await disk_work(stream.flush)
                     await disk_work(os.fsync, stream.fileno())
-        self._state.phase = "verifying"
+        self._set_progress(
+            "verifying",
+            total=artifact.size_bytes,
+            unit="bytes",
+        )
         if (
             path.stat().st_size != artifact.size_bytes
-            or await disk_work(file_sha256, path) != artifact.sha256
+            or await disk_work(file_sha256, path, self._progress_reporter("bytes"))
+            != artifact.sha256
         ):
             path.unlink(missing_ok=True)
             raise CatalogError("Catalog download checksum failed. Retry the download.")
@@ -265,17 +302,32 @@ class CatalogService:
         target = safe_path(self.root / "bases" / f"{artifact.version}.db")
         if target.exists():
             try:
-                await disk_work(validate_snapshot, target, artifact.version)
+                self._set_progress("verifying", unit="records")
+                await disk_work(
+                    validate_snapshot,
+                    target,
+                    artifact.version,
+                    self._progress_reporter("records"),
+                )
                 return target
             except CatalogError:
                 logger.warning("catalog_weekly_base_invalid", version=artifact.version)
         archive = await self._download(client, artifact)
         stage = stage_path(self.root, ".db")
         try:
-            self._state.phase = "decompressing"
-            await disk_work(decompress, archive, stage)
-            self._state.phase = "verifying"
-            await disk_work(validate_snapshot, stage, artifact.version)
+            self._set_progress(
+                "decompressing",
+                total=archive.stat().st_size,
+                unit="bytes",
+            )
+            await disk_work(decompress, archive, stage, self._progress_reporter("bytes"))
+            self._set_progress("verifying", unit="records")
+            await disk_work(
+                validate_snapshot,
+                stage,
+                artifact.version,
+                self._progress_reporter("records"),
+            )
             await disk_work(activate_file, stage, target)
         finally:
             stage.unlink(missing_ok=True)
@@ -291,7 +343,13 @@ class CatalogService:
             if relative not in {f"bases/{version}.db", f"versions/{version}.db"}:
                 raise CatalogError("Catalog active file is invalid. Check the data volume.")
             try:
-                await disk_work(validate_snapshot, self.root / str(relative), version)
+                self._set_progress("verifying", unit="records")
+                await disk_work(
+                    validate_snapshot,
+                    self.root / str(relative),
+                    version,
+                    self._progress_reporter("records"),
+                )
                 return False
             except CatalogError:
                 if version > publication.latest_version:
@@ -308,9 +366,18 @@ class CatalogService:
             archive = await self._download(client, patch)
             unpacked, stage = stage_path(self.root, ".patch.db"), stage_path(self.root, ".db")
             try:
-                self._state.phase = "decompressing"
-                await disk_work(decompress, archive, unpacked)
-                self._state.phase = "installing"
+                self._set_progress(
+                    "decompressing",
+                    total=archive.stat().st_size,
+                    unit="bytes",
+                )
+                await disk_work(
+                    decompress,
+                    archive,
+                    unpacked,
+                    self._progress_reporter("bytes"),
+                )
+                self._set_progress("installing")
                 await disk_work(
                     apply_catalog_patch,
                     base,
@@ -324,9 +391,14 @@ class CatalogService:
             finally:
                 unpacked.unlink(missing_ok=True)
                 stage.unlink(missing_ok=True)
-        self._state.phase = "verifying"
-        manifest = await disk_work(validate_snapshot, target, publication.latest_version)
-        self._state.phase = "installing"
+        self._set_progress("verifying", unit="records")
+        manifest = await disk_work(
+            validate_snapshot,
+            target,
+            publication.latest_version,
+            self._progress_reporter("records"),
+        )
+        self._set_progress("installing")
         reference: dict[str, Any] = {
             "version": publication.latest_version,
             "base_version": publication.full_snapshot.version,

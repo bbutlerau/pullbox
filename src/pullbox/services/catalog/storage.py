@@ -73,9 +73,16 @@ def load_json(path: Path) -> dict[str, Any]:
     return result
 
 
-def decompress(archive: Path, output: Path) -> None:
+def decompress(
+    archive: Path,
+    output: Path,
+    progress: Callable[[int, int], None] | None = None,
+) -> None:
     safe_path(archive)
     safe_path(output)
+    archive_size = archive.stat().st_size
+    if progress:
+        progress(0, archive_size)
     total = 0
     try:
         with archive.open("rb") as source, output.open("xb") as destination:
@@ -93,8 +100,12 @@ def decompress(archive: Path, output: Path) -> None:
                     ):
                         raise CatalogError("Not enough disk space to install the catalog.")
                     destination.write(chunk)
+                    if progress:
+                        progress(min(source.tell(), archive_size), archive_size)
             destination.flush()
             os.fsync(destination.fileno())
+            if progress:
+                progress(archive_size, archive_size)
     except zstandard.ZstdError as exc:
         raise CatalogError("Catalog decompression failed. Retry the download.") from exc
 

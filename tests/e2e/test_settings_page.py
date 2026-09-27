@@ -19,6 +19,67 @@ pytestmark = pytest.mark.e2e
 class TestSettingsPage:
     """Behavior-first E2E checks for the settings shell."""
 
+    def test_catalog_download_shows_progress_before_queue_response(
+        self,
+        authed_page: Page,
+        seeded_server: str,
+    ) -> None:
+        settings = SettingsPage(authed_page, seeded_server)
+        settings.goto("metadata")
+        card = authed_page.locator(".section-card", has_text="Local Comic Vine catalog").first
+        authed_page.evaluate(
+            """
+            () => {
+              const realFetch = window.fetch.bind(window);
+              window.fetch = (input, options = {}) => {
+                const url = typeof input === "string" ? input : input.url;
+                if (url.endsWith("/api/v1/catalog/sync") && options.method === "POST") {
+                  return new Promise(() => {});
+                }
+                return realFetch(input, options);
+              };
+            }
+            """
+        )
+
+        card.get_by_role("button", name="Download catalog").click()
+
+        progress = card.locator("#catalog-download-progress")
+        expect(progress).to_be_visible(timeout=500)
+        expect(card.locator("#catalog-download-progress-label")).to_contain_text(
+            "Waiting for the catalog task"
+        )
+        assert progress.get_by_role("progressbar").get_attribute("aria-valuenow") is None
+
+    def test_catalog_progress_uses_measured_phase_value(
+        self,
+        authed_page: Page,
+        seeded_server: str,
+    ) -> None:
+        authed_page.route(
+            "**/api/v1/catalog",
+            lambda route: route.fulfill(
+                json={
+                    "phase": "verifying",
+                    "automatic_updates": True,
+                    "progress_current": 1024 * 1024,
+                    "progress_total": 4 * 1024 * 1024,
+                    "progress_unit": "bytes",
+                }
+            ),
+        )
+
+        settings = SettingsPage(authed_page, seeded_server)
+        settings.goto("metadata")
+        card = authed_page.locator(".section-card", has_text="Local Comic Vine catalog").first
+        progress = card.locator("#catalog-download-progress")
+
+        expect(progress.get_by_role("progressbar")).to_have_attribute("aria-valuenow", "25")
+        expect(card.locator("#catalog-download-progress-label")).to_contain_text(
+            "Verifying downloaded file · 1.0 MiB of 4.0 MiB"
+        )
+        expect(progress.locator(".app-progress-value")).to_have_text("25%")
+
     def test_search_priority_chevrons_swap_and_renumber_rows(
         self, authed_page: Page, seeded_server: str
     ) -> None:
