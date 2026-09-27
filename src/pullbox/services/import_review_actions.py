@@ -485,6 +485,17 @@ async def acknowledge_dangerous_files(
         import_file_ids=[imp_file.id for imp_file in dangerous_files],
     )
     await recompute_file_counters(session, job, [imported_series_id])
+    remaining_file_id = await session.scalar(
+        sa_select(ImportedFile.id)
+        .where(
+            ImportedFile.import_series_id == imported_series_id,
+            ImportedFile.status != ImportedFileStatus.SKIPPED,
+        )
+        .limit(1)
+    )
+    if remaining_file_id is None:
+        imported_series.status = ImportSeriesStatus.SKIPPED
+        imported_series.selected_for_import = False
     await recompute_series_counters(session, job)
     await session.flush()
     return len(dangerous_files)

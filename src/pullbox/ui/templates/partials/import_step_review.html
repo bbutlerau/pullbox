@@ -41,6 +41,7 @@
     <input type="hidden" name="review_sort" value="{{ sort }}">
     <input type="hidden" name="review_page" value="{{ page }}">
     <input type="hidden" name="review_reason" value="{{ active_reason or '' }}">
+    <input type="hidden" name="review_story_arc_skipped" value="{{ 'true' if story_arc_skipped else '' }}">
     {% if safety_rematch_pending %}
     <div id="import-safety-rematch-poll" hidden hx-get="/import/{{ job.id }}/review-rematch-status"
       hx-trigger="every 2s [window.pullboxLiveUpdatesEnabled()]" hx-target="this" hx-swap="morph:outerHTML"></div>

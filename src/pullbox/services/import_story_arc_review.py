@@ -150,6 +150,7 @@ async def load_import_story_arc_review_page(
     *,
     page: int = 1,
     page_size: int = 25,
+    skipped_only: bool = False,
 ) -> ImportedStoryArcReviewPage:
     """Return one deterministic, bounded page of staged story arcs."""
     if page < 1:
@@ -158,11 +159,16 @@ async def load_import_story_arc_review_page(
         raise ValidationError("Story arc review page_size must be between 1 and 100")
 
     await _require_review_job(session, job_id)
+    status_filter = (
+        ImportedStoryArc.status == ImportedStoryArcStatus.SKIPPED
+        if skipped_only
+        else ImportedStoryArc.status != ImportedStoryArcStatus.SKIPPED
+    )
     total = int(
         await session.scalar(
             select(func.count(ImportedStoryArc.id)).where(
                 ImportedStoryArc.import_job_id == job_id,
-                ImportedStoryArc.status != ImportedStoryArcStatus.SKIPPED,
+                status_filter,
             )
         )
         or 0
@@ -173,7 +179,7 @@ async def load_import_story_arc_review_page(
                 select(ImportedStoryArc)
                 .where(
                     ImportedStoryArc.import_job_id == job_id,
-                    ImportedStoryArc.status != ImportedStoryArcStatus.SKIPPED,
+                    status_filter,
                 )
                 .order_by(ImportedStoryArc.source_ordinal.asc(), ImportedStoryArc.id.asc())
                 .offset((page - 1) * page_size)

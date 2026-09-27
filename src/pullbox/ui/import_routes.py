@@ -530,6 +530,7 @@ async def import_review_partial(
     page: int = Query(1, ge=1),
     sort: str | None = Query(None),
     story_arc_id: int | None = Query(None, ge=1),
+    story_arc_skipped: bool = Query(False),
     arc_entry_state: StoryArcEntryResolutionFilter = StoryArcEntryResolutionFilter.ALL,
     arc_entry_page: int = Query(1, ge=1),
 ) -> Response:
@@ -544,6 +545,7 @@ async def import_review_partial(
         page=page,
         sort=sort,
         story_arc_id=story_arc_id,
+        story_arc_skipped=story_arc_skipped,
         arc_entry_state=arc_entry_state,
         arc_entry_page=arc_entry_page,
     )
@@ -589,6 +591,7 @@ async def _render_import_review_partial(
     page: int,
     sort: str | None,
     story_arc_id: int | None = None,
+    story_arc_skipped: bool = False,
     arc_entry_state: StoryArcEntryResolutionFilter = StoryArcEntryResolutionFilter.ALL,
     arc_entry_page: int = 1,
     extra_context: Mapping[str, object] | None = None,
@@ -613,6 +616,7 @@ async def _render_import_review_partial(
         page=page,
         sort=sort,
         story_arc_id=story_arc_id,
+        story_arc_skipped=story_arc_skipped,
         arc_entry_state=arc_entry_state,
         arc_entry_page=arc_entry_page,
         reason=request.query_params.get("reason"),

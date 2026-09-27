@@ -363,7 +363,9 @@ async def test_story_arc_review_page_is_paginated_and_preserves_order_and_counts
 
 
 @pytest.mark.asyncio
-async def test_story_arc_review_page_hides_skipped_arcs(db_session: Any) -> None:
+async def test_story_arc_review_page_exposes_skipped_arcs_in_a_separate_view(
+    db_session: Any,
+) -> None:
     from pullbox.services.import_story_arc_review import load_import_story_arc_review_page
 
     job = ImportJob(
@@ -386,6 +388,16 @@ async def test_story_arc_review_page_hides_skipped_arcs(db_session: Any) -> None
 
     assert page.total == 1
     assert [item.name for item in page.items] == ["Keep reviewing"]
+
+    skipped_page = await load_import_story_arc_review_page(
+        db_session,
+        job.id,
+        skipped_only=True,
+    )
+
+    assert skipped_page.total == 1
+    assert [item.name for item in skipped_page.items] == ["Skipped arc"]
+    assert skipped_page.items[0].status is ImportedStoryArcStatus.SKIPPED
 
 
 @pytest.mark.asyncio

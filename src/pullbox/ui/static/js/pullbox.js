@@ -8319,6 +8319,9 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
       var sortInput = document.querySelector("#import-step-review-shell input[name='review_sort']");
       var pageInput = document.querySelector("#import-step-review-shell input[name='review_page']");
       var reasonInput = document.querySelector("#import-step-review-shell input[name='review_reason']");
+      var skippedArcsInput = document.querySelector(
+        "#import-step-review-shell input[name='review_story_arc_skipped']",
+      );
 
       if (statusInput && statusInput.value) {
         params.set("status", statusInput.value);
@@ -8330,6 +8333,9 @@ function importReviewData(configOrDefaultRootId, maybeJobId) {
         params.set("page", pageInput.value);
       }
       if (reasonInput && reasonInput.value) { params.set("reason", reasonInput.value); }
+      if (skippedArcsInput && skippedArcsInput.value) {
+        params.set("story_arc_skipped", skippedArcsInput.value);
+      }
 
       var query = params.toString();
       return query ? url + "?" + query : url;

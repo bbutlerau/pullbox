@@ -10,6 +10,8 @@ NZBGet API docs: https://nzbget.com/info/api/
 from __future__ import annotations
 
 import asyncio
+import gzip
+import io
 import time
 import xmlrpc.client  # nosec B411
 from typing import Any
@@ -28,6 +30,7 @@ logger = structlog.get_logger(__name__)
 
 _REQUEST_TIMEOUT = 10.0
 _MAX_XML_RPC_RESPONSE_BYTES = 30 * 1024 * 1024
+_MAX_XML_RPC_COMPRESSED_RESPONSE_BYTES = 30 * 1024 * 1024
 
 # NZBGet priority string → integer mapping
 _PRIORITY_MAP: dict[str, int] = {
@@ -477,7 +480,10 @@ class _TimeoutTransport(xmlrpc.client.Transport):
         """Normalize the bounded XML-RPC response before Expat parses it."""
         stream = response
         if hasattr(response, "getheader") and response.getheader("Content-Encoding", "") == "gzip":
-            stream = xmlrpc.client.GzipDecodedResponse(response)
+            compressed = response.read(_MAX_XML_RPC_COMPRESSED_RESPONSE_BYTES + 1)
+            if len(compressed) > _MAX_XML_RPC_COMPRESSED_RESPONSE_BYTES:
+                raise ValueError("Compressed XML-RPC response exceeded the 30 MiB safety limit")
+            stream = gzip.GzipFile(fileobj=io.BytesIO(compressed))
 
         try:
             payload = stream.read(_MAX_XML_RPC_RESPONSE_BYTES + 1)

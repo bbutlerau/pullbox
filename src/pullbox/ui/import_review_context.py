@@ -440,6 +440,7 @@ async def load_import_review_context(
     page: int,
     sort: str | None,
     story_arc_id: int | None = None,
+    story_arc_skipped: bool = False,
     arc_entry_state: StoryArcEntryResolutionFilter = StoryArcEntryResolutionFilter.ALL,
     arc_entry_page: int = 1,
     reason: str | None = None,
@@ -508,6 +509,7 @@ async def load_import_review_context(
             job_id,
             page=page,
             page_size=page_size,
+            skipped_only=story_arc_skipped,
         )
         story_arc_items = story_arc_page.items
         story_arc_total = story_arc_page.total
@@ -515,9 +517,13 @@ async def load_import_review_context(
         page = story_arc_page.page
         page_size = story_arc_page.page_size
         normalized_sort = "source_order"
-        story_arc_selected_item = next(
-            (item for item in story_arc_items if item.id == story_arc_id),
-            story_arc_items[0] if story_arc_items else None,
+        story_arc_selected_item = (
+            None
+            if story_arc_skipped
+            else next(
+                (item for item in story_arc_items if item.id == story_arc_id),
+                story_arc_items[0] if story_arc_items else None,
+            )
         )
         if story_arc_selected_item is not None:
             story_arc_entry_page_result = await load_import_story_arc_entry_review_page(
@@ -692,6 +698,7 @@ async def load_import_review_context(
         },
         "story_arc_items": story_arc_items,
         "story_arc_total": story_arc_total,
+        "story_arc_skipped": story_arc_skipped,
         "story_arc_selected_item": story_arc_selected_item,
         "story_arc_selected_id": (
             story_arc_selected_item.id if story_arc_selected_item is not None else None

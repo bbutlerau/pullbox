@@ -144,6 +144,62 @@ async def test_story_arc_review_context_does_not_place_arc_ids_in_series_selecti
 
 
 @pytest.mark.asyncio
+async def test_story_arc_review_keeps_skipped_arcs_reachable_for_restore(
+    authenticated_client,
+    sec_db,
+) -> None:  # type: ignore[no-untyped-def]
+    from pullbox.models.import_job import ImportJob, ImportJobStatus, ImportSourceType
+    from pullbox.models.story_arc import ImportedStoryArcStatus, StoryArcSourceKind
+    from pullbox.models.story_arc_import import ImportedStoryArc
+
+    async with sec_db() as session:
+        job = ImportJob(
+            source_path="/tmp/mylar.db",
+            source_type=ImportSourceType.MYLAR3,
+            status=ImportJobStatus.REVIEW,
+        )
+        active = ImportedStoryArc(
+            import_job=job,
+            source_kind=StoryArcSourceKind.MYLAR3,
+            source_key="mylar3:active",
+            source_ordinal=1,
+            name="Active arc",
+            status=ImportedStoryArcStatus.NEEDS_REVIEW,
+        )
+        skipped = ImportedStoryArc(
+            import_job=job,
+            source_kind=StoryArcSourceKind.MYLAR3,
+            source_key="mylar3:skipped",
+            source_ordinal=2,
+            name="Skipped arc",
+            status=ImportedStoryArcStatus.SKIPPED,
+        )
+        session.add_all([job, active, skipped])
+        await session.commit()
+        job_id = int(job.id)
+        skipped_id = int(skipped.id)
+
+    active_response = await authenticated_client.get(
+        f"/import/{job_id}/review-partial?status=story_arcs"
+    )
+    assert active_response.status_code == 200
+    assert "Active arc" in active_response.text
+    assert "Skipped arc" not in active_response.text
+    assert 'data-testid="import-story-arc-show-skipped"' in active_response.text
+    assert "Review skipped (1)" in active_response.text
+
+    skipped_response = await authenticated_client.get(
+        f"/import/{job_id}/review-partial?status=story_arcs&story_arc_skipped=true"
+    )
+    assert skipped_response.status_code == 200
+    assert "Skipped arc" in skipped_response.text
+    assert "Active arc" not in skipped_response.text
+    assert f'data-testid="import-story-arc-restore-{skipped_id}"' in skipped_response.text
+    assert "'restore', null, $event.currentTarget" in skipped_response.text
+    assert 'data-testid="import-story-arc-show-active"' in skipped_response.text
+
+
+@pytest.mark.asyncio
 async def test_story_arc_step_three_shows_safe_draft_and_separate_policy_confirmation(
     authenticated_client,
     sec_db,
