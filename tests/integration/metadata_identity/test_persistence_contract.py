@@ -47,7 +47,10 @@ def _link(
 ) -> Insert:
     key = "series_id" if "series_id" in table.c else "issue_id"
     return insert(table).values(
-        **{key: target_id}, identity_namespace=namespace, external_id=external_id
+        **{key: target_id},
+        identity_namespace=namespace,
+        external_id=external_id,
+        verification_state="verified",
     )
 
 

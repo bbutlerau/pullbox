@@ -59,6 +59,8 @@ async def identity_probe_db(
             await connection.run_sync(probe.issue.create)
             if probe.arc_index is not None:
                 await connection.run_sync(probe.arc_index.create)
+            for table in probe.events.values():
+                await connection.run_sync(table.create)
         yield engine, async_sessionmaker(engine, expire_on_commit=False), probe
     finally:
         await engine.dispose()
