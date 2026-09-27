@@ -316,6 +316,7 @@ def _apply_file(
     )
     file.parsed_series = metadata.series_name
     file.parsed_issue_number = metadata.issue_number
+    file.issue_number_raw = metadata.issue_number_text
     file.parsed_year = metadata.year
     file.comicvine_issue_id = metadata.comicvine_issue_id
     file.has_comicinfo = bool(source.get("has_comicinfo"))

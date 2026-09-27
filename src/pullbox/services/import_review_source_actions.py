@@ -105,44 +105,49 @@ async def replacement_candidates(
         or safety["category"] != "source_missing"
     ):
         return []
-    candidates = list(
-        (
-            await session.scalars(
-                select(ImportedFile)
-                .where(
-                    ImportedFile.import_series_id == parent.id,
-                    ImportedFile.id != file.id,
-                    ImportedFile.comicvine_issue_id == file.comicvine_issue_id,
-                    ImportedFile.file_size > 0,
-                    ImportedFile.status.in_(
-                        [ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED]
-                    ),
-                )
-                .order_by(ImportedFile.file_name.asc(), ImportedFile.id.asc())
-                .limit(MAX_REPLACEMENT_CANDIDATES + 1)
-            )
-        ).all()
-    )
-    candidate_paths = [candidate.file_path for candidate in candidates]
-    owned_paths = set(
-        (
-            await session.scalars(
-                select(LibraryFile.file_path).where(LibraryFile.file_path.in_(candidate_paths))
-            )
-        ).all()
-    )
     recorded_metadata = source_metadata_for_import_file(parent, file)
-    result = [
-        candidate
-        for candidate in candidates
-        if Path(candidate.file_path).parent == Path(file.file_path).parent
-        and bool(candidate.source_signature)
-        and candidate.file_path not in owned_paths
-        and same_trusted_issue(
-            recorded_metadata,
-            source_metadata_for_import_file(parent, candidate),
+    candidate_query = (
+        select(ImportedFile)
+        .where(
+            ImportedFile.import_series_id == parent.id,
+            ImportedFile.id != file.id,
+            ImportedFile.comicvine_issue_id == file.comicvine_issue_id,
+            ImportedFile.file_size > 0,
+            ImportedFile.status.in_([ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED]),
         )
-    ]
+        .order_by(ImportedFile.file_name.asc(), ImportedFile.id.asc())
+    )
+    page_size = MAX_REPLACEMENT_CANDIDATES + 1
+    offset = 0
+    result: list[ImportedFile] = []
+    while len(result) <= MAX_REPLACEMENT_CANDIDATES:
+        candidates = list(
+            (await session.scalars(candidate_query.offset(offset).limit(page_size))).all()
+        )
+        if not candidates:
+            break
+        candidate_paths = [candidate.file_path for candidate in candidates]
+        owned_paths = set(
+            (
+                await session.scalars(
+                    select(LibraryFile.file_path).where(LibraryFile.file_path.in_(candidate_paths))
+                )
+            ).all()
+        )
+        result.extend(
+            candidate
+            for candidate in candidates
+            if Path(candidate.file_path).parent == Path(file.file_path).parent
+            and bool(candidate.source_signature)
+            and candidate.file_path not in owned_paths
+            and same_trusted_issue(
+                recorded_metadata,
+                source_metadata_for_import_file(parent, candidate),
+            )
+        )
+        offset += len(candidates)
+        if len(candidates) < page_size:
+            break
     return result[:MAX_REPLACEMENT_CANDIDATES]
 
 

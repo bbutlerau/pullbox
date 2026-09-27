@@ -101,11 +101,16 @@ async def test_unsupported_recheck_adopts_one_exact_same_stem_supported_replacem
     replacement = tmp_path / "Example 01.cbz"
     unsupported.write_bytes(b"unsupported source")
     with zipfile.ZipFile(replacement, "w") as archive:
+        archive.writestr(
+            "ComicInfo.xml",
+            "<ComicInfo><Series>Example</Series><Number>1AU</Number></ComicInfo>",
+        )
         archive.writestr("01.jpg", b"first")
         archive.writestr("02.jpg", b"second")
     file.file_path = str(unsupported)
     file.file_name = unsupported.name
     file.file_format = "rar"
+    file.issue_number_raw = "1"
     await queue_source_action(db_session, job.id, file.id)
     await db_session.commit()
 
@@ -119,6 +124,7 @@ async def test_unsupported_recheck_adopts_one_exact_same_stem_supported_replacem
     assert file.file_path == str(replacement)
     assert file.file_name == replacement.name
     assert file.file_format == "cbz"
+    assert file.issue_number_raw == "1AU"
     assert file.diagnostics["review_source_replacement"] == {
         "previous_file_name": unsupported.name,
         "replacement_file_name": replacement.name,
@@ -136,6 +142,57 @@ async def test_pair_requires_a_unique_proven_replacement(db_session: AsyncSessio
     job, _, file = await make_source(db_session, category="source_missing")
     with pytest.raises(ValidationError, match="replacement"):
         await queue_source_action(db_session, job.id, file.id, action="pair")
+
+
+async def test_pair_does_not_infer_uniqueness_before_filtering_the_candidate_cap(
+    db_session: AsyncSession, tmp_path: Path
+):
+    from tests.unit.test_import_path_reconciliation import _archive, _saved
+
+    job, series, recorded, first_match = await _saved(db_session, tmp_path)
+    recorded.diagnostics = {
+        **recorded.diagnostics,
+        "safety_block": {"category": "source_missing"},
+    }
+    folder = Path(first_match.file_path).parent
+    for index in range(25):
+        db_session.add(
+            ImportedFile(
+                import_job_id=job.id,
+                import_series_id=series.id,
+                comicvine_issue_id=recorded.comicvine_issue_id,
+                parsed_issue_number=1,
+                parsed_year=2019,
+                file_path=str(folder / f"A invalid {index:02d}.cbz"),
+                file_name=f"A invalid {index:02d}.cbz",
+                file_size=100,
+                file_format="cbz",
+                status=ImportedFileStatus.MATCHED,
+                diagnostics=dict(first_match.diagnostics),
+            )
+        )
+    second_path = folder / "Z second verified replacement.cbz"
+    _archive(second_path)
+    db_session.add(
+        ImportedFile(
+            import_job_id=job.id,
+            import_series_id=series.id,
+            comicvine_issue_id=recorded.comicvine_issue_id,
+            parsed_issue_number=1,
+            parsed_year=2019,
+            file_path=str(second_path),
+            file_name=second_path.name,
+            file_size=second_path.stat().st_size,
+            file_format="cbz",
+            source_signature={"size": second_path.stat().st_size},
+            status=ImportedFileStatus.MATCHED,
+            diagnostics=dict(first_match.diagnostics),
+        )
+    )
+    await db_session.flush()
+
+    with pytest.raises(ValidationError, match="Choose one"):
+        await queue_source_action(db_session, job.id, recorded.id, action="pair")
 
 
 async def test_live_recheck_preserves_source_and_rematches_only_after_inspection(
