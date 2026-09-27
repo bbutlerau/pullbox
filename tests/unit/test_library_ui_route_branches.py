@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
+from sqlalchemy import event
 
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
@@ -389,6 +390,7 @@ async def test_library_route_uses_enabled_root_fallback_and_renders_context(
     configured_library_routes: RecordingTemplates,
     monkeypatch: pytest.MonkeyPatch,
     db_session,
+    async_engine,
     tmp_path: Path,
 ) -> None:
     from pullbox.services import library_service
@@ -425,14 +427,30 @@ async def test_library_route_uses_enabled_root_fallback_and_renders_context(
     db_session.add_all([root, unmatched_file])
     await db_session.commit()
 
+    statements: list[str] = []
+
+    def record_statement(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        statements.append(statement)
+
+    event.listen(async_engine.sync_engine, "before_cursor_execute", record_statement)
     request = SimpleNamespace(headers={}, cookies={}, state=SimpleNamespace())
-    response = await library_routes.library(
-        request,
-        user=SimpleNamespace(username="admin"),
-        session=db_session,
-        path=None,
-        sort="-type",
-    )
+    try:
+        response = await library_routes.library(
+            request,
+            user=SimpleNamespace(username="admin"),
+            session=db_session,
+            path=None,
+            sort="-type",
+        )
+    finally:
+        event.remove(async_engine.sync_engine, "before_cursor_execute", record_statement)
 
     assert response.template_name == "pages/library.html"
     assert configured_library_routes.calls[-1][0] == "pages/library.html"
@@ -448,3 +466,76 @@ async def test_library_route_uses_enabled_root_fallback_and_renders_context(
         "comic": "config:comic_file_template",
     }
     assert context["utility_trash_folder"] == "config:utility_trash_folder"
+    assert isinstance(request.state.library_summary_query_ms, float)
+    assert isinstance(request.state.library_metrics_ms, float)
+    assert isinstance(request.state.library_catalog_ms, float)
+    assert isinstance(request.state.library_snapshot_ms, float)
+    assert isinstance(request.state.library_workspace_ms, float)
+    assert isinstance(request.state.library_render_ms, float)
+
+    library_file_selects = [
+        statement
+        for statement in statements
+        if statement.lstrip().upper().startswith("SELECT") and "library_files" in statement
+    ]
+    assert len(library_file_selects) <= 4
+
+
+@pytest.mark.asyncio
+async def test_library_workspace_resolves_catalog_paths_once_per_request(
+    configured_library_routes: RecordingTemplates,
+    monkeypatch: pytest.MonkeyPatch,
+    db_session,
+    tmp_path: Path,
+) -> None:
+    root_path = tmp_path / "library"
+    series_path = root_path / "Batman"
+    issue_path = series_path / "Batman 001.cbz"
+    series_path.mkdir(parents=True)
+    issue_path.write_bytes(b"comic")
+    now = datetime(2026, 1, 4, tzinfo=UTC)
+
+    root = LibraryRoot(name="Main", path=str(root_path), enabled=True)
+    series = Series(
+        title="Batman",
+        sort_title="Batman",
+        path=str(series_path),
+        library_root=root,
+    )
+    issue = Issue(series=series, issue_number=1, status=IssueStatus.OWNED)
+    library_file = LibraryFile(
+        file_path=str(issue_path),
+        file_name=issue_path.name,
+        file_size=512,
+        file_format=FileFormat.CBZ,
+        file_modified_at=now,
+        match_confidence=MatchConfidence.HIGH,
+        issue=issue,
+        library_root=root,
+    )
+    db_session.add_all([root, series, issue, library_file])
+    await db_session.commit()
+
+    resolved_values: list[str | None] = []
+    original_resolver = library_routes._resolve_catalog_path
+
+    def record_resolution(path_value: str | None):
+        resolved_values.append(path_value)
+        return original_resolver(path_value)
+
+    monkeypatch.setattr(library_routes, "_resolve_catalog_path", record_resolution)
+
+    await library_routes.build_library_workspace_view(
+        db_session,
+        comics_dir=root_path,
+        browse_path=None,
+        browser_sort="name",
+        total_files=1,
+        matched_files=1,
+        unmatched_files=0,
+        total_size_bytes=512,
+        format_counts={"cbz": 1},
+    )
+
+    assert resolved_values.count(str(series_path)) == 1
+    assert resolved_values.count(str(issue_path)) == 1

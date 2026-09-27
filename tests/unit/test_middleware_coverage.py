@@ -270,6 +270,18 @@ class TestRequestLoggingSlow:
             req.state.auth_config_ms = 2.5
             req.state.sidebar_context_ms = 4.0
             req.state.series_list_query_ms = 211.25
+            req.state.dashboard_intelligence_ms = 31.5
+            req.state.dashboard_view_ms = 42.25
+            req.state.dashboard_reading_ms = 3.75
+            req.state.dashboard_render_ms = 7.0
+            req.state.library_summary_query_ms = 12.5
+            req.state.library_metrics_ms = 18.0
+            req.state.library_catalog_ms = 91.5
+            req.state.library_snapshot_ms = 35.5
+            req.state.library_workspace_ms = 145.0
+            req.state.library_render_ms = 5.25
+            req.state.series_detail_query_ms = 88.0
+            req.state.series_detail_render_ms = 6.5
             time.sleep(0.25)
             return Response(status_code=200)
 
@@ -280,6 +292,18 @@ class TestRequestLoggingSlow:
         assert log_kwargs["auth_config_ms"] == 2.5
         assert log_kwargs["sidebar_context_ms"] == 4.0
         assert log_kwargs["series_list_query_ms"] == 211.25
+        assert log_kwargs["dashboard_intelligence_ms"] == 31.5
+        assert log_kwargs["dashboard_view_ms"] == 42.25
+        assert log_kwargs["dashboard_reading_ms"] == 3.75
+        assert log_kwargs["dashboard_render_ms"] == 7.0
+        assert log_kwargs["library_summary_query_ms"] == 12.5
+        assert log_kwargs["library_metrics_ms"] == 18.0
+        assert log_kwargs["library_catalog_ms"] == 91.5
+        assert log_kwargs["library_snapshot_ms"] == 35.5
+        assert log_kwargs["library_workspace_ms"] == 145.0
+        assert log_kwargs["library_render_ms"] == 5.25
+        assert log_kwargs["series_detail_query_ms"] == 88.0
+        assert log_kwargs["series_detail_render_ms"] == 6.5
 
     @pytest.mark.asyncio
     async def test_fast_server_error_logs_error(self) -> None:

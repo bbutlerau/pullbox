@@ -212,8 +212,9 @@ async def test_series_detail_route_redirects_or_renders_context(
     assert missing.status_code == 302
     assert missing.headers["location"] == "/series"
 
+    request = _request()
     rendered = await series_detail_routes.series_detail(
-        _request(),
+        request,
         series.id,
         _user(),
         db_session,
@@ -227,6 +228,8 @@ async def test_series_detail_route_redirects_or_renders_context(
     assert rendered.context["delete_file_count"] == 1
     assert rendered.context["filtered_total"] == 1
     assert configured_detail_routes.calls[-1][0] == "pages/series_detail.html"
+    assert isinstance(request.state.series_detail_query_ms, float)
+    assert isinstance(request.state.series_detail_render_ms, float)
 
 
 @pytest.mark.asyncio

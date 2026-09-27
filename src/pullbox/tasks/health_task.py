@@ -160,6 +160,25 @@ async def _run_health_refresh(component: str | None, event_name: str) -> None:
     for outcome in outcomes:
         counts[outcome.status.value] = counts.get(outcome.status.value, 0) + 1
 
+    attention_statuses = {
+        HealthStatus.DEGRADED,
+        HealthStatus.UNHEALTHY,
+        HealthStatus.UNKNOWN,
+    }
+    attention_checks: list[str] = []
+    attention_subchecks: list[str] = []
+    for outcome in outcomes:
+        outcome_component = str(getattr(outcome, "component", component or "health"))
+        check_name = str(getattr(outcome, "check_name", "check"))
+        if outcome.status in attention_statuses:
+            attention_checks.append(f"{outcome_component}.{check_name}:{outcome.status.value}")
+        for sub_check in getattr(outcome, "sub_checks", ()):
+            if sub_check.status not in attention_statuses:
+                continue
+            attention_subchecks.append(
+                f"{outcome_component}.{check_name}.{sub_check.check_name}:{sub_check.status.value}"
+            )
+
     logger.info(
         event_name,
         component=component,
@@ -169,4 +188,6 @@ async def _run_health_refresh(component: str | None, event_name: str) -> None:
         unknown=counts[HealthStatus.UNKNOWN],
         duration_seconds=round(elapsed, 1),
         total_checks=len(outcomes),
+        attention_checks=attention_checks,
+        attention_subchecks=attention_subchecks,
     )

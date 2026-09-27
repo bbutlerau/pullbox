@@ -34,6 +34,24 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 _SLOW_REQUEST_THRESHOLD_MS = 200.0
+_REQUEST_TIMING_FIELDS = (
+    "auth_config_ms",
+    "sidebar_context_ms",
+    "series_list_query_ms",
+    "series_list_render_ms",
+    "dashboard_intelligence_ms",
+    "dashboard_view_ms",
+    "dashboard_reading_ms",
+    "dashboard_render_ms",
+    "library_summary_query_ms",
+    "library_metrics_ms",
+    "library_catalog_ms",
+    "library_snapshot_ms",
+    "library_workspace_ms",
+    "library_render_ms",
+    "series_detail_query_ms",
+    "series_detail_render_ms",
+)
 
 # Module-level cache for setup completion status
 _setup_complete: bool | None = None
@@ -163,12 +181,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 "duration_ms": round(duration_ms, 2),
                 "request_id": request_id,
             }
-            for timing_key in (
-                "auth_config_ms",
-                "sidebar_context_ms",
-                "series_list_query_ms",
-                "series_list_render_ms",
-            ):
+            for timing_key in _REQUEST_TIMING_FIELDS:
                 timing_value = getattr(request.state, timing_key, None)
                 if isinstance(timing_value, int | float):
                     log_kwargs[timing_key] = timing_value

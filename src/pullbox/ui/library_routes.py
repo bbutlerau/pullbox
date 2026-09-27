@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import shutil
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -10,13 +11,13 @@ from pathlib import Path
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import Response
 
 from pullbox.api.deps import AuthenticatedUser, DbSession
 from pullbox.models.issue import Issue
-from pullbox.models.library import FileFormat, LibraryFile, LibraryRoot, MatchConfidence
+from pullbox.models.library import LibraryFile, LibraryRoot, MatchConfidence
 from pullbox.models.series import Series
 from pullbox.ui.library_presenters import (
     LibraryBreadcrumbView,
@@ -67,6 +68,7 @@ __all__ = [
     "library_mix_label",
     "library_stat_tone",
     "load_library_browser_catalog_entries",
+    "load_library_file_summary",
     "load_library_series_preview_metrics",
     "normalize_library_browser_sort",
 ]
@@ -221,6 +223,47 @@ async def load_library_series_preview_metrics(
     return metrics
 
 
+async def load_library_file_summary(
+    session: AsyncSession,
+) -> tuple[int, int, int, dict[str, int]]:
+    """Load the Library headline and format counts in two set-based queries."""
+    summary_row = (
+        await session.execute(
+            select(
+                func.count(LibraryFile.id),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (LibraryFile.match_confidence != MatchConfidence.UNMATCHED, 1),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+                func.coalesce(func.sum(LibraryFile.file_size), 0),
+            )
+        )
+    ).one()
+    format_rows = (
+        await session.execute(
+            select(LibraryFile.file_format, func.count(LibraryFile.id)).group_by(
+                LibraryFile.file_format
+            )
+        )
+    ).all()
+    format_counts = {
+        file_format.value: int(count)
+        for file_format, count in format_rows
+        if file_format is not None and int(count or 0) > 0
+    }
+    return (
+        int(summary_row[0] or 0),
+        int(summary_row[1] or 0),
+        int(summary_row[2] or 0),
+        format_counts,
+    )
+
+
 def _path_within_root(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
@@ -274,6 +317,8 @@ def _add_catalog_folder_path(
 async def load_library_browser_catalog_entries(
     session: AsyncSession,
     library_roots: Sequence[LibraryRoot],
+    *,
+    resolved_paths: dict[str, Path] | None = None,
 ) -> tuple[LibraryBrowserCatalogEntry, ...]:
     """Load the DB-backed Library browser catalog without scanning arbitrary disk entries."""
     root_paths = tuple(
@@ -289,6 +334,8 @@ async def load_library_browser_catalog_entries(
         resolved_path = _resolve_catalog_path(series_path)
         if resolved_path is None:
             continue
+        if resolved_paths is not None:
+            resolved_paths[str(resolved_path)] = resolved_path
         root_path = _matching_catalog_root(resolved_path, root_paths)
         if root_path is None:
             continue
@@ -311,6 +358,8 @@ async def load_library_browser_catalog_entries(
         resolved_path = _resolve_catalog_path(file_path)
         if resolved_path is None:
             continue
+        if resolved_paths is not None:
+            resolved_paths[str(resolved_path)] = resolved_path
         root_path = _matching_catalog_root(resolved_path, root_paths)
         if root_path is None:
             continue
@@ -341,6 +390,7 @@ def build_library_browser_snapshot(
     catalog_entries: Sequence[LibraryBrowserCatalogEntry],
     total_size_bytes: int,
     browser_sort: str,
+    resolved_catalog_paths: Mapping[str, Path] | None = None,
 ) -> tuple[
     bool,
     str,
@@ -367,7 +417,11 @@ def build_library_browser_snapshot(
     )
     catalog_by_path: dict[Path, LibraryBrowserCatalogEntry] = {}
     for entry in catalog_entries:
-        entry_path = _resolve_catalog_path(entry.path)
+        entry_path = (
+            resolved_catalog_paths.get(entry.path) if resolved_catalog_paths is not None else None
+        )
+        if entry_path is None:
+            entry_path = _resolve_catalog_path(entry.path)
         if entry_path is None or entry_path.name.startswith("."):
             continue
         if _matching_catalog_root(entry_path, enabled_root_paths) is None:
@@ -620,8 +674,10 @@ async def build_library_workspace_view(
     unmatched_files: int,
     total_size_bytes: int,
     format_counts: Mapping[str, int],
+    timings: dict[str, float] | None = None,
 ) -> LibraryWorkspaceView:
     """Build the prototype-aligned library shell presenter."""
+    metrics_started = time.monotonic()
     enabled_roots = list(
         (
             await session.execute(
@@ -663,7 +719,26 @@ async def build_library_workspace_view(
             disk_free_bytes = 0
 
     series_metrics = await load_library_series_preview_metrics(session, root_path)
-    catalog_entries = await load_library_browser_catalog_entries(session, enabled_roots)
+    if timings is not None:
+        timings["library_metrics_ms"] = round(
+            (time.monotonic() - metrics_started) * 1000,
+            2,
+        )
+
+    catalog_started = time.monotonic()
+    resolved_catalog_paths: dict[str, Path] = {}
+    catalog_entries = await load_library_browser_catalog_entries(
+        session,
+        enabled_roots,
+        resolved_paths=resolved_catalog_paths,
+    )
+    if timings is not None:
+        timings["library_catalog_ms"] = round(
+            (time.monotonic() - catalog_started) * 1000,
+            2,
+        )
+
+    snapshot_started = time.monotonic()
     snapshot = await asyncio.to_thread(
         build_library_browser_snapshot,
         current_path,
@@ -673,7 +748,13 @@ async def build_library_workspace_view(
         catalog_entries=catalog_entries,
         total_size_bytes=total_size_bytes,
         browser_sort=normalized_browser_sort,
+        resolved_catalog_paths=resolved_catalog_paths,
     )
+    if timings is not None:
+        timings["library_snapshot_ms"] = round(
+            (time.monotonic() - snapshot_started) * 1000,
+            2,
+        )
     (
         root_available,
         current_path_label,
@@ -836,32 +917,18 @@ async def library(
     rename_templates = _rename_templates(configs)
     utility_browse_paths = _utility_browse_paths(configs)
 
-    total_files: int = (await session.execute(select(func.count(LibraryFile.id)))).scalar_one()
-
-    matched_files: int = (
-        await session.execute(
-            select(func.count(LibraryFile.id)).where(
-                LibraryFile.match_confidence != MatchConfidence.UNMATCHED
-            )
-        )
-    ).scalar_one()
-
+    summary_started = time.monotonic()
+    total_files, matched_files, total_size_bytes, format_counts = await load_library_file_summary(
+        session
+    )
     unmatched_files = total_files - matched_files
+    request.state.library_summary_query_ms = round(
+        (time.monotonic() - summary_started) * 1000,
+        2,
+    )
 
-    total_size_bytes: int = (
-        await session.execute(select(func.coalesce(func.sum(LibraryFile.file_size), 0)))
-    ).scalar_one()
-
-    format_counts: dict[str, int] = {}
-    for fmt in FileFormat:
-        count: int = (
-            await session.execute(
-                select(func.count(LibraryFile.id)).where(LibraryFile.file_format == fmt)
-            )
-        ).scalar_one()
-        if count > 0:
-            format_counts[fmt.value] = count
-
+    workspace_started = time.monotonic()
+    workspace_timings: dict[str, float] = {}
     library_view = await build_library_workspace_view(
         session,
         comics_dir=comics_dir,
@@ -872,9 +939,17 @@ async def library(
         unmatched_files=unmatched_files,
         total_size_bytes=total_size_bytes,
         format_counts=format_counts,
+        timings=workspace_timings,
+    )
+    for timing_key, timing_value in workspace_timings.items():
+        setattr(request.state, timing_key, timing_value)
+    request.state.library_workspace_ms = round(
+        (time.monotonic() - workspace_started) * 1000,
+        2,
     )
 
-    return _templates().TemplateResponse(
+    render_started = time.monotonic()
+    response = _templates().TemplateResponse(
         request,
         "pages/library.html",
         _ctx(
@@ -891,3 +966,5 @@ async def library(
             utility_trash_folder=utility_browse_paths["trash_folder"],
         ),
     )
+    request.state.library_render_ms = round((time.monotonic() - render_started) * 1000, 2)
+    return response

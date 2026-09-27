@@ -6,7 +6,7 @@ import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import select
@@ -511,6 +511,37 @@ class TestHealthCheckWrapper:
         await run_health_checks()
 
         refresh.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_health_completion_log_names_attention_checks(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        outcomes = [
+            SimpleNamespace(
+                component="system",
+                check_name="resources",
+                status=HealthStatus.UNHEALTHY,
+                sub_checks=(
+                    SimpleNamespace(check_name="cpu_load", status=HealthStatus.DEGRADED),
+                    SimpleNamespace(check_name="swap", status=HealthStatus.UNHEALTHY),
+                    SimpleNamespace(check_name="memory", status=HealthStatus.HEALTHY),
+                ),
+            )
+        ]
+        refresh = AsyncMock(return_value=outcomes)
+        info = MagicMock()
+        monkeypatch.setattr("pullbox.tasks.health_task.run_health_refresh", refresh)
+        monkeypatch.setattr("pullbox.tasks.health_task.logger.info", info)
+
+        await run_system_health_check()
+
+        log_fields = info.call_args.kwargs
+        assert log_fields["attention_checks"] == ["system.resources:unhealthy"]
+        assert log_fields["attention_subchecks"] == [
+            "system.resources.cpu_load:degraded",
+            "system.resources.swap:unhealthy",
+        ]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
