@@ -207,7 +207,7 @@ async def test_v2_header_rail_and_problem_table(authenticated_client, sec_db):
         "Details",
     ]
     assert "Select all ready" not in workspace
-    assert 'data-testid="import-review-more-actions"' in html
+    assert 'data-testid="import-review-more-actions"' not in html
     assert 'aria-controls="import-review-detail-' in html
     assert 'data-testid="import-review-pagination"' in html.split('id="page-footer-dock"', 1)[1]
 

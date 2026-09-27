@@ -11,13 +11,14 @@ import re
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from xml.etree import ElementTree
 
 import structlog
-from defusedxml import ElementTree as DefusedET
 from defusedxml.common import DefusedXmlException
 
 from pullbox.core.comicinfo_sanitizer import scrub_stale_retailer_value
 from pullbox.core.rar_backend import configure_rarfile_backend
+from pullbox.core.xml_security import parse_untrusted_xml
 
 logger = structlog.get_logger(__name__)
 
@@ -54,7 +55,7 @@ def read_comicinfo(archive_path: str | Path) -> ComicInfoData | None:
     path = Path(archive_path)
     suffix = path.suffix.lower()
 
-    xml_content: str | None = None
+    xml_content: bytes | None = None
 
     if suffix == ".cbz":
         xml_content = _read_from_zip(path)
@@ -69,7 +70,7 @@ def read_comicinfo(archive_path: str | Path) -> ComicInfoData | None:
     return _parse_comicinfo_xml(xml_content, archive_path=str(path))
 
 
-def _read_from_zip(path: Path) -> str | None:
+def _read_from_zip(path: Path) -> bytes | None:
     """Read ComicInfo.xml from a ZIP archive."""
     try:
         with zipfile.ZipFile(path, "r") as zf:
@@ -79,13 +80,13 @@ def _read_from_zip(path: Path) -> str | None:
             if not key:
                 return None
             with zf.open(key) as f:
-                return f.read(1024 * 64).decode("utf-8", errors="replace")
+                return f.read(1024 * 64)
     except Exception:
         logger.debug("comicinfo_read_failed", path=str(path), suffix=".cbz")
         return None
 
 
-def _read_from_rar(path: Path) -> str | None:
+def _read_from_rar(path: Path) -> bytes | None:
     """Read ComicInfo.xml from a RAR archive. Requires rarfile library."""
     try:
         import rarfile  # type: ignore[import-untyped]
@@ -98,7 +99,7 @@ def _read_from_rar(path: Path) -> str | None:
                 return None
             with rf.open(key) as f:
                 content: bytes = f.read(1024 * 64)
-                return content.decode("utf-8", errors="replace")
+                return content
     except ImportError:
         return None
     except Exception:
@@ -106,11 +107,11 @@ def _read_from_rar(path: Path) -> str | None:
         return None
 
 
-def _parse_comicinfo_xml(xml_content: str, archive_path: str) -> ComicInfoData | None:
+def _parse_comicinfo_xml(xml_content: bytes | str, archive_path: str) -> ComicInfoData | None:
     """Parse ComicInfo.xml string into ComicInfoData."""
     try:
-        root = DefusedET.fromstring(xml_content)
-    except (DefusedET.ParseError, DefusedXmlException):
+        root = parse_untrusted_xml(xml_content)
+    except (ElementTree.ParseError, DefusedXmlException):
         logger.debug("comicinfo_xml_malformed", path=archive_path)
         return None
 

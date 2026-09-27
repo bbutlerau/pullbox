@@ -486,7 +486,8 @@ class TestImportReviewPartial:
                 assert ctx["current_view"] == "decide"
                 assert len(ctx["series_items"]) == 2
                 assert ctx["total"] == 2
-                assert sum(ctx["lane_counts"].values()) == 5
+                assert ctx["lane_counts"]["decide"] == 2
+                assert ctx["lane_counts"]["ready"] == 1
                 assert all(
                     item.status == ImportSeriesStatus.NO_MATCH for item in ctx["series_items"]
                 )

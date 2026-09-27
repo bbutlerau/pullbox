@@ -1809,8 +1809,8 @@ class TestImportShellRouteContracts:
 
         assert response.status_code == 200
         assert 'data-testid="import-review-workspace-table"' in response.text
-        assert 'href="https://comicvine.gamespot.com/review-series-1/4050-9001/"' in response.text
-        assert 'data-testid="import-review-cv-id-link"' in response.text
+        assert "4050-None" not in response.text
+        assert "4050-410" in response.text
         assert "Test Publisher" in response.text
         assert "ready series" in response.text
         assert "Follow-up" in response.text
@@ -2623,7 +2623,7 @@ class TestImportShellRouteContracts:
         assert "2 already owned" in response.text
         assert "Only missing issues can be added" in response.text
 
-    async def test_import_review_duplicate_rows_show_not_this_series_action(
+    async def test_import_review_duplicate_rows_with_issue_work_hide_series_menu(
         self,
         authenticated_client,
         sec_db,
@@ -2635,9 +2635,8 @@ class TestImportShellRouteContracts:
         )
 
         assert response.status_code == 200
-        assert 'data-testid="import-review-unmatch-action"' in response.text
-        assert "Not this series" in response.text
-        assert "unmatchDuplicateSeries(" in response.text
+        assert "Some files need an issue match" in response.text
+        assert 'data-testid="import-review-unmatch-action"' not in response.text
 
     async def test_import_review_matched_rows_show_not_this_series_action(
         self,
@@ -3497,7 +3496,7 @@ class TestImportShellRouteContracts:
             refreshed_file = await session.get(ImportedFile, blocked_file_id)
             assert refreshed_file is not None
             assert refreshed_file.status == ImportedFileStatus.SAFETY_APPROVED
-            assert refreshed_file.include_in_import is False
+            assert refreshed_file.include_in_import is True
             assert refreshed_file.diagnostics["safety_exception"]["allowed_once"] is True
 
     async def test_import_review_duplicate_filter_shows_deliberate_file_selection(

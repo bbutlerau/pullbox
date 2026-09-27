@@ -27,7 +27,8 @@
   {% set one_page = one_page_review.get(item.id) %}
   {% set compact_one_page = one_page and reason_key == 'single_page_comic' %}
   {% set series_diagnostics = item.diagnostics or {} %}
-  {% set known_series_target = item.cv_id or item.user_selected_cv_id or item.series_id %}
+  {% set known_cv_id = item.user_selected_cv_id or item.cv_id or library_series_cv_ids_by_imported_series_id.get(item.id) %}
+  {% set known_series_target = known_cv_id or item.series_id %}
   {% set series_selectable = item.status.value == 'matched' and item.files_matched > 0 %}
   {% set duplicate_selectable = item.id in actionable_duplicate_ids and item.files_matched > 0 %}
   {% set duplicate_selected_files = duplicate_selected_file_counts.get(item.id, 0) %}

@@ -13,6 +13,55 @@
 # stable Python 3.14 or Debian 13 packages become available upstream.
 
 ignore:
+  # Approved by Adam Hernandez on 2026-09-26 only for the exact refreshed DHI
+  # runtime revisions below. These are accepted-risk exceptions, NOT fixes.
+  # Pullbox now strictly normalizes valid UTF-16 and rejects malformed surrogate
+  # input before its DefusedXML/Expat call sites. The libexpat1 copy also remains
+  # in the PDF helper dependency closure, where it parses trusted local config,
+  # not imported comic XML. Residual upstream-library risk remains until DHI
+  # ships fixed packages; all other High findings continue to block.
+  #
+  # Keep the existing libc review deadline of 2026-09-30 or the next base
+  # refresh, whichever comes first. Keep the existing Expat review deadline of
+  # 2026-10-07 or the next base refresh, whichever comes first. Remove these
+  # entries as soon as fixed stable packages are available.
+  # https://security-tracker.debian.org/tracker/CVE-2026-5435
+  # https://security-tracker.debian.org/tracker/CVE-2026-19499
+  # https://security-tracker.debian.org/tracker/CVE-2026-66046
+  # https://security-tracker.debian.org/tracker/CVE-2026-76956
+  # https://security-tracker.debian.org/tracker/CVE-2026-76957
+  # https://security-tracker.debian.org/tracker/CVE-2026-93990
+  - vulnerability: CVE-2026-5435
+    package:
+      name: libc6
+      version: 2.41-12+deb13u4+dhi1
+      type: deb
+  - vulnerability: CVE-2026-19499
+    package:
+      name: libc6
+      version: 2.41-12+deb13u4+dhi1
+      type: deb
+  - vulnerability: CVE-2026-66046
+    package:
+      name: libexpat1
+      version: 2.8.3-1~deb13u1+dhi4
+      type: deb
+  - vulnerability: CVE-2026-76956
+    package:
+      name: libexpat1
+      version: 2.8.3-1~deb13u1+dhi4
+      type: deb
+  - vulnerability: CVE-2026-76957
+    package:
+      name: libexpat1
+      version: 2.8.3-1~deb13u1+dhi4
+      type: deb
+  - vulnerability: CVE-2026-93990
+    package:
+      name: libexpat1
+      version: 2.8.3-1~deb13u1+dhi4
+      type: deb
+
   # Renewed by Adam Hernandez on 2026-09-14 only for this DHI libc6 revision.
   # Accepted risk, NOT a fix: Debian 13 still lists this TSIG-printing issue
   # as vulnerable/no-DSA. Direct Pullbox callers were not found, but dependency

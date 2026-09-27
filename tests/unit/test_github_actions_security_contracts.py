@@ -985,6 +985,7 @@ def test_grype_config_tracks_current_dhi_runtime() -> None:
     assert "CVE-2026-66046" in config_text
     assert "CVE-2026-76956" in config_text
     assert "CVE-2026-76957" in config_text
+    assert "CVE-2026-93990" in config_text
     assert "3.14.6" in config_text
     assert config.get("ignore")
 
@@ -1010,6 +1011,7 @@ def test_grype_config_tracks_current_dhi_runtime() -> None:
         ("libexpat1", "2.8.3-1~deb13u1+dhi2", "deb"),
         ("libexpat1-dev", "2.8.3-1~deb13u1+dhi2", "deb"),
         ("libexpat1", "2.8.3-1~deb13u1+dhi3", "deb"),
+        ("libexpat1", "2.8.3-1~deb13u1+dhi4", "deb"),
     }
 
     current_expat_exceptions = [
@@ -1029,8 +1031,26 @@ def test_grype_config_tracks_current_dhi_runtime() -> None:
     } == {
         (cve, "libexpat1", version, "deb")
         for cve in {"CVE-2026-76956", "CVE-2026-76957"}
-        for version in ("2.8.3-1~deb13u1+dhi2", "2.8.3-1~deb13u1+dhi3")
+        for version in (
+            "2.8.3-1~deb13u1+dhi2",
+            "2.8.3-1~deb13u1+dhi3",
+            "2.8.3-1~deb13u1+dhi4",
+        )
     }
+
+    utf16_injection_exceptions = [
+        entry for entry in config["ignore"] if entry.get("vulnerability") == "CVE-2026-93990"
+    ]
+    assert utf16_injection_exceptions == [
+        {
+            "vulnerability": "CVE-2026-93990",
+            "package": {
+                "name": "libexpat1",
+                "version": "2.8.3-1~deb13u1+dhi4",
+                "type": "deb",
+            },
+        }
+    ]
 
 
 def test_grype_current_dhi_zlib_and_libuuid_exceptions_are_exact_and_expiring() -> None:

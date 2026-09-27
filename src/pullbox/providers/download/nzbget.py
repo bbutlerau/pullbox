@@ -18,6 +18,7 @@ import structlog
 from defusedxml.xmlrpc import monkey_patch as _defusedxml_xmlrpc_monkey_patch
 
 from pullbox.core.config_resolver import resolve_runtime_service_url
+from pullbox.core.xml_security import normalize_xml_for_expat
 from pullbox.providers.base import ClientOptions, DownloadStatus, ProviderHealthResult
 
 # NZBGet exposes XML-RPC only; defusedxml patches stdlib XML-RPC parsing.
@@ -26,6 +27,7 @@ _defusedxml_xmlrpc_monkey_patch()
 logger = structlog.get_logger(__name__)
 
 _REQUEST_TIMEOUT = 10.0
+_MAX_XML_RPC_RESPONSE_BYTES = 30 * 1024 * 1024
 
 # NZBGet priority string → integer mapping
 _PRIORITY_MAP: dict[str, int] = {
@@ -470,3 +472,23 @@ class _TimeoutTransport(xmlrpc.client.Transport):
         conn = super().make_connection(host)
         conn.timeout = self._timeout
         return conn
+
+    def parse_response(self, response: Any) -> Any:
+        """Normalize the bounded XML-RPC response before Expat parses it."""
+        stream = response
+        if hasattr(response, "getheader") and response.getheader("Content-Encoding", "") == "gzip":
+            stream = xmlrpc.client.GzipDecodedResponse(response)
+
+        try:
+            payload = stream.read(_MAX_XML_RPC_RESPONSE_BYTES + 1)
+        finally:
+            if stream is not response:
+                stream.close()
+        if len(payload) > _MAX_XML_RPC_RESPONSE_BYTES:
+            raise ValueError("XML-RPC response exceeded the 30 MiB safety limit")
+
+        normalized = normalize_xml_for_expat(payload)
+        parser, unmarshaller = self.getparser()
+        parser.feed(normalized)
+        parser.close()
+        return unmarshaller.close()

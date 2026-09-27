@@ -17,7 +17,7 @@
         <dt class="text-pb-text-dim">Title</dt><dd class="text-pb-text">{{ item.raw_series_name }}</dd>
         <dt class="text-pb-text-dim">Year</dt><dd>{{ item.raw_year or 'Unknown' }}</dd>
         <dt class="text-pb-text-dim">Threshold</dt><dd>{{ (job.cv_match_threshold * 100)|round|int }}%</dd>
-        {% if known_series_target %}<dt class="text-pb-text-dim">ComicVine</dt><dd><a data-testid="import-review-cv-id-link" class="text-pb-interactive hover:underline" href="{{ item.cv_url or ('https://comicvine.gamespot.com/volume/4050-' ~ (item.user_selected_cv_id or item.cv_id) ~ '/') }}" target="_blank" rel="noopener noreferrer">{{ item.cv_title or item.raw_series_name }} &middot; {{ item.user_selected_cv_id or item.cv_id or 'Known library series' }}</a></dd>{% endif %}
+        {% if known_cv_id %}<dt class="text-pb-text-dim">ComicVine</dt><dd><a data-testid="import-review-cv-id-link" class="text-pb-interactive hover:underline" href="{{ item.cv_url or ('https://comicvine.gamespot.com/volume/4050-' ~ known_cv_id ~ '/') }}" target="_blank" rel="noopener noreferrer">{{ item.cv_title or item.raw_series_name }} &middot; {{ known_cv_id }}</a></dd>{% elif known_series_target %}<dt class="text-pb-text-dim">Series</dt><dd>{{ item.cv_title or item.raw_series_name }}</dd>{% endif %}
         <dt class="text-pb-text-dim">Result</dt><dd class="leading-5">{{ series_diagnostics.get('rejection_reason') or review_reasons[reason_key][0] }}</dd>
       </dl>
       {% if reason_key != 'needs_series' %}<div class="flex flex-wrap gap-2">
@@ -42,11 +42,11 @@
       {% for file in group.rows %}<div class="rounded-lg border border-pb-border bg-pb-card/70 p-3">
         <div class="flex flex-wrap items-center justify-between gap-2"><span class="font-mono text-xs text-pb-text [overflow-wrap:anywhere]">{{ file.file_name }}</span><span class="text-xs text-pb-text-dim">{{ file.file_size|filesize }}</span></div>
         {% if file.status == 'skipped' %}<span class="pill pill-neutral" data-import-review-file-outcome="{{ file.id }}">Skipped</span>{% else %}
-        {% set issue_choices_url = ('/import/' ~ job.id ~ '/files/' ~ file.id ~ '/assign?cv_id=' ~ known_series_target ~ '&inline=true') if known_series_target else none %}
+        {% set issue_choices_url = ('/import/' ~ job.id ~ '/files/' ~ file.id ~ '/assign?cv_id=' ~ known_cv_id ~ '&inline=true') if known_cv_id else none %}
         <div class="mt-2 flex flex-wrap gap-2"><button type="button" class="btn-primary btn-sm" data-testid="import-review-choose-issue"
-          {% if issue_choices_url is defined %}aria-expanded="false" aria-controls="import-review-issue-choices-{{ file.id }}" @click='toggleReviewIssueChoices({{ file.id }}, {{ issue_choices_url|tojson|forceescape }}, $event.currentTarget)'
+          {% if issue_choices_url %}aria-expanded="false" aria-controls="import-review-issue-choices-{{ file.id }}" @click='toggleReviewIssueChoices({{ file.id }}, {{ issue_choices_url|tojson|forceescape }}, $event.currentTarget)'
           {% else %}hx-get="/import/{{ job.id }}/series/{{ item.id }}/cv-search?file_id={{ file.id }}" hx-target="#cv-search-modal" hx-swap="innerHTML"{% endif %}>Choose issue</button><button type="button" class="btn-ghost btn-sm" data-testid="import-review-reassign-file" hx-get="/import/{{ job.id }}/series/{{ item.id }}/cv-search?file_id={{ file.id }}" hx-target="#cv-search-modal" hx-swap="innerHTML">Different series</button><button type="button" class="btn-ghost btn-sm" :disabled="reviewActionPending" @click="skipReviewFile({{ item.id }}, {{ file.id }}, $event.currentTarget)">Skip this file</button></div>
-        {% if issue_choices_url is defined %}<div id="import-review-issue-choices-{{ file.id }}" hidden></div>{% endif %}{% endif %}
+        {% if issue_choices_url %}<div id="import-review-issue-choices-{{ file.id }}" hidden></div>{% endif %}{% endif %}
       </div>{% endfor %}{% endfor %}
       <button type="button" class="btn-ghost btn-sm" data-testid="import-review-reconcile-action" hx-get="/import/{{ job.id }}/series/{{ item.id }}/reconcile" hx-target="#cv-search-modal" hx-swap="innerHTML">Review all issue decisions</button>
       {% endif %}

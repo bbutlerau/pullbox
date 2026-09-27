@@ -267,7 +267,7 @@ async def test_bulk_safety_preview_and_confirmed_allow_once_are_scoped_and_audit
         for item in eligible_files:
             assert item is not None
             assert item.status == ImportedFileStatus.SAFETY_APPROVED
-            assert item.include_in_import is False
+            assert item.include_in_import is True
             assert item.error_message is None
             assert item.diagnostics["safe_existing_key"] == "kept"
             assert "safety_block" not in item.diagnostics

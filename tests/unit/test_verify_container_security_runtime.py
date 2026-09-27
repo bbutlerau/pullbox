@@ -30,3 +30,14 @@ def test_production_check_accepts_runtime_without_scanner(monkeypatch: pytest.Mo
     monkeypatch.setattr(runtime, "find_spec", lambda name: None)
     monkeypatch.setattr(runtime.pyexpat, "version_info", runtime.MINIMUM_EXPAT_VERSION)
     runtime.main()
+
+
+def test_production_check_rejects_runtime_without_utf16_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime, "find_spec", lambda name: None)
+    monkeypatch.setattr(runtime.pyexpat, "version_info", runtime.MINIMUM_EXPAT_VERSION)
+    monkeypatch.setattr(runtime, "parse_untrusted_xml", lambda _payload: object(), raising=False)
+
+    with pytest.raises(SystemExit, match="malformed UTF-16"):
+        runtime.main()

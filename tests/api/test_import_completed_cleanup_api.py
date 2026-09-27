@@ -514,7 +514,11 @@ async def test_mixed_folder_cleanup_api_resumes_only_resolved_files(
     async with sec_db() as session:
         imported_file = await session.get(ImportedFile, file_id)
         assert imported_file is not None
-        assert imported_file.status is ImportedFileStatus.CONFIRMED
+        assert imported_file.status is ImportedFileStatus.NO_MATCH
+        job = await session.get(ImportJob, job_id)
+        assert job is not None
+        assert job.status is ImportJobStatus.IMPORTING
+        assert job.progress_snapshot["deferred_recovery"]["state"] == "mixed_folder"
 
 
 @pytest.mark.asyncio

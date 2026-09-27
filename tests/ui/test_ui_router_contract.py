@@ -124,6 +124,12 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "decide_one_page_archives",
         ),
         (
+            "/import/{job_id}/series/{series_id}/dangerous/acknowledge",
+            ("POST",),
+            "acknowledge_dangerous_files",
+            "acknowledge_dangerous_files",
+        ),
+        (
             "/import/{job_id}/files/{file_id}/source",
             ("GET",),
             "preview_source_action",

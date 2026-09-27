@@ -69,7 +69,12 @@ async def test_review_projection_scales_without_opening_source_files(db_session)
     context = await load_import_review_context(db_session, job, status="decide", page=2, sort=None)
     elapsed = time.perf_counter() - started
     assert context["lane_counts"]["decide"] == count
-    assert sum(context["lane_counts"].values()) == count
+    assert context["lane_counts"]["ready"] == count
+    assert all(
+        lane_count == 0
+        for lane, lane_count in context["lane_counts"].items()
+        if lane not in {"decide", "ready"}
+    )
     assert len(context["series_items"]) == 25
     assert context["review_summary"]["selected_files_total"] == count * 5
     assert (

@@ -16,6 +16,7 @@ from pullbox.models.import_job import (
     ImportSeriesStatus,
 )
 from pullbox.models.library import LibraryRoot
+from pullbox.models.series import Series
 from pullbox.services.import_duplicates import duplicate_merge_is_actionable
 from pullbox.services.import_file_conflicts import classify_conflict_group
 from pullbox.services.import_review_selection import load_import_review_selection_state
@@ -141,6 +142,37 @@ async def _load_duplicate_selected_file_counts(
         _object_to_int(series_id): _object_to_int(count)
         for series_id, count in counts.items()
         if _object_to_int(series_id) > 0
+    }
+
+
+async def _load_library_series_cv_ids_by_imported_series_id(
+    session: AsyncSession,
+    series_items: list[ImportedSeries],
+) -> dict[int, int]:
+    """Resolve provider IDs for review rows already linked to library series."""
+    library_series_ids = {
+        int(item.series_id) for item in series_items if item.series_id is not None
+    }
+    if not library_series_ids:
+        return {}
+
+    rows = (
+        await session.execute(
+            select(Series.id, Series.comicvine_id).where(
+                Series.id.in_(library_series_ids),
+                Series.comicvine_id.is_not(None),
+            )
+        )
+    ).all()
+    cv_ids_by_library_series_id = {
+        int(series_id): int(comicvine_id)
+        for series_id, comicvine_id in rows
+        if comicvine_id is not None
+    }
+    return {
+        int(item.id): cv_ids_by_library_series_id[int(item.series_id)]
+        for item in series_items
+        if item.series_id is not None and int(item.series_id) in cv_ids_by_library_series_id
     }
 
 
@@ -441,6 +473,7 @@ async def load_import_review_context(
     library_roots: list[LibraryRoot] = []
     conflict_review_ctx: dict[str, object] | None = None
     matched_file_targets_by_series_id: dict[int, list[dict[str, object]]] = {}
+    library_series_cv_ids_by_imported_series_id: dict[int, int] = {}
     review_file_groups_by_series_id: dict[int, list[dict[str, object]]] = {}
     story_arc_items: tuple[ImportedStoryArcReviewRow, ...] = ()
     story_arc_total = 0
@@ -557,6 +590,9 @@ async def load_import_review_context(
             visible_series_ids,
         )
         if visible_series_ids:
+            library_series_cv_ids_by_imported_series_id = (
+                await _load_library_series_cv_ids_by_imported_series_id(session, series_items)
+            )
             matched_file_targets_by_series_id = await _load_import_review_matched_file_targets(
                 session,
                 job_id,
@@ -696,6 +732,9 @@ async def load_import_review_context(
         "supported_import_file_types_label": _supported_import_file_types_label(),
         "safety_rematch_pending": safety_rematch_pending,
         "matched_file_targets_by_series_id": matched_file_targets_by_series_id,
+        "library_series_cv_ids_by_imported_series_id": (
+            library_series_cv_ids_by_imported_series_id
+        ),
         "review_file_groups_by_series_id": review_file_groups_by_series_id,
     }
     if conflict_review_ctx:

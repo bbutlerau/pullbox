@@ -11,10 +11,10 @@ from dataclasses import dataclass
 from xml.etree import ElementTree
 
 import structlog
-from defusedxml import ElementTree as DefusedElementTree
 from defusedxml.common import DefusedXmlException
 
 from pullbox.core.comicinfo_sanitizer import scrub_stale_retailer_value
+from pullbox.core.xml_security import parse_untrusted_xml
 
 logger = structlog.get_logger(__name__)
 
@@ -49,7 +49,7 @@ class ComicInfoData:
     language: str | None = None
 
 
-def parse_comicinfo(xml_string: str) -> ComicInfoData:
+def parse_comicinfo(xml_string: bytes | str) -> ComicInfoData:
     """Parse a ComicInfo.xml string into a ``ComicInfoData`` instance.
 
     Gracefully handles malformed XML by returning a default (all-None)
@@ -60,7 +60,7 @@ def parse_comicinfo(xml_string: str) -> ComicInfoData:
         xml_string: Raw XML content of a ComicInfo.xml file.
     """
     try:
-        root = DefusedElementTree.fromstring(xml_string)
+        root = parse_untrusted_xml(xml_string)
     except (ElementTree.ParseError, DefusedXmlException) as exc:
         logger.warning("comicinfo_parse_error", error=str(exc))
         return ComicInfoData()

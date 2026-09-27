@@ -10,6 +10,7 @@ Run:
 
 from __future__ import annotations
 
+import io
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,10 +21,36 @@ from pullbox.providers.download.nzbget import (
     NZBGetError,
     _map_group_status,
     _map_history_status,
+    _TimeoutTransport,
 )
 
 # Fake NZB content that passes the content-type / body validation
 _FAKE_NZB_CONTENT = b"<?xml version='1.0'?><nzb>fake</nzb>"
+
+
+def test_xmlrpc_transport_normalizes_response_before_expat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pullbox.core.xml_security import normalize_xml_for_expat
+    from pullbox.providers.download import nzbget
+
+    response = (
+        b"<?xml version='1.0'?><methodResponse><params><param>"
+        b"<value><string>ok</string></value></param></params></methodResponse>"
+    )
+    guarded_payloads: list[bytes | str] = []
+
+    def recording_guard(payload: bytes | str) -> bytes | str:
+        guarded_payloads.append(payload)
+        return normalize_xml_for_expat(payload)
+
+    monkeypatch.setattr(nzbget, "normalize_xml_for_expat", recording_guard, raising=False)
+
+    transport = _TimeoutTransport()
+    transport.verbose = False
+
+    assert transport.parse_response(io.BytesIO(response)) == ("ok",)
+    assert guarded_payloads == [response]
 
 
 def _make_client(**kwargs: Any) -> NZBGetClient:

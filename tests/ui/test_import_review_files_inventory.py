@@ -82,10 +82,8 @@ async def test_series_match_details_and_menu_stay_series_focused(authenticated_c
     assert "Files in this folder" not in row
     assert 'data-testid="import-review-series-file-details"' not in row
     assert "ComicVine candidates" in row
-    menu = re.search(r"<div popover.*?</div>", row, re.S).group()
-    assert re.findall(r"<button\b[^>]*>(.*?)</button>", menu, re.S) == ["View files"]
-    assert f'hx-get="/import/{job_id}/series/{series_id}/files"' in menu
-    assert "toggleImportReviewRow" not in menu
+    assert "<div popover" not in row
+    assert 'data-testid="import-review-more-actions"' not in row
     assert re.search(
         r'data-testid="import-review-primary-action"[^>]*>Search ComicVine</button>', row
     )

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 import structlog
 from defusedxml import ElementTree as DefusedET
 
+from pullbox.core.xml_security import parse_untrusted_xml
 from pullbox.services.diagnostic_sanitizer import REDACTED, coerce_json_safe, redact_value
 
 if TYPE_CHECKING:
@@ -104,7 +105,7 @@ def collect_config_xml_snapshot() -> tuple[str, bytes] | None:
         return None
 
     try:
-        root = DefusedET.fromstring(config_path.read_text(encoding="utf-8"))
+        root = parse_untrusted_xml(config_path.read_bytes())
         for element in root.iter():
             if element.text is None:
                 continue
