@@ -318,6 +318,78 @@ async def test_local_source_preview_has_bound_identity_and_paged_issues(
     assert response.json()["data"]["total"] == 1
 
 
+async def test_preview_uses_selected_root_naming_without_creating_folders(
+    authenticated_client, sec_db, monkeypatch, tmp_path
+):
+    from pullbox.models.library import LibraryRoot, LibraryRootPolicy, LibraryRootPolicySource
+    from pullbox.providers.metadata import sources
+
+    reader = installed_reader(tmp_path)
+    monkeypatch.setattr(sources, "get_catalog_reader", lambda: reader)
+    root_path = tmp_path / "managed"
+    root_path.mkdir()
+    async with sec_db.begin() as session:
+        root = LibraryRoot(name="Preview root", path=str(root_path))
+        session.add(root)
+        await session.flush()
+        root_id = root.id
+        session.add(
+            LibraryRootPolicy(
+                library_root_id=root_id,
+                source=LibraryRootPolicySource.MANUAL,
+                series_path_template="{Publisher}/{Series} [{ComicVineId}]",
+                series_folder_template="{Series} [{ComicVineId}]",
+                comic_file_template="{Series} {Issue}",
+                annual_file_template="{Series} Annual {Issue}",
+                non_standard_file_template="{Series} {Issue}",
+                single_non_standard_file_template="{Series}",
+                replace_illegal_characters=True,
+                colon_replacement="dash",
+            )
+        )
+    result = await authenticated_client.post(
+        "/api/v1/metadata/series/preview",
+        json={"source": "comicvine_local", "external_id": "10", "library_root_id": root_id},
+        headers=csrf(authenticated_client),
+    )
+    assert result.status_code == 200
+    assert result.json()["folder_preview"] == "DC/Batman [10]"
+    assert list(root_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("kind", ["missing", "disabled", "reference_only"])
+async def test_preview_rejects_unmanaged_root_before_provider_calls(
+    authenticated_client, sec_db, monkeypatch, tmp_path, kind
+):
+    from pullbox.api.v1 import metadata_sources as routes
+    from pullbox.models.library import LibraryRoot
+
+    root_id = 99999
+    if kind != "missing":
+        async with sec_db.begin() as session:
+            root = LibraryRoot(
+                name="Unavailable preview root",
+                path=str(tmp_path / kind),
+                enabled=kind != "disabled",
+                allow_managed_writes=kind != "reference_only",
+            )
+            session.add(root)
+            await session.flush()
+            root_id = root.id
+
+    async def unexpected(*args, **kwargs):
+        pytest.fail("An unusable root must not start source requests")
+
+    monkeypatch.setattr(routes, "preview_source_series", unexpected)
+    result = await authenticated_client.post(
+        "/api/v1/metadata/series/preview",
+        json={"source": "comicvine_local", "external_id": "10", "library_root_id": root_id},
+        headers=csrf(authenticated_client),
+    )
+    assert result.status_code == 409
+    assert "managed library root" in result.text
+
+
 @pytest.mark.parametrize("path", ["preview", "issues"])
 async def test_source_reads_require_auth_csrf_and_valid_identifiers(
     authenticated_client, unauthenticated_client, path

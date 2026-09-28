@@ -94,6 +94,7 @@
           <button
             type="button"
             data-add-series-trigger="true"
+            data-series-source="{{ 'comicvine_local' if local_catalog else 'comicvine_api' }}"
             data-series-title="{{ result_title }}"
             data-series-publisher="{{ result_publisher or '' }}"
             data-series-year="{{ result_year or '' }}"

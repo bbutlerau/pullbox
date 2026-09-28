@@ -104,11 +104,11 @@
     x-show="showModal"
     x-cloak
     class="modal-shell !mt-0"
-    @keydown.escape.window="showModal = false"
+    @keydown.escape.window="closeModal()"
   >
     <div
       class="modal-backdrop"
-      @click="showModal = false"
+      @click="closeModal()"
       x-transition:enter="transition ease-out duration-200"
       x-transition:enter-start="opacity-0"
       x-transition:enter-end="opacity-100"
@@ -119,6 +119,13 @@
 
     <div
       class="modal-panel max-w-2xl"
+      role="dialog"
+      data-testid="add-series-dialog"
+      aria-modal="true"
+      aria-labelledby="add-series-dialog-title"
+      tabindex="-1"
+      x-ref="dialog"
+      @keydown.tab="trapFocus($event)"
       x-transition:enter="transition ease-out duration-200"
       x-transition:enter-start="opacity-0 scale-95"
       x-transition:enter-end="opacity-100 scale-100"
@@ -127,16 +134,17 @@
       x-transition:leave-end="opacity-0 scale-95"
     >
       <div class="modal-header">
-        <div class="space-y-1">
-          <h3 class="add-series-modal-title" x-text="selectedTitle + (selectedYear ? ' (' + selectedYear + ')' : '')"></h3>
+        <div class="min-w-0 flex-1 space-y-1">
+          <h3 id="add-series-dialog-title" class="add-series-modal-title" x-text="selectedTitle + (selectedYear ? ' (' + selectedYear + ')' : '')"></h3>
           <p class="add-series-modal-subtitle">
             <span x-text="selectedPublisher || 'Unknown publisher'"></span>
             <template x-if="selectedIssueCount">
               <span x-text="' · ' + selectedIssueCount + ' issues'"></span>
             </template>
           </p>
+          <p class="text-sm text-pb-text-sec" x-text="sourceLabel"></p>
         </div>
-        <button @click="showModal = false" class="icon-btn" aria-label="Close add series dialog">
+        <button @click="closeModal()" :disabled="adding" class="icon-btn" aria-label="Close add series dialog">
           <svg class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
             <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
           </svg>
@@ -144,15 +152,23 @@
       </div>
 
       <div class="modal-body p-5 sm:p-6 space-y-5">
+        <div x-show="previewLoading" data-testid="add-series-preview-status" role="status" aria-live="polite" class="flex items-center gap-2 text-sm text-pb-text-sec">
+          <svg class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 0 4 12h4z"/>
+          </svg>
+          <span>Loading preview...</span>
+        </div>
         <section class="space-y-3">
           <p class="add-series-modal-section-label">Library settings</p>
 
           <div class="add-series-modal-row">
-            <span class="add-series-modal-row-label">Library root</span>
+            <label for="add-series-root" class="add-series-modal-row-label">Library root</label>
             <div class="min-w-0 flex-1">
               {% if roots %}
                 <input
                   type="text"
+                  id="add-series-root"
                   data-testid="add-series-root-display"
                   value="{{ default_root.path ~ ' — ' ~ default_root.name if default_root else '' }}"
                   readonly
@@ -182,7 +198,7 @@
           ></div>
         </section>
 
-        <div x-show="addError" x-cloak class="inline-alert inline-alert-danger">
+        <div x-show="addError" x-cloak role="alert" class="inline-alert inline-alert-danger">
           <svg class="inline-alert-icon h-4 w-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m0 3.75h.008v.008H12v-.008z"/>
             <path stroke-linecap="round" stroke-linejoin="round" d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
@@ -193,10 +209,11 @@
 
       <div class="modal-footer">
         <div class="settings-footer-actions ml-auto">
-          <button @click="showModal = false" class="btn-ghost">Cancel</button>
+          <button @click="loadPreview()" x-show="previewFailed" :disabled="previewLoading || adding" class="btn-secondary">Retry preview</button>
+          <button @click="closeModal()" :disabled="adding" class="btn-ghost">Cancel</button>
           <button
             @click="addSeriesToLibrary()"
-            :disabled="adding"
+            :disabled="adding || !previewReady || !libraryRootId"
             class="btn-primary gap-2"
           >
             <span x-show="!adding">Add series</span>
@@ -225,8 +242,17 @@ function addSeries() {
   return {
     showModal: false,
     adding: false,
+    previewLoading: false,
+    previewReady: false,
+    previewFailed: false,
+    previewSequence: 0,
+    previewController: null,
+    disposed: false,
+    trigger: null,
     addError: '',
-    selectedComicvineId: null,
+    selectedSource: '',
+    selectedExternalId: '',
+    sourceRevision: null,
     selectedTitle: '',
     selectedPublisher: '',
     selectedYear: null,
@@ -240,6 +266,107 @@ function addSeries() {
       {% for root in roots %}
       {{ root.id }}: {{ root.path | tojson }},
       {% endfor %}
+    },
+
+    get sourceLabel() {
+      return {
+        comicvine_local: 'ComicVine Local Catalog', comicvine_api: 'ComicVine API',
+        metron_api: 'Metron', gcd_local: 'GCD Local Database', gcd_api_v2: 'GCD API v2',
+      }[this.selectedSource] || 'Metadata source';
+    },
+
+    destroy() {
+      this.disposed = true;
+      this.previewSequence++;
+      this.previewController?.abort();
+    },
+
+    closeModal() {
+      if (!this.showModal || this.adding) return;
+      this.showModal = false;
+      this.previewSequence++;
+      this.previewController?.abort();
+      this.previewLoading = false;
+      this.previewReady = false;
+      if (this.trigger?.isConnected) this.trigger.focus({ preventScroll: true });
+    },
+
+    trapFocus(event) {
+      const dialog = this.$refs.dialog;
+      const controls = [...dialog.querySelectorAll('button:not([disabled]), a[href], [tabindex="0"]')]
+        .filter(node => node.getClientRects().length > 0);
+      const first = controls[0], last = controls[controls.length - 1];
+      if (!first) { event.preventDefault(); return; }
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
+        event.preventDefault(); last.focus();
+      } else if (!event.shiftKey && (document.activeElement === last || document.activeElement === dialog)) {
+        event.preventDefault(); first.focus();
+      }
+    },
+
+    previewFailure(status, retryAfter) {
+      const reasons = {
+        disabled: 'This source is disabled. Enable it in Metadata settings, then retry.',
+        feature_disabled: 'This source is not available in this build.',
+        unconfigured: 'Configure this source in Metadata settings, then retry.',
+        authentication_failed: 'Check this source\'s credentials in Metadata settings, then retry.',
+        not_found: 'This series is no longer available from the selected source.',
+        rate_limited: 'This source is rate limited.' + (Number.isSafeInteger(retryAfter) && retryAfter > 0 ? ' Retry in ' + retryAfter + ' seconds.' : ' Try again later.'),
+        timeout: 'This source took too long to respond. Retry the preview.',
+      };
+      return reasons[status] || 'The preview could not be verified. Retry or check Metadata settings.';
+    },
+
+    async loadPreview() {
+      if (this.adding || !this.showModal) return;
+      this.previewController?.abort();
+      const controller = new AbortController();
+      this.previewController = controller;
+      const sequence = ++this.previewSequence;
+      const source = this.selectedSource, externalId = this.selectedExternalId;
+      this.previewLoading = true;
+      this.previewReady = false;
+      this.previewFailed = false;
+      this.sourceRevision = null;
+      this.addError = '';
+      try {
+        const response = await fetch('/api/v1/metadata/series/preview', {
+          method: 'POST', signal: controller.signal,
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': readCsrfTokenFromBody() },
+          body: JSON.stringify({ source, external_id: externalId }),
+        });
+        const data = await response.json();
+        if (sequence !== this.previewSequence || this.disposed || !this.showModal) return;
+        if (!response.ok) throw new Error(data.error?.message || (typeof data.detail === 'string' ? data.detail : 'Preview failed. Retry the preview.'));
+        const profile = data.series?.data;
+        if (data.series?.status !== 'ok') throw new Error(this.previewFailure(data.series?.status, data.series?.retry_after_seconds));
+        if (data.source !== source || data.external_id !== externalId ||
+            profile?.source !== source || profile?.external_id !== externalId ||
+            !profile.title || !Number.isSafeInteger(data.source_revision) || data.source_revision < 0) {
+          throw new Error('The preview identity changed. Search again before adding this series.');
+        }
+        if (this.selectedTitle !== profile.title || this.selectedYear !== profile.year_start) {
+          this.selectedFolderPreview = '';
+        }
+        this.selectedTitle = profile.title;
+        this.selectedPublisher = profile.publisher || '';
+        this.selectedYear = profile.year_start || null;
+        this.selectedIssueCount = profile.issue_count ?? null;
+        this.updateFolderPreview();
+        if (data.issues?.status !== 'ok' || !data.issues.data ||
+            !Number.isSafeInteger(data.issues.data.total) || data.issues.data.total < 0) {
+          throw new Error(this.previewFailure(data.issues?.status, data.issues?.retry_after_seconds));
+        }
+        this.selectedIssueCount = data.issues.data.total;
+        this.sourceRevision = data.source_revision;
+        this.previewReady = true;
+      } catch (error) {
+        if (sequence !== this.previewSequence || this.disposed || !this.showModal) return;
+        this.addError = error.name === 'AbortError' ? 'Preview cancelled. Retry the preview.' : error.message;
+        this.previewFailed = true;
+      } finally {
+        if (sequence === this.previewSequence && !this.disposed) this.previewLoading = false;
+      }
     },
 
     updateFolderPreview() {
@@ -256,11 +383,14 @@ function addSeries() {
     },
 
     addSeriesToLibrary() {
+      if (this.adding || !this.previewReady || !this.libraryRootId) return;
       this.adding = true;
       this.addError = '';
 
       const body = {
-        comicvine_id: this.selectedComicvineId,
+        source: this.selectedSource,
+        external_id: this.selectedExternalId,
+        source_revision: this.sourceRevision,
         library_root_id: this.libraryRootId ? parseInt(this.libraryRootId, 10) : null,
       };
 
@@ -268,21 +398,22 @@ function addSeries() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-CSRF-Token': '{{ csrf_token }}',
+          'X-CSRF-Token': readCsrfTokenFromBody(),
         },
         body: JSON.stringify(body),
       })
         .then(res => {
           if (res.ok) return res.json();
           return res.json().then(data => {
-            throw new Error((data.error && data.error.message) || 'Failed to add series.');
+            throw new Error((data.error && data.error.message) || (typeof data.detail === 'string' ? data.detail : 'Failed to add series.'));
           });
         })
-        .then(() => {
-          this.showModal = false;
+        .then(data => {
           this.adding = false;
+          if (this.disposed) return;
+          this.closeModal();
           if (typeof showToast === 'function') {
-            showToast({ message: '"' + this.selectedTitle + '" added to library!', level: 'success' });
+            showToast({ message: '"' + (data.title || this.selectedTitle) + '" is in your library.', level: 'success' });
           }
           const form = document.getElementById('add-series-search-form');
           if (form && window.htmx) {
@@ -290,8 +421,11 @@ function addSeries() {
           }
         })
         .catch(err => {
+          if (this.disposed) return;
           this.addError = err.message;
           this.adding = false;
+          this.previewReady = false;
+          this.previewFailed = true;
         });
     },
   };
@@ -301,6 +435,7 @@ function selectResult(payload, sourceEl = null) {
   const resolvedPayload = (typeof payload === 'number' || typeof payload === 'string')
     ? {
         id: Number(payload),
+        source: sourceEl?.dataset.seriesSource || 'comicvine_api',
         title: sourceEl?.dataset.seriesTitle || '',
         publisher: sourceEl?.dataset.seriesPublisher || '',
         year: sourceEl?.dataset.seriesYear ? Number(sourceEl.dataset.seriesYear) : null,
@@ -312,7 +447,10 @@ function selectResult(payload, sourceEl = null) {
     : payload;
   const el = document.getElementById('add-series-app');
   const component = Alpine.$data(el);
-  component.selectedComicvineId = resolvedPayload.id;
+  if (component.adding) return;
+  component.trigger = sourceEl || document.activeElement;
+  component.selectedSource = resolvedPayload.source || 'comicvine_api';
+  component.selectedExternalId = String(resolvedPayload.externalId || resolvedPayload.id || '');
   component.selectedTitle = resolvedPayload.title || '';
   component.selectedPublisher = resolvedPayload.publisher || '';
   component.selectedYear = resolvedPayload.year || null;
@@ -323,6 +461,8 @@ function selectResult(payload, sourceEl = null) {
   component.addError = '';
   component.showModal = true;
   component.updateFolderPreview();
+  component.$nextTick(() => component.$refs.dialog.focus({ preventScroll: true }));
+  component.loadPreview();
 }
 </script>
 {% endblock %}
