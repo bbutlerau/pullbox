@@ -24,6 +24,7 @@ from pullbox.core.library_policy import load_search_on_add_default
 from pullbox.models.story_arc import StoryArc, StoryArcLifecycle
 from pullbox.providers.metadata.comicvine import ComicVineError
 from pullbox.services.cover_url_service import build_story_arc_cover_url
+from pullbox.services.metadata_arc_commands import saved_arc_source
 from pullbox.services.story_arc_file_defaults import load_story_arc_file_defaults
 from pullbox.services.story_arc_placement_integration import StoryArcPlacementIntegrationError
 from pullbox.services.story_arc_service import StoryArcServiceError, StoryArcValidationError
@@ -345,7 +346,11 @@ async def story_arc_catalog_add(
 
 async def _provider_arc(session: DbSession, arc_id: int) -> StoryArc:
     arc = await session.get(StoryArc, arc_id)
-    if arc is None or arc.comicvine_id is None or arc.lifecycle is not StoryArcLifecycle.ACTIVE:
+    if (
+        arc is None
+        or (arc.comicvine_id is None and saved_arc_source(arc) is None)
+        or arc.lifecycle is not StoryArcLifecycle.ACTIVE
+    ):
         raise HTTPException(status_code=404, detail="Active provider Story Arc not found")
     return arc
 
@@ -391,6 +396,11 @@ async def story_arc_catalog_refresh_preview(
 ) -> Response:
     username = user.username
     arc = await _provider_arc(session, story_arc_id)
+    selection = saved_arc_source(arc)
+    if selection is not None:
+        from pullbox.ui.story_arc_source_routes import source_refresh_preview
+
+        return await source_refresh_preview(arc, selection, request, username, session, error)
     name, provider_id = arc.name, str(arc.comicvine_id)
     cover_src = build_story_arc_cover_url(arc)
     comicvine_url = arc.comicvine_url or (
@@ -443,8 +453,24 @@ async def story_arc_catalog_refresh(
     fingerprint: Annotated[str, Form(max_length=128)],
     confirm_refresh: bool = Form(False),
     library_root_id: Annotated[int | None, Form(ge=1)] = None,
+    source_revision: Annotated[int | None, Form(ge=1)] = None,
 ) -> Response:
     arc = await _provider_arc(session, story_arc_id)
+    selection = saved_arc_source(arc)
+    if selection is not None:
+        from pullbox.ui.story_arc_source_routes import source_refresh
+
+        return await source_refresh(
+            story_arc_id,
+            selection,
+            request,
+            session,
+            source_revision=source_revision,
+            expected_revision=expected_revision,
+            fingerprint=fingerprint,
+            confirm_refresh=confirm_refresh,
+            library_root_id=library_root_id,
+        )
     provider_id = str(arc.comicvine_id)
     code = "conflict"
     try:

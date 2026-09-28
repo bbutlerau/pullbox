@@ -8,7 +8,13 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
-from pullbox.schemas.metadata_sources import SeriesDiscoveryQuery, SeriesDiscoveryRead, SourceStatus
+from pullbox.schemas.metadata_sources import (
+    SeriesDiscoveryQuery,
+    SeriesDiscoveryRead,
+    SourceStatus,
+    StoryArcDiscoveryQuery,
+    StoryArcDiscoveryRead,
+)
 from pullbox.services.metadata_sources import SourceRuntime
 
 
@@ -17,7 +23,7 @@ class MetadataSearchBusyError(RuntimeError):
 
 
 def discovery_cache_key(
-    query: SeriesDiscoveryQuery,
+    query: SeriesDiscoveryQuery | StoryArcDiscoveryQuery,
     runtime: Sequence[SourceRuntime],
     *,
     catalog_generation: str | None,
@@ -28,7 +34,9 @@ def discovery_cache_key(
     if query.sources is not None:
         request["sources"] = sorted(query.sources)
     payload = {
-        "contract": "series-search-v1",
+        "contract": "series-search-v1"
+        if isinstance(query, SeriesDiscoveryQuery)
+        else "arc-search-v1",
         "query": request,
         "sources": [
             {
@@ -85,7 +93,11 @@ class MetadataSearchCache:
         self._bytes -= len(payload)
 
     async def _load(
-        self, key: str, loader: Callable[[], Awaitable[SeriesDiscoveryRead]], *, cache_result: bool
+        self,
+        key: str,
+        loader: Callable[[], Awaitable[SeriesDiscoveryRead | StoryArcDiscoveryRead]],
+        *,
+        cache_result: bool,
     ) -> bytes:
         result = await loader()
         task = asyncio.current_task()
@@ -113,12 +125,30 @@ class MetadataSearchCache:
         *,
         cache_result: bool = True,
     ) -> SeriesDiscoveryRead:
+        return SeriesDiscoveryRead.model_validate_json(
+            await self._get_payload(key, loader, cache_result=cache_result)
+        )
+
+    async def get_arcs(
+        self, key: str, loader: Callable[[], Awaitable[StoryArcDiscoveryRead]]
+    ) -> StoryArcDiscoveryRead:
+        return StoryArcDiscoveryRead.model_validate_json(
+            await self._get_payload(key, loader, cache_result=True)
+        )
+
+    async def _get_payload(
+        self,
+        key: str,
+        loader: Callable[[], Awaitable[SeriesDiscoveryRead | StoryArcDiscoveryRead]],
+        *,
+        cache_result: bool,
+    ) -> bytes:
         for expired in [key for key, (until, _) in self._entries.items() if until <= self.clock()]:
             self._discard(expired)
         cached = self._entries.get(key) if cache_result else None
         if cached is not None:
             self._entries.move_to_end(key)
-            return SeriesDiscoveryRead.model_validate_json(cached[1])
+            return cached[1]
         flight = self._pending.get(key)
         if flight is not None and flight.task.cancelling():
             raise MetadataSearchBusyError("The previous search is stopping. Try again shortly.")
@@ -134,7 +164,7 @@ class MetadataSearchCache:
         flight.waiters += 1
         try:
             payload = await asyncio.shield(flight.task)
-            return SeriesDiscoveryRead.model_validate_json(payload)
+            return payload
         finally:
             flight.waiters -= 1
             if not flight.waiters:

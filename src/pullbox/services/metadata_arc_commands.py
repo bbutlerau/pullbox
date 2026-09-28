@@ -15,6 +15,7 @@ from pullbox.schemas.metadata_arc_catalog import (
     ArcCatalogRefresh,
     ArcCatalogSelection,
 )
+from pullbox.schemas.metadata_sources import StoryArcPreviewQuery
 from pullbox.services.metadata_arc_catalog import fetch_source_arc_catalog
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
 from pullbox.services.metadata_sources import load_source_runtime
@@ -29,6 +30,25 @@ class ArcCommandResult:
     arc: StoryArc
     search_on_add: bool
     initial_placements: bool = False
+
+
+def saved_arc_source(arc: StoryArc) -> StoryArcPreviewQuery | None:
+    """Only a saved source-bound catalog selects the refresh transport."""
+    from pydantic import ValidationError
+
+    catalog = arc.diagnostics.get("provider_catalog")
+    snapshot = catalog.get("snapshot") if isinstance(catalog, dict) else None
+    if not isinstance(snapshot, dict) or "source" not in snapshot:
+        return None
+    try:
+        return StoryArcPreviewQuery.model_validate(
+            {
+                "source": snapshot.get("source"),
+                "external_id": snapshot.get("provider_id"),
+            }
+        )
+    except ValidationError:
+        return None
 
 
 async def fetch_current_arc_catalog(

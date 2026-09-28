@@ -20,6 +20,7 @@ from pullbox.schemas.metadata_sources import (
     SeriesDiscoveryRead,
     SourceOutcome,
     SourceStatus,
+    StoryArcDiscoveryRead,
 )
 from pullbox.services.catalog.contract import CatalogError
 from pullbox.services.metadata_discovery import MetadataSourceError, MetadataSourceRegistry
@@ -90,12 +91,16 @@ def _resource_url(row: ProviderSeriesRead) -> str | None:
     return None
 
 
-def source_messages(snapshot: SeriesDiscoveryRead) -> list[str]:
+def source_messages(snapshot: SeriesDiscoveryRead | StoryArcDiscoveryRead) -> list[str]:
     if not snapshot.sources:
         return ["No search sources are enabled. Enable a source in Metadata settings."]
     messages = []
     for outcome in snapshot.sources:
         detail = _OUTCOME_TEXT.get(outcome.status)
+        if outcome.status is SourceStatus.UNSUPPORTED and isinstance(
+            snapshot, StoryArcDiscoveryRead
+        ):
+            detail = "does not support Story Arc search"
         if detail is None and outcome.truncated:
             detail = "showing a limited result set; narrow the search for more"
         if detail is None and outcome.rejected_results:

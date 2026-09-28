@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "components/search_field.html" import search_field %}
+{% from "components/dropdown_select.html" import dropdown_select %}
 
 {% block title %}Add Story Arc — {{ instance_name() }}{% endblock %}
 {% block page_title %}Add Story Arc{% endblock %}
@@ -46,8 +47,14 @@
               size="sm",
               class_name="series-registry-search add-series-search-field",
               input_id="story-arc-provider-query",
-              aria_label="Comic Vine arc name"
+              aria_label="Story Arc name"
             ) }}
+            {% if source_options is defined %}
+              <div class="min-w-48">
+                <label for="story-arc-source" class="sr-only">Metadata source</label>
+                {{ dropdown_select(name="source", value=source_filter, options=source_options, trigger_id="story-arc-source", root_testid="story-arc-source-filter", size="sm", on_change="htmx.trigger(document.getElementById('story-arc-catalog-search'), 'submit')") }}
+              </div>
+            {% endif %}
           </div>
         </div>
       </div>

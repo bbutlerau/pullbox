@@ -40,6 +40,12 @@ def catalog_provider(monkeypatch: pytest.MonkeyPatch) -> CatalogProvider:
     monkeypatch.setattr(
         "pullbox.providers.metadata.comicvine.ComicVineProvider", lambda **_: provider
     )
+    monkeypatch.setattr(
+        "pullbox.services.metadata_sources.get_comicvine_api_key", AsyncMock(return_value="test")
+    )
+    monkeypatch.setattr(
+        "pullbox.providers.metadata.sources.ComicVineProvider", lambda *_args, **_kw: provider
+    )
     return provider
 
 
@@ -87,10 +93,10 @@ async def test_registry_links_to_dedicated_comicvine_add_page(
         response.text,
     )
     assert 'class="h-5 w-5 animate-spin"' in response.text
-    assert "Searching ComicVine" in response.text
+    assert "Searching metadata sources" in response.text
     assert "Large catalogs can take a moment." in response.text
     assert 'data-testid="story-arc-add-footer-dock"' in response.text
-    assert "Search Comic Vine" in response.text
+    assert "Search Story Arcs" in response.text
     assert 'data-testid="story-arcs-create-form"' not in response.text
 
 
@@ -162,7 +168,7 @@ async def test_catalog_search_renders_provider_cover_and_missing_cover_fallback(
     )
 
     assert response.status_code == 200
-    assert 'src="https://example.test/story-arcs/42.jpg"' in response.text
+    assert 'src="https://comicvine.gamespot.com/a/uploads/story-arcs/42.jpg"' in response.text
     assert 'alt="Numbering Event"' in response.text
     assert 'loading="lazy"' in response.text
     assert response.text.count('class="add-series-result-cover-empty"') == 1

@@ -1,5 +1,5 @@
 {# Shared navigation action for a read-only provider update check. #}
-{% macro provider_update_link(url, label="Check for updates", testid="") %}
+{% macro provider_update_link(url, label="Check for updates", testid="", source_label="Comic Vine") %}
 <a
   href="{{ url }}"
   class="btn-ghost"
@@ -16,6 +16,6 @@
   </svg>
   <span x-show="!checking">{{ label }}</span>
   <span x-show="checking" x-cloak>Checking…</span>
-  <span class="sr-only" role="status" x-text="checking ? 'Checking Comic Vine for updates' : ''"></span>
+  <span class="sr-only" role="status" x-text="checking ? {{ ('Checking ' ~ source_label ~ ' for updates')|tojson|forceescape }} : ''"></span>
 </a>
 {% endmacro %}

@@ -12,6 +12,7 @@ import pytest
 from playwright.sync_api import Page, Route, expect
 
 from tests.e2e.accessibility import assert_no_axe_violations
+from tests.e2e.conftest import _TEST_COVER_PNG
 from tests.e2e.story_arc_file_helpers import configure_arc_file_defaults
 from tests.story_arc_catalog_fixtures import CatalogProvider
 
@@ -19,13 +20,23 @@ pytestmark = pytest.mark.e2e
 
 
 @pytest.fixture
-def catalog_provider(monkeypatch: pytest.MonkeyPatch) -> CatalogProvider:
+def catalog_provider(monkeypatch: pytest.MonkeyPatch, page: Page) -> CatalogProvider:
+    page.route(
+        "https://comicvine.gamespot.com/a/uploads/story-arcs/42.jpg",
+        lambda route: route.fulfill(status=200, content_type="image/png", body=_TEST_COVER_PNG),
+    )
     provider = CatalogProvider()
     monkeypatch.setattr(
         "pullbox.core.comicvine_key.get_comicvine_api_key", AsyncMock(return_value="test")
     )
     monkeypatch.setattr(
         "pullbox.providers.metadata.comicvine.ComicVineProvider", lambda **_: provider
+    )
+    monkeypatch.setattr(
+        "pullbox.services.metadata_sources.get_comicvine_api_key", AsyncMock(return_value="test")
+    )
+    monkeypatch.setattr(
+        "pullbox.providers.metadata.sources.ComicVineProvider", lambda *_args, **_kw: provider
     )
     return provider
 
@@ -45,7 +56,7 @@ def test_catalog_search_uses_standard_comicvine_loading_popup(
 
     page.route("**/story-arcs/add**", hold_search)
     page.goto(f"{seeded_server}/story-arcs/add", wait_until="networkidle")
-    query = page.get_by_label("Comic Vine arc name")
+    query = page.get_by_label("Story Arc name")
     query.fill("Numbering")
     query.press("Enter")
 
@@ -53,7 +64,7 @@ def test_catalog_search_uses_standard_comicvine_loading_popup(
     expect(indicator).to_be_visible()
     expect(indicator).to_have_attribute("aria-live", "polite")
     expect(indicator).to_have_attribute("data-comicvine-search-loading-contract", "v1")
-    expect(indicator.get_by_text("Searching ComicVine", exact=True)).to_be_visible()
+    expect(indicator.get_by_text("Searching metadata sources", exact=True)).to_be_visible()
     expect(indicator.get_by_text("Large catalogs can take a moment.", exact=True)).to_be_visible()
     spinner = indicator.locator("svg").first
     expect(spinner).to_have_css("width", "20px")
@@ -91,7 +102,9 @@ def test_catalog_results_use_add_series_card_layout(
         "A test event across multiple comic series."
     )
     expect(card).not_to_have_class(re.compile(r"add-series-result-card-static"))
-    expect(card.locator(".add-series-result-meta")).to_have_text("Fixture Publisher 2 issues")
+    expect(card.locator(".add-series-result-meta")).to_have_text(
+        "ComicVine API Fixture Publisher 2 issues"
+    )
     expect(results.get_by_text("2 matching Story Arcs", exact=True)).to_have_count(0)
     expect(results.locator("nav")).to_have_count(0)
     unknown = results.locator(".add-series-result-card").nth(1)
@@ -127,18 +140,20 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
     page.on("pageerror", lambda error: errors.append(str(error)))
     configure_arc_file_defaults(page, seeded_server, prefix=True)
     page.goto(f"{seeded_server}/story-arcs/add", wait_until="domcontentloaded")
-    query = page.get_by_label("Comic Vine arc name")
+    query = page.get_by_label("Story Arc name")
     query.fill("Numbering")
     cover = page.get_by_role("img", name="Numbering Event")
     expect(cover).to_be_visible()
-    expect(cover).to_have_attribute("src", "https://example.test/story-arcs/42.jpg")
+    expect(cover).to_have_attribute(
+        "src", "https://comicvine.gamespot.com/a/uploads/story-arcs/42.jpg"
+    )
     expect(page.get_by_role("link", name="Preview Numbering Event")).to_be_visible()
     query.press("Tab")
     page.get_by_role("link", name="Preview Numbering Event").focus()
     page.keyboard.press("Enter")
-    page.wait_for_url("**/story-arcs/catalog/42")
+    page.wait_for_url("**/story-arcs/catalog/comicvine_api/42")
     expect(
-        page.get_by_text("Issues are listed in Comic Vine's returned order.", exact=False)
+        page.get_by_text("Issues are listed in ComicVine API's returned order.", exact=False)
     ).to_be_visible()
     form = page.get_by_test_id("story-arc-catalog-add-form")
     form.get_by_role("button", name="Move Exact Comics #1000000 down", exact=True).press("Enter")
@@ -292,13 +307,13 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
     # Provider failures and incomplete responses must never look like no changes.
     catalog_provider.fail = True
     page.get_by_role("link", name="Check again", exact=True).click()
-    expect(page.get_by_role("alert")).to_contain_text("couldn't load this arc")
+    expect(page.get_by_role("alert")).to_contain_text("Could not finish the story arc")
     expect(page.get_by_text("This story arc is up to date", exact=True)).to_have_count(0)
     expect(page.get_by_test_id("story-arc-update-results")).to_have_count(0)
     catalog_provider.fail = False
     catalog_provider.metadata = replace(catalog_provider.metadata, membership_complete=False)
     page.get_by_role("link", name="Check again", exact=True).click()
-    expect(page.get_by_role("alert")).to_contain_text("Incomplete member list")
+    expect(page.get_by_role("alert")).to_contain_text(re.compile("incomplete", re.I))
     expect(page.get_by_label("I reviewed these provider changes")).to_have_count(0)
     catalog_provider.metadata = replace(catalog_provider.metadata, membership_complete=True)
     page.get_by_role("navigation", name="Breadcrumb").get_by_role(
@@ -309,7 +324,7 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
         catalog_provider.metadata, issue_provider_ids=("101", "103")
     )
     page.get_by_role("link", name="Check for updates", exact=True).click()
-    expect(page.get_by_text("Comic Vine issue ID 102 — preserved")).to_be_visible()
+    expect(page.get_by_text("ComicVine API issue ID 102 — preserved")).to_be_visible()
     additions = page.get_by_test_id("story-arc-update-additions")
     removals = page.get_by_test_id("story-arc-update-removals")
     page.set_viewport_size({"width": 1440, "height": 1000})
@@ -354,7 +369,7 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
     page.wait_for_url(re.compile(r"/story-arcs/\d+\?.*notice=resolved.*$"))
     expect(page.get_by_role("button", name="Review issue 2 match")).to_have_count(0)
     page.goto(f"{seeded_server}/story-arcs/add")
-    page.get_by_label("Comic Vine arc name").fill("Numbering")
+    page.get_by_label("Story Arc name").fill("Numbering")
     expect(page.get_by_test_id("story-arc-existing-title-link")).to_have_attribute(
         "href", arc_url.removeprefix(seeded_server)
     )

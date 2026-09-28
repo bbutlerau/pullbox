@@ -38,7 +38,7 @@ class CatalogProvider:
                 title="Numbering Event",
                 description="<p>A test event across multiple comic series.</p>",
                 publisher="Fixture Publisher",
-                cover_url="https://example.test/story-arcs/42.jpg",
+                cover_url="https://comicvine.gamespot.com/a/uploads/story-arcs/42.jpg",
                 declared_issue_count=2,
             ),
             StoryArcSearchResult(provider_id="43", title="Already Here"),
@@ -76,7 +76,9 @@ class CatalogProvider:
             for provider_id in issue_provider_ids
         ]
 
-    async def get_series(self, provider_id: str) -> SeriesMetadata:
+    async def get_series(
+        self, provider_id: str, *, strict_response: bool = False
+    ) -> SeriesMetadata:
         return SeriesMetadata(
             provider_id=provider_id,
             title="Exact Comics",

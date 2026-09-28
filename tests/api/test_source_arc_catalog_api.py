@@ -44,6 +44,7 @@ async def arc_command_setup(authenticated_client, sec_db, monkeypatch, tmp_path)
         "failure": None,
         "on_request": None,
         "searches": [],
+        "arc_rows": [{"id": 4, "name": "Native arc"}],
     }
 
     async def handle(request):
@@ -52,6 +53,19 @@ async def arc_command_setup(authenticated_client, sec_db, monkeypatch, tmp_path)
             await fixture["on_request"]()
         if fixture["failure"] == request.url.path:
             return httpx.Response(429, headers={"Retry-After": "60"})
+        if request.url.path == "/api/arc/":
+            page = int(request.url.params["page"])
+            rows = fixture["arc_rows"]
+            return httpx.Response(
+                200,
+                json=envelope(
+                    rows[(page - 1) * 100 : page * 100],
+                    count=len(rows),
+                    next_url=str(request.url.copy_set_param("page", str(page + 1)))
+                    if page * 100 < len(rows)
+                    else None,
+                ),
+            )
         if request.url.path == "/api/arc/4/":
             return httpx.Response(200, json={"id": 4, "name": "Native arc"})
         if request.url.path == "/api/arc/4/issue_list/":
