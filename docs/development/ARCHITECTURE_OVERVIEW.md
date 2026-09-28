@@ -346,6 +346,16 @@ an in-flight refresh cannot overwrite newer sync progress. Incremental consumers
 must still handle overlap, generation changes and truncated modification windows;
 this checkpoint storage does not itself implement daily source-aware sync.
 
+`services/metadata_issue_catalog.py` applies either complete membership or an
+issue-only batch to the caller's locked, revalidated read set. Full refresh uses
+this writer; partial batches do not imply removal, completeness or a new full-sync
+timestamp. Both modes preserve issue ownership, local edits, private reading state
+and registered artifacts while sharing native identity, crosswalk observation and
+canonical-baseline writes. The writer returns exact created issue IDs. Scheduled
+refresh uses that receipt, not an ID range that could include another operation's
+new issues, when deciding whether to search after commit. Daily source-window
+orchestration and atomic incremental checkpoint advancement remain pending.
+
 `services/metadata_series_adoption.py` separates a complete server-side catalog
 fetch from transactional adoption. Traversal rejects partial pages, repeated
 identities, changed counts and mixed local catalog generations. The writer locks

@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,9 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from pullbox.config import get_settings
 from pullbox.core.exceptions import ValidationError
-from pullbox.core.metadata_identity import ExternalIdentityRef, MetadataEntityKind, MetadataSource
+from pullbox.core.metadata_identity import MetadataEntityKind, MetadataSource
 from pullbox.models import Issue, Series
-from pullbox.models.issue import IssueStatus
 from pullbox.models.metadata_source import MetadataSourceConfig
 from pullbox.models.series import IssueCatalogState, SeriesStatus, SeriesType
 from pullbox.schemas.metadata_snapshot import FieldOrigin, MetadataSnapshot, field_domain
@@ -31,27 +31,25 @@ from pullbox.services.metadata_assembly import assemble_metadata
 from pullbox.services.metadata_baselines import MetadataBaselineWrite, save_metadata_baselines
 from pullbox.services.metadata_catalog_checkpoints import save_full_catalog_checkpoint
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
-from pullbox.services.metadata_identity_attachment import attach_verified_identities
-from pullbox.services.metadata_identity_review import record_identity_observation
+from pullbox.services.metadata_issue_catalog import (
+    IssueCatalogConflictError,
+    SourceIssueBatch,
+    apply_issue_batch,
+)
 from pullbox.services.metadata_read_cache import source_read_cache
 from pullbox.services.metadata_refresh_snapshot import fetch_metadata_snapshot
 from pullbox.services.metadata_series_adoption import (
     SeriesAdoptionError,
     SourceSeriesBundle,
-    _identities,
-    _metadata_label,
-    _request,
-    _require_unowned_issues,
     _validate_bundle,
     fetch_source_series_bundle,
 )
 from pullbox.services.metadata_series_refresh_state import (
-    ISSUE_FIELDS,
     SERIES_FIELDS,
     SeriesRefreshState,
     read_series_refresh_state,
 )
-from pullbox.services.metadata_service import MetadataService, classify_issue_metadata
+from pullbox.services.metadata_service import MetadataService
 from pullbox.services.metadata_sources import load_source_runtime
 from pullbox.services.metadata_writer_identity import metadata_write_scope
 from pullbox.services.provider_artwork import ProviderArtworkClient, pending_provider_cover
@@ -72,6 +70,12 @@ class SeriesRefreshError(ValueError):
         super().__init__(message)
         self.outcomes = outcomes
         self.retry_after_seconds = retry_after_seconds
+
+
+@dataclass(frozen=True)
+class SeriesCatalogRefresh:
+    series: Series
+    created_issue_ids: tuple[int, ...]
 
 
 @asynccontextmanager
@@ -136,6 +140,20 @@ async def refresh_series_from_sources(
     registry: MetadataSourceRegistry | None = None,
     replace_managed: bool = True,
 ) -> Series:
+    """Refresh metadata through the canonical writer, preserving the public result."""
+    result = await refresh_series_catalog_from_sources(
+        session, series_id, registry=registry, replace_managed=replace_managed
+    )
+    return result.series
+
+
+async def refresh_series_catalog_from_sources(
+    session: AsyncSession,
+    series_id: int,
+    *,
+    registry: MetadataSourceRegistry | None = None,
+    replace_managed: bool = True,
+) -> SeriesCatalogRefresh:
     """Release only a clean read transaction; leave the atomic write to the caller.
 
     No library/archive files are modified. The caller owns response construction,
@@ -228,7 +246,7 @@ async def refresh_series_from_sources(
                 raise SeriesRefreshError(
                     "Library metadata, identities or source settings changed. Retry the refresh."
                 )
-            series = await _apply(
+            result = await _apply(
                 session, current, bundle, snapshot, now, replace_managed=replace_managed
             )
             if bundle.catalog_started_at is not None:
@@ -244,7 +262,7 @@ async def refresh_series_from_sources(
                 )
                 await save_full_catalog_checkpoint(
                     session,
-                    series.id,
+                    result.series.id,
                     source=bundle.series.source,
                     source_revision=bundle.source_revision,
                     identity_revision=identity_revision,
@@ -260,9 +278,11 @@ async def refresh_series_from_sources(
             source=bundle.series.source.value,
             catalog_count=bundle.catalog_total,
         )
-        return series
+        return result
     except SeriesRefreshError:
         raise
+    except IssueCatalogConflictError as exc:
+        raise SeriesRefreshError(str(exc)) from exc
     except (ValueError, IntegrityError, ValidationError) as exc:
         raise SeriesRefreshError(
             "Metadata could not be refreshed safely. Review the series match "
@@ -356,66 +376,10 @@ async def _apply(
     now: datetime,
     *,
     replace_managed: bool,
-) -> Series:
+) -> SeriesCatalogRefresh:
     series = await session.get(Series, state.series.local_id)
     assert series is not None
-    source = bundle.series.source
-    by_identity = {identity: item for item in state.issues for identity in item.identities}
-    numbers = _validate_bundle(bundle)
-    offered = {
-        ExternalIdentityRef(source.identity_namespace, MetadataEntityKind.ISSUE, item.external_id)
-        for item in bundle.issues
-    }
-    missing = {
-        identity for identity in by_identity if identity.namespace is source.identity_namespace
-    } - offered
-    if missing:
-        raise SeriesRefreshError(
-            "The provider removed existing issue identities. "
-            "Review the catalog; existing issues and files were kept."
-        )
-    by_number = {item.values.issue_number_text: item for item in state.issues}
-    prepared = []
-    for metadata, (number, text) in zip(bundle.issues, numbers, strict=True):
-        identity = ExternalIdentityRef(
-            source.identity_namespace, MetadataEntityKind.ISSUE, metadata.external_id
-        )
-        existing = by_identity.get(identity)
-        if existing is not None and existing.values.issue_number_text != text:
-            raise SeriesRefreshError(
-                "A provider issue was renumbered. Review the issue match; existing files were kept."
-            )
-        if existing is None and text in by_number:
-            raise SeriesRefreshError(
-                "An issue designation already belongs to a different identity. "
-                "Review its match; no issues were reassigned."
-            )
-        issue_snapshot = assemble_metadata(
-            MetadataEntityKind.ISSUE,
-            existing.identities if existing else (identity,),
-            [metadata.model_copy(update={"issue_number_text": text})],
-            state.policies,
-            now=now,
-            current=existing.values if existing else None,
-            previous=existing.baseline if existing else None,
-            parent_identities=state.series.identities,
-            replace_managed=replace_managed,
-            fields=ISSUE_FIELDS,
-        )
-        prepared.append((existing, metadata, number, text, issue_snapshot))
     values = snapshot.values
-    new_metadata = tuple(metadata for old, metadata, *_rest in prepared if old is None)
-    if new_metadata:
-        await _require_unowned_issues(
-            session,
-            SourceSeriesBundle(
-                bundle.series, new_metadata, bundle.source_revision, len(new_metadata)
-            ),
-        )
-    existing_issues = {
-        item.id: item
-        for item in await session.scalars(select(Issue).where(Issue.series_id == series.id))
-    }
     series.title = values.title or series.title
     series.sort_title = values.sort_title or series.sort_title
     series.description, series.year_start, series.year_end = (
@@ -433,52 +397,17 @@ async def _apply(
         series.series_type = SeriesType(values.series_type)
     if values.status is not None:
         series.status = SeriesStatus(values.status)
-    additions = 0
-    for offset in range(0, len(prepared), 200):
-        pending = []
-        for existing, metadata, number, text, issue_snapshot in prepared[offset : offset + 200]:
-            issue = existing_issues.get(existing.local_id) if existing else None
-            if issue is None:
-                issue = Issue(
-                    series_id=series.id,
-                    issue_number=number,
-                    issue_number_text=text,
-                    status=IssueStatus.WANTED if series.monitored else IssueStatus.SKIPPED,
-                    issue_type=classify_issue_metadata(series.series_type, metadata.title)[1],
-                    metadata_source=_metadata_label(source),
-                )
-                session.add(issue)
-                additions += 1
-            value = issue_snapshot.values
-            issue.title, issue.description = value.title, value.description
-            issue.release_date, issue.store_date = value.cover_date, value.store_date
-            issue.page_count, issue.cover_url = value.page_count, value.image_url
-            pending.append((issue, existing, metadata, issue_snapshot))
-        await session.flush()
-        await attach_verified_identities(
-            session,
-            [
-                _request(
-                    bundle, metadata, _identities(metadata, MetadataEntityKind.ISSUE)[0], issue.id
-                )
-                for issue, old, metadata, _ in pending
-                if old is None
-            ],
-        )
-        for issue, old, metadata, _ in pending:
-            if old is None:
-                for crosswalk in _identities(metadata, MetadataEntityKind.ISSUE)[1:]:
-                    await record_identity_observation(
-                        session, _request(bundle, metadata, crosswalk, issue.id, observation=True)
-                    )
-        await save_metadata_baselines(
-            session,
-            [
-                MetadataBaselineWrite(issue.id, item, old.baseline_revision if old else 0)
-                for issue, old, _, item in pending
-            ],
-        )
-    series.issue_count = len(state.issues) + additions
+    created = await apply_issue_batch(
+        session,
+        state,
+        SourceIssueBatch(
+            bundle.series.source, bundle.series.external_id, bundle.issues, bundle.source_revision
+        ),
+        now,
+        complete=True,
+        replace_managed=replace_managed,
+    )
+    series.issue_count = len(state.issues) + len(created)
     snapshot = _with_derived(snapshot, "issue_count", series.issue_count, now)
     origins = {item.field: item for item in snapshot.origins}
     status_origin = origins.get("status")
@@ -498,4 +427,4 @@ async def _apply(
     await save_metadata_baselines(
         session, [MetadataBaselineWrite(series.id, snapshot, state.series.baseline_revision)]
     )
-    return series
+    return SeriesCatalogRefresh(series, created)

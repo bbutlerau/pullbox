@@ -83,6 +83,14 @@ class SeriesAdoptionError(ValueError):
 
 
 @dataclass(frozen=True)
+class SourceIssueBatch:
+    source: MetadataSource
+    series_external_id: str
+    issues: tuple[ProviderIssueRead, ...]
+    source_revision: int
+
+
+@dataclass(frozen=True)
 class SourceSeriesBundle:
     series: ProviderSeriesRead
     issues: tuple[ProviderIssueRead, ...]
@@ -263,11 +271,23 @@ def _validate_bundle(bundle: SourceSeriesBundle) -> list[tuple[float, str]]:
         or (profile.issue_count is not None and profile.issue_count != len(bundle.issues))
     ):
         raise SeriesAdoptionError("The series profile or issue catalog is incomplete.")
+    return _validate_issue_batch(
+        SourceIssueBatch(profile.source, profile.external_id, bundle.issues, bundle.source_revision)
+    )
+
+
+def _validate_issue_batch(batch: SourceIssueBatch) -> list[tuple[float, str]]:
+    if (
+        type(batch.source_revision) is not int
+        or batch.source_revision <= 0
+        or len(batch.issues) > 10000
+    ):
+        raise SeriesAdoptionError("Invalid catalog revision or issue batch size.")
     numbers = []
     seen_numbers: set[str] = set()
     seen_ids: set[ExternalIdentityRef] = set()
-    for issue in bundle.issues:
-        if issue.source is not profile.source or issue.series_external_id != profile.external_id:
+    for issue in batch.issues:
+        if issue.source is not batch.source or issue.series_external_id != batch.series_external_id:
             raise SeriesAdoptionError("An issue belongs to a different source or series.")
         for identity in _identities(issue, MetadataEntityKind.ISSUE):
             if identity in seen_ids:
@@ -289,7 +309,7 @@ def _validate_bundle(bundle: SourceSeriesBundle) -> list[tuple[float, str]]:
 
 
 def _request(
-    bundle: SourceSeriesBundle,
+    bundle: SourceSeriesBundle | SourceIssueBatch,
     metadata: ProviderSeriesRead | ProviderIssueRead,
     identity: ExternalIdentityRef,
     local_id: int,
@@ -368,7 +388,9 @@ async def _series_owner(
     return result.scalar_one_or_none()
 
 
-async def _require_unowned_issues(session: AsyncSession, bundle: SourceSeriesBundle) -> None:
+async def _require_unowned_issues(
+    session: AsyncSession, bundle: SourceSeriesBundle | SourceIssueBatch
+) -> None:
     identities = [
         identity
         for issue in bundle.issues

@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-from sqlalchemy import exists, func, select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -15,7 +15,7 @@ from pullbox.models.metadata_identity import SeriesExternalIdentity
 from pullbox.schemas.metadata_sources import SourceCapability
 from pullbox.services.cover_resolver import resolve_covers_dir
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
-from pullbox.services.metadata_series_refresh import refresh_series_from_sources
+from pullbox.services.metadata_series_refresh import refresh_series_catalog_from_sources
 from pullbox.services.metadata_sources import load_source_runtime
 
 
@@ -55,16 +55,23 @@ class ScheduledSeriesRefresh:
 async def refresh_scheduled_series(session: AsyncSession, series_id: int) -> ScheduledSeriesRefresh:
     """Fill gaps and synchronize a complete catalog; the task commits progress too."""
     covers = await resolve_covers_dir(session)
-    before_id = await session.scalar(select(func.max(Issue.id)).where(Issue.series_id == series_id))
-    series = await refresh_series_from_sources(session, series_id, replace_managed=False)
-    new_issues = list(
-        await session.scalars(
-            select(Issue).where(Issue.series_id == series_id, Issue.id > (before_id or 0))
+    result = await refresh_series_catalog_from_sources(session, series_id, replace_managed=False)
+    wanted = (
+        await session.scalar(
+            select(Issue.id)
+            .where(
+                Issue.series_id == series_id,
+                Issue.id.in_(result.created_issue_ids),
+                Issue.status == IssueStatus.WANTED,
+            )
+            .limit(1)
         )
+        if result.created_issue_ids
+        else None
     )
     return ScheduledSeriesRefresh(
-        len(new_issues),
-        series.monitored and any(issue.status is IssueStatus.WANTED for issue in new_issues),
-        series.cover_url,
+        len(result.created_issue_ids),
+        result.series.monitored and wanted is not None,
+        result.series.cover_url,
         covers,
     )
