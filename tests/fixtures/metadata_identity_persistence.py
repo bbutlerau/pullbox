@@ -14,6 +14,7 @@ from sqlalchemy import (
     MetaData,
     String,
     Table,
+    Text,
     UniqueConstraint,
 )
 from sqlalchemy import Enum as SQLAlchemyEnum
@@ -110,6 +111,12 @@ def build_identity_schema_probe() -> IdentitySchemaProbe:
             Column("identity_namespace", String(50), nullable=False),
             Column("external_id", String(255), nullable=False),
             Column("event_key", String(64), nullable=False),
+            Column("request_fingerprint", String(64), nullable=False),
+            Column("request_json", Text, nullable=False),
+            CheckConstraint(
+                "length(request_fingerprint) = 64",
+                name=f"mp0_{kind.value}_event_fingerprint_length",
+            ),
             Column(
                 "verification_state",
                 _stored_enum(IdentityVerificationState, f"mp0_{kind.value}_event_state"),

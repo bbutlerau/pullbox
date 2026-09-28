@@ -10,10 +10,13 @@ from sqlalchemy import delete, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 
 from pullbox.core.metadata_identity import MetadataEntityKind as Kind
+from pullbox.core.metadata_identity_events import prepare_identity_event
+from pullbox.core.metadata_identity_state import IdentityVerificationAction as Action
 from pullbox.core.metadata_identity_state import IdentityVerificationState as State
 from pullbox.models.issue import Issue
 from pullbox.models.series import Series
 from pullbox.models.story_arc import StoryArc, StoryArcExternalIdentity
+from tests.fixtures.metadata_identity_events import identity_event_request
 
 if TYPE_CHECKING:
     from sqlalchemy import Insert, Table
@@ -53,11 +56,20 @@ def _event(
     key: str = "a" * 64,
     external_id: str = "100",
 ) -> Insert:
+    request = identity_event_request(
+        kind,
+        target,
+        Action.REJECT if state is State.REJECTED else Action.OBSERVE,
+        external_id=external_id,
+    )
+    prepared = prepare_identity_event(request)
     return insert(table).values(
         **{f"{kind.value}_id": target},
         identity_namespace="comicvine",
         external_id=external_id,
         event_key=key,
+        request_fingerprint=prepared.request_fingerprint,
+        request_json=prepared.request_json,
         verification_state=state.value,
         evidence_kind="user_selection" if state is State.REJECTED else "comicinfo_xml",
     )
