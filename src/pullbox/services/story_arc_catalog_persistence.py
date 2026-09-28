@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import UUID, uuid5
 
 from sqlalchemy import func, select
 
@@ -12,6 +13,19 @@ from pullbox.core.exceptions import ValidationError
 from pullbox.core.issue_numbers import parse_issue_number_text
 from pullbox.core.library_naming import build_series_relative_path
 from pullbox.core.library_policy import load_effective_library_ingest_policy
+from pullbox.core.metadata_identity import (
+    ExactIdentityEvidence,
+    ExternalIdentityRef,
+    IdentityEvidenceKind,
+    IdentityNamespace,
+    MetadataEntityKind,
+    MetadataSource,
+)
+from pullbox.core.metadata_identity_events import IdentityEventEvidence, IdentityEventRequest
+from pullbox.core.metadata_identity_state import (
+    IdentityReviewRequiredError,
+    IdentityVerificationAction,
+)
 from pullbox.core.naming import classify_series_type, detect_issue_type_from_metadata_title
 from pullbox.core.type_semantics import canonical_issue_type_for_series_type
 from pullbox.models.issue import Issue, IssueStatus, IssueType
@@ -19,6 +33,10 @@ from pullbox.models.library import LibraryRoot
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import IssueCatalogState, Series, SeriesStatus, SeriesType
 from pullbox.services.library_root_management import validate_managed_library_root
+from pullbox.services.metadata_identity_attachment import (
+    IdentityAttachmentConflictError,
+    attach_verified_identities,
+)
 from pullbox.services.story_arc_catalog_types import StoryArcCatalogError, exact_provider_id
 
 if TYPE_CHECKING:
@@ -135,7 +153,55 @@ async def seed_members(
             session.add(issue)
             await session.flush()
         result[provider_id] = issue
+    await _attach_member_identities(session, preview, parents, result)
     return result
+
+
+async def _attach_member_identities(
+    session: AsyncSession,
+    preview: StoryArcCatalogPreview,
+    parents: dict[str, Series],
+    issues: dict[str, Issue],
+) -> None:
+    """Persist verified preview evidence without another provider or file read."""
+    operation_id = uuid5(UUID("e5975ab0-13f6-4e1f-b7af-c3a00ccab88b"), preview.fingerprint)
+    parent_ids = {row.id: key for key, row in parents.items()}
+    requests = []
+    for kind, rows in ((MetadataEntityKind.SERIES, parents), (MetadataEntityKind.ISSUE, issues)):
+        for provider_id, row in rows.items():
+            identity = ExternalIdentityRef(IdentityNamespace.COMICVINE, kind, provider_id)
+            parent = (
+                ExternalIdentityRef(
+                    IdentityNamespace.COMICVINE,
+                    MetadataEntityKind.SERIES,
+                    parent_ids[row.series_id],
+                )
+                if isinstance(row, Issue)
+                else None
+            )
+            requests.append(
+                IdentityEventRequest(
+                    operation_id,
+                    row.id,
+                    IdentityVerificationAction.VERIFY,
+                    IdentityEventEvidence(
+                        ExactIdentityEvidence(
+                            identity,
+                            IdentityEvidenceKind.PROVIDER_RESULT,
+                            MetadataSource.COMICVINE_API,
+                        ),
+                        preview.fingerprint,
+                        source_identity=identity,
+                        parent_identity=parent,
+                    ),
+                )
+            )
+    try:
+        await attach_verified_identities(session, requests)
+    except (IdentityAttachmentConflictError, IdentityReviewRequiredError) as exc:
+        raise StoryArcCatalogError(
+            "identity_conflict", "Canonical identity needs review before adding these members"
+        ) from exc
 
 
 async def _new_series(session: AsyncSession, metadata: SeriesMetadata, root: LibraryRoot) -> Series:

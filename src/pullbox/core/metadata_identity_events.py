@@ -12,6 +12,7 @@ from pullbox.core.metadata_identity import (
     ExactIdentityEvidence,
     ExternalIdentityRef,
     IdentityEvidenceKind,
+    MetadataEntityKind,
 )
 from pullbox.core.metadata_identity_state import IdentityVerificationAction
 
@@ -54,6 +55,7 @@ class IdentityEventEvidence:
     revision: str
     locator: IdentityEvidenceLocator | None = None
     source_identity: ExternalIdentityRef | None = None
+    parent_identity: ExternalIdentityRef | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.claim, ExactIdentityEvidence) or not isinstance(
@@ -62,6 +64,13 @@ class IdentityEventEvidence:
             raise ValueError("Invalid identity evidence claim")
         if not _is_digest(self.revision):
             raise ValueError("Invalid identity evidence revision digest")
+        if self.parent_identity is not None and (
+            not isinstance(self.parent_identity, ExternalIdentityRef)
+            or self.claim.identity.entity_kind is not MetadataEntityKind.ISSUE
+            or self.parent_identity.entity_kind is not MetadataEntityKind.SERIES
+            or self.parent_identity.namespace != self.claim.identity.namespace
+        ):
+            raise ValueError("Invalid issue parent identity evidence")
         provider_kinds = {
             IdentityEvidenceKind.PROVIDER_RESULT,
             IdentityEvidenceKind.PROVIDER_CROSSWALK,
@@ -186,6 +195,9 @@ def prepare_identity_event(request: IdentityEventRequest) -> PreparedIdentityEve
         "actor_user_id": request.actor_user_id,
         "review_revision": request.review_revision,
     }
+    # Keep existing v1 requests byte-identical when no parent was recorded.
+    if evidence.parent_identity is not None:
+        payload["parent_identity"] = _identity_payload(evidence.parent_identity)
     serialized = _canonical_json(payload)
     return PreparedIdentityEvent(_digest(_canonical_json(slot)), _digest(serialized), serialized)
 
