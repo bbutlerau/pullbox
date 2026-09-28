@@ -14,6 +14,7 @@ from pullbox.core.metadata_identity import MetadataSource as Source
 from pullbox.models import Issue, Series
 from pullbox.models.config import SystemConfig
 from pullbox.models.library import LibraryRoot
+from pullbox.models.metadata_baseline import IssueMetadataBaseline, SeriesMetadataBaseline
 from pullbox.models.metadata_identity import SeriesIdentityEvent
 from pullbox.models.metadata_source import MetadataSourceConfig
 from pullbox.models.series import SeriesType
@@ -194,7 +195,13 @@ async def test_failure_removes_only_created_directories_and_no_event(
     assert list(publisher.iterdir()) == [marker] and marker.read_bytes() == b"untouched"
     assert not events
     async with factory() as session:
-        for model in (Series, Issue, SeriesIdentityEvent):
+        for model in (
+            Series,
+            Issue,
+            SeriesIdentityEvent,
+            SeriesMetadataBaseline,
+            IssueMetadataBaseline,
+        ):
             assert await session.scalar(select(func.count()).select_from(model)) == 0
 
 
@@ -215,6 +222,33 @@ async def test_existing_owner_is_not_moved_or_remonitored(add_setup):
             assert result.series.title == "Operator title" and not result.series.monitored
             assert result.series.path == "/existing/reference/keep"
     assert len(events) == 1 and not list(root_path.iterdir())
+    async with factory() as session:
+        baseline = await session.scalar(select(SeriesMetadataBaseline))
+        assert baseline.revision == 1
+        assert "Operator title" not in baseline.snapshot_json
+
+
+async def test_final_classification_is_reflected_in_the_committed_baseline(add_setup):
+    from pullbox.core.metadata_identity import MetadataEntityKind
+    from pullbox.services.metadata_baselines import load_metadata_baseline
+
+    factory, _, _, bus, _ = add_setup
+    data = titled_bundle()
+    for issue in data.issues:
+        issue.title = "Annual"
+    async with (
+        factory() as session,
+        source_series_add_transaction(
+            session, data, library_root_id=None, search_on_add=False, event_bus=bus
+        ) as result,
+    ):
+        local_id = result.series.id
+        assert result.series.series_type is SeriesType.ANNUAL
+        assert result.snapshot.values.series_type == "annual"
+    async with factory() as session:
+        baseline = await load_metadata_baseline(session, MetadataEntityKind.SERIES, local_id)
+        assert baseline.snapshot == result.snapshot
+        assert baseline.snapshot.values.series_type == "annual"
 
 
 async def test_existing_unregistered_folders_are_preserved_with_native_suffix(add_setup):

@@ -406,6 +406,23 @@ Health checks perform no provider I/O inside a database transaction. Their short
 result write applies only to the tested revision and cannot replace a newer probe.
 Cached health is diagnostic, not proof that a source is safe or available now.
 
+### Canonical Metadata Baselines
+
+Series, issue and Story Arc metadata baselines use separate real foreign keys,
+one row per local target, positive revisions and bounded versioned snapshot JSON.
+They are retained provenance, not a provider-response cache. Entity deletion
+cascades the corresponding baseline; source configuration deletion does not.
+Migration does not backfill provider ownership of existing descriptive values.
+
+Baseline writes run through the shared service in caller-owned transactions.
+They lock arcs, series parents, then issues in ID order, verify current exact
+ownership and compare the expected baseline revision before updating. Batched
+creation avoids per-issue reads. SQLite obtains its write transaction before the
+savepoint; PostgreSQL uses row locks. A stale batch rolls back even when its caller
+catches the conflict. Future refresh writers must additionally revalidate their
+captured source-policy and ownership revisions and current user values before
+applying network results; the baseline service is not a substitute for that check.
+
 ### 4.1 Base Model Mixins
 
 **Current Pullbox implementation**

@@ -15,7 +15,7 @@ from pullbox.core.metadata_identity import (
 from pullbox.core.metadata_identity import (
     MetadataSource as Source,
 )
-from pullbox.schemas.metadata_snapshot import MetadataSnapshot, MetadataValues
+from pullbox.schemas.metadata_snapshot import FieldOrigin, MetadataSnapshot, MetadataValues
 from pullbox.schemas.metadata_sources import MetadataDomain as Domain
 from pullbox.schemas.metadata_sources import ProviderIssueRead, ProviderStoryArcRead
 from pullbox.services.metadata_assembly import MetadataAssemblyError, assemble_metadata
@@ -43,6 +43,53 @@ def assemble(candidates, **kwargs):
 
 def origin(snapshot, field):
     return next(item for item in snapshot.origins if item.field == field)
+
+
+def test_derived_values_are_refreshable_without_becoming_user_overrides():
+    before = MetadataSnapshot(
+        entity_kind=Kind.SERIES,
+        identities=(identity(CV), identity(METRON)),
+        values=MetadataValues(status="ended"),
+        origins=(
+            FieldOrigin(
+                field="status", domain=Domain.CORE, observed_at=NOW, derivation="lifecycle"
+            ),
+        ),
+    )
+    candidate = row(CV).model_copy(update={"status": "continuing"})
+    result = assemble([candidate], previous=before, replace_managed=True)
+    assert result.values.status == "continuing"
+    assert origin(result, "status").source is CV
+    assert origin(result, "status").derivation is None
+    background = assemble([candidate], previous=before)
+    assert background.values.status == "ended"
+    assert origin(background, "status").derivation == "lifecycle"
+    edited = assemble(
+        [candidate],
+        previous=before,
+        current=MetadataValues(status="cancelled"),
+        replace_managed=True,
+    )
+    assert edited.values.status == "cancelled" and origin(edited, "status").user_override
+
+
+@pytest.mark.parametrize("attributes", [{"source": CV}, {"user_override": True}])
+def test_derived_provenance_cannot_claim_provider_or_user_origin(attributes):
+    with pytest.raises(ValidationError):
+        MetadataSnapshot(
+            entity_kind=Kind.SERIES,
+            identities=(identity(CV),),
+            values=MetadataValues(status="ended"),
+            origins=(
+                FieldOrigin(
+                    field="status",
+                    domain=Domain.CORE,
+                    observed_at=NOW,
+                    derivation="lifecycle",
+                    **attributes,
+                ),
+            ),
+        )
 
 
 def test_domain_authority_gap_fill_and_serializable_provenance():

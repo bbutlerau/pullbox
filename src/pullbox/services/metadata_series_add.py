@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +13,7 @@ from pullbox.services.metadata_series_adoption import (
     SeriesAdoptionResult,
     SourceSeriesBundle,
     adopt_source_series_bundle,
+    persist_adoption_series_baseline,
 )
 from pullbox.services.metadata_service import (
     MetadataService,
@@ -60,6 +62,13 @@ async def source_series_add_transaction(
                     series,
                     preserve_provider_type=bundle.series.series_type is not None,
                 )
+                if result.snapshot is not None:
+                    result = replace(
+                        result,
+                        snapshot=await persist_adoption_series_baseline(
+                            session, series, result.snapshot
+                        ),
+                    )
                 if library_root_id is not None:
                     folder = await SeriesService._create_series_folder(
                         session,

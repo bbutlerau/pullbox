@@ -449,3 +449,34 @@ async def test_explicit_provider_lifecycle_is_not_replaced_by_age_inference(iden
     async with factory.begin() as session:
         result = await adopt_source_series_bundle(session, data)
         assert result.series.status.value == "continuing"
+
+
+async def test_add_persists_canonical_baselines_after_lifecycle_and_format_inference(
+    identity_probe_db,
+):
+    from pullbox.services.metadata_baselines import load_metadata_baseline
+
+    _, factory, _ = identity_probe_db
+    data = bundle(numbers=("1",))
+    data.series.title = "Batman Annual"
+    data.series.sort_title = None
+    data.series.year_start = 2020
+    data.issues[0].cover_date = date(2020, 1, 1)
+    async with factory.begin() as session:
+        result = await adopt_source_series_bundle(session, data)
+        series_id = result.series.id
+        issue_id = (await session.scalar(select(Issue))).id
+    async with factory() as session:
+        saved = await load_metadata_baseline(session, Kind.SERIES, series_id)
+        assert saved is not None
+        series = await session.get(Series, series_id)
+        assert saved.snapshot.values.series_type == series.series_type.value == "annual"
+        assert saved.snapshot.values.status == series.status.value == "ended"
+        assert saved.snapshot.values.year_end == series.year_end == 2020
+        assert saved.snapshot.values.sort_title == series.sort_title
+        origins = {item.field: item for item in saved.snapshot.origins}
+        assert origins["status"].derivation == "lifecycle"
+        assert not origins["status"].user_override and origins["status"].source is None
+        assert origins["title"].source is Source.METRON_API
+        issue = await load_metadata_baseline(session, Kind.ISSUE, issue_id)
+        assert issue is not None and issue.snapshot.values.issue_number_text == "1"

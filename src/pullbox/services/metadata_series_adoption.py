@@ -30,9 +30,19 @@ from pullbox.models.issue import IssueStatus
 from pullbox.models.metadata_identity import IssueExternalIdentity, SeriesExternalIdentity
 from pullbox.models.metadata_source import MetadataSourceConfig
 from pullbox.models.series import IssueCatalogState, SeriesStatus, SeriesType
-from pullbox.schemas.metadata_snapshot import MetadataSnapshot
+from pullbox.schemas.metadata_snapshot import (
+    FieldOrigin,
+    MetadataSnapshot,
+    MetadataValues,
+    field_domain,
+)
 from pullbox.schemas.metadata_sources import ProviderIssueRead, ProviderSeriesRead, SourceStatus
 from pullbox.services.metadata_assembly import assemble_metadata
+from pullbox.services.metadata_baselines import (
+    MetadataBaselineWrite,
+    load_metadata_baseline,
+    save_metadata_baselines,
+)
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
 from pullbox.services.metadata_identity_attachment import attach_verified_identities
 from pullbox.services.metadata_identity_review import record_identity_observation
@@ -474,9 +484,20 @@ async def _adopt(
                 await record_identity_observation(
                     session, _request(bundle, metadata, crosswalk, issue.id, observation=True)
                 )
+        await save_metadata_baselines(
+            session,
+            [
+                MetadataBaselineWrite(issue.id, issue_snapshot)
+                for (issue, _), issue_snapshot in zip(
+                    members, issue_snapshots[offset : offset + 200], strict=True
+                )
+            ],
+        )
     await session.flush()
     if profile.status is None:
         await MetadataService.infer_series_status(session, series)
+    if snapshot is not None:
+        snapshot = await persist_adoption_series_baseline(session, series, snapshot)
     logger.info(
         "metadata_series_added",
         series_id=series.id,
@@ -484,3 +505,68 @@ async def _adopt(
         issue_count=len(bundle.issues),
     )
     return SeriesAdoptionResult(series, True, snapshot, issue_snapshots)
+
+
+async def persist_adoption_series_baseline(
+    session: AsyncSession, series: Series, snapshot: MetadataSnapshot
+) -> MetadataSnapshot:
+    """Record Add's inferred defaults, not invented provider data or user edits."""
+    values = snapshot.values.model_dump()
+    origins = {origin.field: origin for origin in snapshot.origins}
+    now = datetime.now(UTC)
+    derived = {
+        "sort_title": FieldOrigin(
+            field="sort_title",
+            domain=field_domain(MetadataEntityKind.SERIES, "sort_title"),
+            observed_at=now,
+            derivation="normalization",
+        ),
+        "series_type": FieldOrigin(
+            field="series_type",
+            domain=field_domain(MetadataEntityKind.SERIES, "series_type"),
+            observed_at=now,
+            derivation="classification",
+        ),
+        "status": FieldOrigin(
+            field="status",
+            domain=field_domain(MetadataEntityKind.SERIES, "status"),
+            observed_at=now,
+            derivation="lifecycle",
+        ),
+        "year_end": FieldOrigin(
+            field="year_end",
+            domain=field_domain(MetadataEntityKind.SERIES, "year_end"),
+            observed_at=now,
+            derivation="lifecycle",
+        ),
+        "issue_count": FieldOrigin(
+            field="issue_count",
+            domain=field_domain(MetadataEntityKind.SERIES, "issue_count"),
+            observed_at=now,
+            derivation="catalog",
+        ),
+    }
+    actual = {
+        "sort_title": series.sort_title,
+        "series_type": series.series_type.value,
+        "status": series.status.value,
+        "year_end": series.year_end,
+        "issue_count": series.issue_count,
+    }
+    for field, value in actual.items():
+        if values[field] != value:
+            values[field] = value
+            origins[field] = derived[field]
+    snapshot = MetadataSnapshot.model_validate(
+        {
+            **snapshot.model_dump(),
+            "values": MetadataValues.model_validate(values),
+            "origins": tuple(origins.values()),
+        }
+    )
+    saved = await load_metadata_baseline(session, MetadataEntityKind.SERIES, series.id)
+    if saved is None or saved.snapshot != snapshot:
+        await save_metadata_baselines(
+            session, [MetadataBaselineWrite(series.id, snapshot, saved.revision if saved else 0)]
+        )
+    return snapshot

@@ -167,13 +167,16 @@ def assemble_metadata(
                 value = getattr(incoming, field)
                 if _missing(value):
                     continue
-                managed = prior is not None and prior.source is not None
                 may_replace = (
                     replace_managed
-                    and managed
                     and prior is not None
-                    and prior.source is not None
-                    and rank(source, domain) <= rank(prior.source, domain)
+                    and (
+                        prior.derivation is not None
+                        or (
+                            prior.source is not None
+                            and rank(source, domain) <= rank(prior.source, domain)
+                        )
+                    )
                 )
                 if _missing(existing) or may_replace:
                     values[field] = value

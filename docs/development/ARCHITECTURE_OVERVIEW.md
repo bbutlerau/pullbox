@@ -366,9 +366,21 @@ identities, revalidates cached responses, cascades by requested domain, stops
 unnecessary lower-priority reads and retains typed partial outcomes. It does not
 write metadata, attach identities or change catalog membership. The caller must
 revalidate ownership and all captured source-policy revisions before applying it.
-Durable snapshot storage, ordinary refresh command/task wiring, the remaining
-credits/membership fields and coordinated XML/sidecar writers are still pending;
-an in-memory assembly result is not evidence that those workflows are complete.
+`services/metadata_baselines.py` persists versioned canonical snapshots in separate
+series, issue and Story Arc tables with real cascading foreign keys. Writes are
+bounded batches, use caller-owned transactions, recheck verified ownership and
+require the expected baseline revision. They acquire the same parent-first locks
+as identity writers; the baseline never establishes identity ownership itself.
+Corrupt or incompatible snapshots fail explicitly rather than silently removing
+override protection. No legacy backfill invents provenance for existing values.
+
+Source-aware Add Series saves series/issue baselines in its catalog transaction,
+including final lifecycle/format inference. Derived values have a distinct origin,
+not provider attribution or user-override markers. Explicit refresh may replace
+those values; background enrichment still fills gaps only. Existing-owner Add
+does not replace its baseline or local edits. Ordinary refresh command/task wiring,
+the remaining credits/membership fields and coordinated XML/sidecar writers are
+still pending; durable baselines alone do not complete those workflows.
 
 The existing import/cache and ordinary series-refresh consumers have not yet
 migrated to this registry. Metron has token settings, bounded transport and

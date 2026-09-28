@@ -49,6 +49,7 @@ class FieldOrigin(BaseModel):
     source_updated_at: AwareDatetime | None = None
     observed_at: AwareDatetime
     user_override: bool = False
+    derivation: Literal["classification", "lifecycle", "catalog", "normalization"] | None = None
 
 
 class MetadataSnapshot(BaseModel):
@@ -78,6 +79,10 @@ class MetadataSnapshot(BaseModel):
                 or origin.field in fields
                 or origin.domain is not field_domain(self.entity_kind, origin.field)
                 or (origin.user_override and origin.source is not None)
+                or (
+                    origin.derivation is not None
+                    and (origin.source is not None or origin.user_override)
+                )
                 or (
                     origin.source is not None
                     and not any(

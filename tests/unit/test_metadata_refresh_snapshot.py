@@ -87,6 +87,29 @@ async def test_failure_keeps_typed_outcome_and_falls_back_without_changing_user_
     assert result.snapshot.values.title == "Saved"
 
 
+async def test_explicit_refresh_requests_replacements_for_inferred_metadata():
+    from pullbox.schemas.metadata_snapshot import FieldOrigin, MetadataSnapshot, MetadataValues
+
+    registry, adapters = setup()
+    before = MetadataSnapshot(
+        entity_kind=Kind.SERIES,
+        identities=(identity(CV), identity(METRON)),
+        values=MetadataValues(status="ended"),
+        origins=(
+            FieldOrigin(
+                field="status", domain=Domain.CORE, observed_at=NOW, derivation="lifecycle"
+            ),
+        ),
+    )
+    adapters[CV].result.data.status = "continuing"
+    result = await fetch(
+        registry, fields=frozenset({"status"}), previous=before, replace_managed=True
+    )
+    assert result.snapshot.values.status == "continuing"
+    assert adapters[CV].calls == [("series", "42", None)]
+    assert not adapters[METRON].calls
+
+
 async def test_background_already_populated_or_protected_fields_need_no_network():
     registry, adapters = setup()
     before = assemble([row(CV, title="Saved")])

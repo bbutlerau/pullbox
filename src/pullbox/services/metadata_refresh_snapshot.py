@@ -95,7 +95,11 @@ async def fetch_metadata_snapshot(
         origin = initial.get(field)
         if origin is not None and origin.user_override:
             continue
-        if missing or (replace_managed and origin is not None and origin.source is not None):
+        if missing or (
+            replace_managed
+            and origin is not None
+            and (origin.source is not None or origin.derivation is not None)
+        ):
             needed.add(field)
     capability = {
         MetadataEntityKind.SERIES: SourceCapability.SERIES_DETAILS,
