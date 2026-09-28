@@ -16,6 +16,7 @@ import html
 import re
 import time
 import weakref
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -316,6 +317,24 @@ def _issue_metadata_from_item(
         creators=_extract_creators(item.get("person_credits")),
         story_arcs=_extract_story_arcs(item.get("story_arc_credits")),
         issue_number_text=issue_number_text,
+    )
+
+
+def _strict_issue_metadata(item: dict[str, Any]) -> IssueMetadata:
+    if not isinstance(item, dict):
+        raise ValueError("Invalid ComicVine issue detail")
+    volume, number = item.get("volume"), item.get("issue_number")
+    if (
+        re.fullmatch(r"[1-9][0-9]{0,18}", str(item.get("id"))) is None
+        or not isinstance(volume, dict)
+        or re.fullmatch(r"[1-9][0-9]{0,18}", str(volume.get("id"))) is None
+        or not isinstance(number, str)
+        or not number.strip()
+        or len(number) > 320
+    ):
+        raise ValueError("Invalid ComicVine issue identity")
+    return replace(
+        _issue_metadata_from_item(item, fallback_provider_id=""), issue_number_text=number.strip()
     )
 
 
@@ -809,7 +828,9 @@ class ComicVineProvider:
         )
         return result_tuple, effective_total
 
-    async def get_series(self, provider_id: str) -> SeriesMetadata:
+    async def get_series(
+        self, provider_id: str, *, strict_response: bool = False
+    ) -> SeriesMetadata:
         """Get full series (volume) metadata by ComicVine volume ID."""
         if re.fullmatch(r"[1-9][0-9]{0,18}", provider_id) is None:
             raise ValueError("ComicVine provider IDs must be positive integers")
@@ -826,6 +847,14 @@ class ComicVineProvider:
 
         data = await self._request(f"/volume/{_VOLUME_PREFIX}-{resource_id}/", params)
         item: dict[str, Any] = data.get("results", {})
+
+        if strict_response and (
+            not isinstance(item, dict)
+            or str(item.get("id")) != provider_id
+            or not isinstance(item.get("name"), str)
+            or not item["name"].strip()
+        ):
+            raise ValueError("Invalid ComicVine series detail")
 
         return _series_metadata_from_item(item, fallback_provider_id=provider_id)
 
@@ -856,7 +885,7 @@ class ComicVineProvider:
             provider_id: found[provider_id] for provider_id in normalized if provider_id in found
         }
 
-    async def get_issue(self, provider_id: str) -> IssueMetadata:
+    async def get_issue(self, provider_id: str, *, strict_response: bool = False) -> IssueMetadata:
         """Get full issue metadata by ComicVine issue ID."""
         if re.fullmatch(r"[1-9][0-9]{0,18}", provider_id) is None:
             raise ValueError("ComicVine provider IDs must be positive integers")
@@ -875,7 +904,48 @@ class ComicVineProvider:
         data = await self._request(f"/issue/{_ISSUE_PREFIX}-{resource_id}/", params)
         item: dict[str, Any] = data.get("results", {})
 
+        if strict_response:
+            metadata = _strict_issue_metadata(item)
+            if metadata.provider_id != provider_id:
+                raise ValueError("Different ComicVine issue identity")
+            return metadata
         return _issue_metadata_from_item(item, fallback_provider_id=provider_id)
+
+    async def get_issues_page(
+        self, series_provider_id: str, *, page: int = 1
+    ) -> tuple[list[IssueMetadata], int]:
+        """Read one complete page with explicit parent identity, without auto-pagination."""
+        if re.fullmatch(r"[1-9][0-9]{0,18}", series_provider_id) is None:
+            raise ValueError("ComicVine provider IDs must be positive integers")
+        if type(page) is not int or not 1 <= page <= 10000:
+            raise ValueError("Invalid ComicVine page")
+        offset = (page - 1) * 100
+        data = await self._request(
+            "/issues/",
+            {
+                "filter": f"volume:{series_provider_id}",
+                "field_list": (
+                    "id,volume,issue_number,name,cover_date,store_date,image,site_detail_url"
+                ),
+                "sort": "id:asc",
+                "limit": 100,
+                "offset": offset,
+            },
+        )
+        total, rows = data.get("number_of_total_results"), data.get("results")
+        if (
+            type(total) is not int
+            or not 0 <= total <= 1_000_000_000
+            or not isinstance(rows, list)
+            or len(rows) != min(100, max(0, total - offset))
+        ):
+            raise ValueError("Incomplete ComicVine issue page")
+        issues = [_strict_issue_metadata(row) for row in rows]
+        if any(issue.series_provider_id != series_provider_id for issue in issues) or len(
+            {issue.provider_id for issue in issues}
+        ) != len(issues):
+            raise ValueError("Invalid ComicVine issue membership")
+        return issues, total
 
     async def get_issue_batch(self, provider_ids: Sequence[str]) -> dict[str, IssueMetadata]:
         """Fetch full issue metadata in bounded ID-filter batches."""

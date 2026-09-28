@@ -8,9 +8,13 @@ from urllib.parse import urlsplit
 
 from pullbox.config import get_settings
 from pullbox.core.metadata_identity import ExternalIdentityRef, MetadataEntityKind, MetadataSource
+from pullbox.providers.metadata import comicvine_normalization as normalize
 from pullbox.providers.metadata.comicvine import ComicVineError, ComicVineProvider
 from pullbox.providers.metadata.metron import MetronSource
 from pullbox.schemas.metadata_sources import (
+    MetadataFetch,
+    MetadataPage,
+    ProviderIssueRead,
     ProviderSeriesRead,
     SeriesDiscoveryQuery,
     SourceCapability,
@@ -20,6 +24,7 @@ from pullbox.services.catalog.contract import CatalogError
 from pullbox.services.catalog.reader import get_catalog_reader
 from pullbox.services.catalog.storage import disk_work
 from pullbox.services.metadata_discovery import MetadataSourceError, SourcePage, SourceRegistration
+from pullbox.services.metadata_source_reads import page_number, source_id
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -135,6 +140,29 @@ def _api_error(exc: ComicVineError) -> MetadataSourceError:
     return MetadataSourceError(status, exc.retry_after_seconds)
 
 
+def _cv_id(value: str, kind: MetadataEntityKind) -> str:
+    identifier = source_id(MetadataSource.COMICVINE_API, kind, value)
+    if int(identifier) >= 2**63:
+        raise ValueError("ComicVine identity exceeds the supported range")
+    return identifier
+
+
+async def _fetch[T](operation: Callable[[], Awaitable[T | None]]) -> MetadataFetch[T]:
+    try:
+        data = await operation()
+        return MetadataFetch(
+            status=SourceStatus.OK if data is not None else SourceStatus.NOT_FOUND, data=data
+        )
+    except ComicVineError as exc:
+        if exc.status_code == 101:
+            return MetadataFetch(status=SourceStatus.NOT_FOUND)
+        raise _api_error(exc) from None
+    except (CatalogError, OSError):
+        raise MetadataSourceError(SourceStatus.UNAVAILABLE) from None
+    except (ValueError, TypeError, AttributeError, KeyError):
+        raise MetadataSourceError(SourceStatus.INCOMPATIBLE_RESPONSE) from None
+
+
 class ComicVineApiSource:
     def __init__(self, provider: ComicVineProvider) -> None:
         self.provider = provider
@@ -171,6 +199,42 @@ class ComicVineApiSource:
 
     async def close(self) -> None:
         await self.provider.close()
+
+    async def series(
+        self, external_id: str, *, validator: str | None = None
+    ) -> MetadataFetch[ProviderSeriesRead]:
+        identifier = _cv_id(external_id, MetadataEntityKind.SERIES)
+
+        async def read() -> ProviderSeriesRead:
+            row = await self.provider.get_series(identifier, strict_response=True)
+            return normalize.series(MetadataSource.COMICVINE_API, row, identifier)
+
+        return await _fetch(read)
+
+    async def issue(
+        self, external_id: str, *, validator: str | None = None
+    ) -> MetadataFetch[ProviderIssueRead]:
+        identifier = _cv_id(external_id, MetadataEntityKind.ISSUE)
+
+        async def read() -> ProviderIssueRead:
+            return normalize.issue(
+                MetadataSource.COMICVINE_API,
+                await self.provider.get_issue(identifier, strict_response=True),
+            )
+
+        return await _fetch(read)
+
+    async def issues(
+        self, external_id: str, *, page: int = 1, validator: str | None = None
+    ) -> MetadataFetch[MetadataPage[ProviderIssueRead]]:
+        identifier = _cv_id(external_id, MetadataEntityKind.SERIES)
+        page_number(page)
+
+        async def read() -> MetadataPage[ProviderIssueRead]:
+            rows, total = await self.provider.get_issues_page(identifier, page=page)
+            return normalize.issue_page(MetadataSource.COMICVINE_API, rows, total, page)
+
+        return await _fetch(read)
 
 
 class ComicVineLocalSource:
@@ -215,6 +279,45 @@ class ComicVineLocalSource:
     async def close(self) -> None:
         return None
 
+    async def series(
+        self, external_id: str, *, validator: str | None = None
+    ) -> MetadataFetch[ProviderSeriesRead]:
+        identifier = _cv_id(external_id, MetadataEntityKind.SERIES)
+
+        async def read() -> ProviderSeriesRead | None:
+            await self._available()
+            row = await self.reader.series(int(identifier))
+            return (
+                normalize.series(MetadataSource.COMICVINE_LOCAL, row, identifier) if row else None
+            )
+
+        return await _fetch(lambda: _catalog_read(read))
+
+    async def issue(
+        self, external_id: str, *, validator: str | None = None
+    ) -> MetadataFetch[ProviderIssueRead]:
+        identifier = _cv_id(external_id, MetadataEntityKind.ISSUE)
+
+        async def read() -> ProviderIssueRead | None:
+            await self._available()
+            row = await self.reader.issue(int(identifier), preserve_number_text=True)
+            return normalize.issue(MetadataSource.COMICVINE_LOCAL, row) if row else None
+
+        return await _fetch(lambda: _catalog_read(read))
+
+    async def issues(
+        self, external_id: str, *, page: int = 1, validator: str | None = None
+    ) -> MetadataFetch[MetadataPage[ProviderIssueRead]]:
+        identifier = _cv_id(external_id, MetadataEntityKind.SERIES)
+        page_number(page)
+
+        async def read() -> MetadataPage[ProviderIssueRead]:
+            await self._available()
+            rows, total = await self.reader.issue_page(int(identifier), page=page)
+            return normalize.issue_page(MetadataSource.COMICVINE_LOCAL, rows, total, page)
+
+        return await _fetch(lambda: _catalog_read(read))
+
 
 def _api(runtime: SourceRuntime) -> ComicVineApiSource:
     if runtime.credential is None or not runtime.credential.get_secret_value():
@@ -227,12 +330,16 @@ def _api(runtime: SourceRuntime) -> ComicVineApiSource:
 
 
 def comicvine_sources() -> dict[MetadataSource, SourceRegistration]:
+    capabilities = {
+        SourceCapability.SERIES_SEARCH,
+        SourceCapability.SERIES_DETAILS,
+        SourceCapability.ISSUE_LIST,
+        SourceCapability.ISSUE_DETAILS,
+    }
     return {
-        MetadataSource.COMICVINE_API: SourceRegistration(
-            frozenset({SourceCapability.SERIES_SEARCH}), _api
-        ),
+        MetadataSource.COMICVINE_API: SourceRegistration(frozenset(capabilities), _api),
         MetadataSource.COMICVINE_LOCAL: SourceRegistration(
-            frozenset({SourceCapability.SERIES_SEARCH, SourceCapability.OFFLINE}),
+            frozenset(capabilities | {SourceCapability.OFFLINE}),
             lambda runtime: ComicVineLocalSource(get_catalog_reader()),
         ),
     }

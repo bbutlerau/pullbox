@@ -6,7 +6,12 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
-from pullbox.core.metadata_identity import ExternalIdentityRef, IdentityNamespace, MetadataSource
+from pullbox.core.metadata_identity import (
+    ExternalIdentityRef,
+    IdentityNamespace,
+    MetadataEntityKind,
+    MetadataSource,
+)
 
 
 class MetadataDomain(enum.StrEnum):
@@ -191,6 +196,38 @@ class MetadataFetch[T](BaseModel):
     status: SourceStatus
     data: T | None = None
     validator: str | None = None
+    retry_after_seconds: int | None = None
+
+
+class SeriesPreviewQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source: MetadataSource
+    external_id: str = Field(min_length=1, max_length=255, strict=True)
+
+    @model_validator(mode="after")
+    def canonical_identity(self) -> Self:
+        self.external_id = ExternalIdentityRef(
+            self.source.identity_namespace, MetadataEntityKind.SERIES, self.external_id
+        ).external_id
+        if (
+            self.source.identity_namespace is IdentityNamespace.COMICVINE
+            and int(self.external_id) >= 2**63
+        ):
+            raise ValueError("ComicVine identity exceeds the supported range")
+        return self
+
+
+class SeriesIssuePageQuery(SeriesPreviewQuery):
+    page: int = Field(default=1, ge=1, le=10000, strict=True)
+    source_revision: int = Field(ge=0, lt=2**63, strict=True)
+
+
+class SeriesPreviewRead(BaseModel):
+    source: MetadataSource
+    external_id: str
+    source_revision: int
+    series: MetadataFetch[ProviderSeriesRead]
+    issues: MetadataFetch[MetadataPage[ProviderIssueRead]]
 
 
 class SourceOutcome(BaseModel):

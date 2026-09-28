@@ -3,6 +3,7 @@
 import os
 import sys
 
+import pytest
 from sqlalchemy import select
 
 from pullbox.models.metadata_source import MetadataSourceConfig
@@ -282,3 +283,183 @@ async def test_metron_configuration_health_and_discovery_use_real_adapter(
         "metron_api": "authentication_failed",
     }
     assert token not in saved.text + health.text + result.text + partial.text
+
+
+async def test_local_source_preview_has_bound_identity_and_paged_issues(
+    authenticated_client, monkeypatch, tmp_path
+):
+    from pullbox.providers.metadata import sources
+
+    reader = installed_reader(tmp_path)
+    monkeypatch.setattr(sources, "get_catalog_reader", lambda: reader)
+    response = await authenticated_client.post(
+        "/api/v1/metadata/series/preview",
+        json={"source": "comicvine_local", "external_id": "00010"},
+        headers=csrf(authenticated_client),
+    )
+    assert response.status_code == 200
+    preview = response.json()
+    assert preview["external_id"] == "10" and preview["source"] == "comicvine_local"
+    assert preview["series"]["data"]["title"] == "Batman"
+    assert preview["issues"]["data"]["results"][0]["issue_number_text"] == "½"
+    assert preview["issues"]["data"]["total"] == 1
+    response = await authenticated_client.post(
+        "/api/v1/metadata/series/issues",
+        json={
+            "source": "comicvine_local",
+            "external_id": "10",
+            "page": 2,
+            "source_revision": preview["source_revision"],
+        },
+        headers=csrf(authenticated_client),
+    )
+    assert response.status_code == 200
+    assert response.json()["data"]["results"] == []
+    assert response.json()["data"]["total"] == 1
+
+
+@pytest.mark.parametrize("path", ["preview", "issues"])
+async def test_source_reads_require_auth_csrf_and_valid_identifiers(
+    authenticated_client, unauthenticated_client, path
+):
+    url = f"/api/v1/metadata/series/{path}"
+    body = {"source": "metron_api", "external_id": "42"}
+    if path == "issues":
+        body.update(page=1, source_revision=0)
+    assert (await unauthenticated_client.post(url, json=body)).status_code in {401, 403}
+    assert (await authenticated_client.post(url, json=body)).status_code == 403
+    for bad in ("../42", "0", 42, "42?apikey=x"):
+        result = await authenticated_client.post(
+            url, json={**body, "external_id": bad}, headers=csrf(authenticated_client)
+        )
+        assert result.status_code == 422
+
+
+async def test_preview_releases_transaction_and_detects_midflight_configuration_change(
+    authenticated_client, monkeypatch, sec_db
+):
+    from pullbox.api.v1 import metadata_sources as routes
+    from pullbox.core.metadata_identity import MetadataSource
+    from pullbox.schemas.metadata_sources import MetadataFetch, SourcePolicyWrite, SourceStatus
+    from pullbox.services.metadata_sources import save_source_policy
+
+    original = routes.load_source_runtime
+    held = []
+
+    async def load(session, **kwargs):
+        held.append(session)
+        return await original(session, **kwargs)
+
+    async def series(self, source, identifier, **kwargs):
+        assert held and not held[0].in_transaction()
+        async with sec_db.begin() as session:
+            await save_source_policy(
+                session, source, SourcePolicyWrite(revision=0, enabled=False, priority=1)
+            )
+        return MetadataFetch(status=SourceStatus.NOT_FOUND)
+
+    monkeypatch.setattr(routes, "load_source_runtime", load)
+    monkeypatch.setattr(routes.MetadataSourceRegistry, "series", series)
+    result = await authenticated_client.post(
+        "/api/v1/metadata/series/preview",
+        json={"source": MetadataSource.COMICVINE_LOCAL.value, "external_id": "42"},
+        headers=csrf(authenticated_client),
+    )
+    assert result.status_code == 409
+
+
+async def test_stale_issue_page_revision_does_not_make_provider_requests(
+    authenticated_client, monkeypatch
+):
+    from pullbox.api.v1 import metadata_sources as routes
+
+    async def unexpected(*args, **kwargs):
+        pytest.fail("Stale pages must not call a provider")
+
+    monkeypatch.setattr(routes.MetadataSourceRegistry, "issues", unexpected)
+    result = await authenticated_client.post(
+        "/api/v1/metadata/series/issues",
+        json={"source": "comicvine_local", "external_id": "42", "source_revision": 99},
+        headers=csrf(authenticated_client),
+    )
+    assert result.status_code == 409
+
+
+async def test_preview_preserves_series_when_issue_fetch_fails(
+    authenticated_client, monkeypatch, tmp_path
+):
+    from pullbox.api.v1 import metadata_sources as routes
+    from pullbox.providers.metadata import sources
+    from pullbox.schemas.metadata_sources import MetadataFetch, SourceStatus
+
+    reader = installed_reader(tmp_path)
+    monkeypatch.setattr(sources, "get_catalog_reader", lambda: reader)
+
+    async def fail(*args, **kwargs):
+        return MetadataFetch(status=SourceStatus.RATE_LIMITED, retry_after_seconds=60)
+
+    monkeypatch.setattr(routes.MetadataSourceRegistry, "issues", fail)
+    result = await authenticated_client.post(
+        "/api/v1/metadata/series/preview",
+        json={"source": "comicvine_local", "external_id": "10"},
+        headers=csrf(authenticated_client),
+    )
+    assert result.status_code == 200
+    assert result.json()["series"]["data"]["title"] == "Batman"
+    assert result.json()["issues"]["status"] == "rate_limited"
+    assert result.json()["issues"]["retry_after_seconds"] == 60
+
+
+async def test_metron_preview_works_without_comicvine_identity_or_library_writes(
+    authenticated_client, monkeypatch, sec_db
+):
+    import httpx
+    from sqlalchemy import func
+
+    from pullbox.core.provider_cooldown import ProviderCooldown
+    from pullbox.models.series import Series
+    from pullbox.providers.metadata import sources
+    from tests.unit.test_metron_source import envelope, issue_row, series_row
+
+    calls = []
+
+    def handle(request):
+        calls.append(request.url.path)
+        if request.url.path.endswith("/issue_list/"):
+            return httpx.Response(200, json=envelope([issue_row()]))
+        payload = series_row(8)
+        payload.update(name="Metron-only series", cv_id=None, gcd_id=None, issue_count=1)
+        return httpx.Response(200, json=payload)
+
+    adapter = sources.MetronSource
+    monkeypatch.setattr(
+        sources,
+        "MetronSource",
+        lambda credential: adapter(
+            credential,
+            transport=httpx.MockTransport(handle),
+            cooldown=ProviderCooldown(),
+            minimum_interval=0,
+        ),
+    )
+    saved = await authenticated_client.put(
+        "/api/v1/metadata/sources/metron_api",
+        json=policy(credential="synthetic-preview-token"),
+        headers=csrf(authenticated_client),
+    )
+    assert saved.status_code == 200
+    async with sec_db() as session:
+        count = await session.scalar(select(func.count()).select_from(Series))
+    result = await authenticated_client.post(
+        "/api/v1/metadata/series/preview",
+        json={"source": "metron_api", "external_id": "8"},
+        headers=csrf(authenticated_client),
+    )
+    assert result.status_code == 200
+    assert result.json()["series"]["data"]["cross_identities"] == []
+    assert result.json()["series"]["data"]["title"] == "Metron-only series"
+    assert result.json()["issues"]["data"]["results"][0]["issue_number_text"] == "50-x"
+    assert calls == ["/api/series/8/", "/api/series/8/issue_list/"]
+    assert "synthetic-preview-token" not in result.text
+    async with sec_db() as session:
+        assert await session.scalar(select(func.count()).select_from(Series)) == count

@@ -43,6 +43,11 @@ class CatalogIssueSummary(IssueSummary):
     source_cutoff_at: datetime | None = None
 
 
+@dataclass(frozen=True)
+class CatalogIssueMetadata(IssueMetadata):
+    source_cutoff_at: datetime | None = None
+
+
 class CatalogReader:
     """Pin a file per query; verify a generation once before serving its rows."""
 
@@ -160,7 +165,9 @@ class CatalogReader:
             cutoff,
         )
 
-    async def issue(self, issue_id: int) -> IssueMetadata | None:
+    async def issue(
+        self, issue_id: int, *, preserve_number_text: bool = False
+    ) -> IssueMetadata | None:
         """Return only the basic identity fields used during import file matching."""
         rows, cutoff = await disk_work(
             self._query, f"SELECT {ISSUE_COLUMNS} FROM issues WHERE id=?", (issue_id,)
@@ -168,8 +175,13 @@ class CatalogReader:
         if not rows:
             return None
         row = rows[0]
+        return self._issue_metadata(row, cutoff, preserve_number_text=preserve_number_text)
+
+    def _issue_metadata(
+        self, row: Any, cutoff: datetime, *, preserve_number_text: bool
+    ) -> CatalogIssueMetadata:
         summary = self._summary(row, cutoff)
-        return IssueMetadata(
+        return CatalogIssueMetadata(
             summary.provider_id,
             str(row[1]),
             summary.issue_number,
@@ -180,7 +192,31 @@ class CatalogReader:
             summary.cover_url,
             None,
             f"https://comicvine.gamespot.com/issue/4000-{row[0]}/",
-            issue_number_text=summary.issue_number_text,
+            issue_number_text=(
+                str(row[2] or row[3] or "") if preserve_number_text else summary.issue_number_text
+            ),
+            source_cutoff_at=cutoff,
+        )
+
+    async def issue_page(self, series_id: int, *, page: int = 1) -> tuple[list[IssueMetadata], int]:
+        """Count and read a bounded page in one query on one immutable generation."""
+        if type(page) is not int or not 1 <= page <= 10000:
+            raise ValueError("Invalid catalog page")
+        rows, cutoff = await disk_work(
+            self._query,
+            f"WITH page AS (SELECT {ISSUE_COLUMNS} FROM issues WHERE series_id=? "
+            "ORDER BY id LIMIT 100 OFFSET ?), "
+            "tally AS (SELECT COUNT(*) AS total FROM issues WHERE series_id=?) "
+            "SELECT page.*,tally.total FROM tally LEFT JOIN page ON 1=1 ORDER BY page.id",
+            (series_id, (page - 1) * 100, series_id),
+        )
+        return (
+            [
+                self._issue_metadata(row, cutoff, preserve_number_text=True)
+                for row in rows
+                if row[0] is not None
+            ],
+            int(rows[0][-1]),
         )
 
 

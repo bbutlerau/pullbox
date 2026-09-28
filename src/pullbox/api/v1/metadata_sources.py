@@ -8,8 +8,14 @@ from fastapi import APIRouter, HTTPException
 from pullbox.api.deps import AuthenticatedUser, DbSession, InteractiveOperatorUser, Settings
 from pullbox.core.metadata_identity import MetadataSource
 from pullbox.schemas.metadata_sources import (
+    MetadataFetch,
+    MetadataPage,
+    ProviderIssueRead,
     SeriesDiscoveryQuery,
     SeriesDiscoveryRead,
+    SeriesIssuePageQuery,
+    SeriesPreviewQuery,
+    SeriesPreviewRead,
     SourceDescriptor,
     SourcePolicyRead,
     SourcePolicyWrite,
@@ -17,6 +23,7 @@ from pullbox.schemas.metadata_sources import (
     SourceTestRead,
 )
 from pullbox.services.metadata_discovery import MetadataSourceRegistry, describe_source_policies
+from pullbox.services.metadata_series_preview import preview_source_series
 from pullbox.services.metadata_sources import (
     SourceConfigurationConflictError,
     load_source_runtime,
@@ -28,6 +35,51 @@ from pullbox.services.metadata_sources import (
 
 router = APIRouter(prefix="/metadata", tags=["metadata"])
 logger = structlog.get_logger(__name__)
+
+
+async def _require_source_revision(
+    session: DbSession, source: MetadataSource, revision: int
+) -> None:
+    policies = await read_source_policies(session)
+    if next(policy.revision for policy in policies if policy.source is source) != revision:
+        raise HTTPException(409, "Metadata source settings changed. Preview the series again.")
+
+
+@router.post("/series/preview", response_model=SeriesPreviewRead)
+async def preview_series(
+    body: SeriesPreviewQuery, session: DbSession, _user: AuthenticatedUser, settings: Settings
+) -> SeriesPreviewRead:
+    runtime = await load_source_runtime(
+        session, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled
+    )
+    await session.rollback()
+    result = await preview_source_series(
+        MetadataSourceRegistry(runtime, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled),
+        body.source,
+        body.external_id,
+    )
+    await _require_source_revision(session, body.source, result.source_revision)
+    return result
+
+
+@router.post("/series/issues", response_model=MetadataFetch[MetadataPage[ProviderIssueRead]])
+async def series_issues(
+    body: SeriesIssuePageQuery, session: DbSession, _user: AuthenticatedUser, settings: Settings
+) -> MetadataFetch[MetadataPage[ProviderIssueRead]]:
+    runtime = await load_source_runtime(
+        session, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled
+    )
+    if (
+        next(item.policy.revision for item in runtime if item.policy.source is body.source)
+        != body.source_revision
+    ):
+        raise HTTPException(409, "Metadata source settings changed. Preview the series again.")
+    await session.rollback()
+    result = await MetadataSourceRegistry(
+        runtime, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled
+    ).issues(body.source, body.external_id, page=body.page)
+    await _require_source_revision(session, body.source, body.source_revision)
+    return result
 
 
 @router.get("/sources", response_model=list[SourceDescriptor])

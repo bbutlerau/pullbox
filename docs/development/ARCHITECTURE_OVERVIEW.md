@@ -317,10 +317,20 @@ after each operation, and one provider failure does not hide other results.
 Read-only local catalog work retains at most two owned in-flight operations per
 event loop. Cancelled requests can return without abandoning disk cleanup or
 creating an unbounded background queue.
-The existing import/cache and Add Series/Story Arc consumers are not yet migrated
-to this registry. Metron and GCD execution remain unimplemented; GCD API v2 is
-also disabled by the release feature flag. Capability lists describe implemented
-adapter operations, not planned features.
+The registry also exposes exact series/issue details and bounded issue pages for
+ComicVine local/API and Metron. `/api/v1/metadata/series/preview` returns a profile
+and the first 100-row issue page with separate outcomes. Subsequent
+`/api/v1/metadata/series/issues` requests carry the observed source-policy revision;
+configuration changes reject stale results. Both POST endpoints require
+authentication and the existing session CSRF protection. Source namespace,
+entity identity, issue parent, page completeness and continuation are checked
+before returning data. Preview is read-only and is not an adoption proof.
+
+The existing import/cache and Add Series/Story Arc UI consumers are not yet
+migrated to this registry. Metron has token settings, bounded transport and
+series/issue/arc adapter operations; GCD execution remains unimplemented, and
+GCD API v2 is additionally disabled by the release feature flag. Capability
+lists describe implemented adapter operations, not planned features.
 
 **Required standard**
 

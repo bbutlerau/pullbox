@@ -11,6 +11,9 @@ import structlog
 from pullbox.core.metadata_identity import MetadataSource
 from pullbox.schemas.metadata_sources import (
     MetadataDomain,
+    MetadataFetch,
+    MetadataPage,
+    ProviderIssueRead,
     ProviderSeriesRead,
     SeriesDiscoveryQuery,
     SeriesDiscoveryRead,
@@ -114,8 +117,15 @@ class MetadataSourceRegistry:
         self.per_source_timeout = per_source_timeout
         self.total_timeout = total_timeout
         self.concurrency = concurrency
+        self.read_slots = asyncio.Semaphore(concurrency)
 
-    def _unavailable(self, source: MetadataSource, *, search: bool) -> SourceStatus | None:
+    def _unavailable(
+        self,
+        source: MetadataSource,
+        *,
+        search: bool = False,
+        capability: SourceCapability | None = None,
+    ) -> SourceStatus | None:
         runtime = self.runtime.get(source)
         if source is MetadataSource.GCD_API_V2 and not self.gcd_api_enabled:
             return SourceStatus.FEATURE_DISABLED
@@ -129,6 +139,8 @@ class MetadataSourceRegistry:
         if registration is None:
             return SourceStatus.NOT_IMPLEMENTED
         if search and SourceCapability.SERIES_SEARCH not in registration.capabilities:
+            return SourceStatus.UNSUPPORTED
+        if capability is not None and capability not in registration.capabilities:
             return SourceStatus.UNSUPPORTED
         return None
 
@@ -266,3 +278,29 @@ class MetadataSourceRegistry:
             asyncio.get_running_loop().time() + self.total_timeout,
         )
         return outcome
+
+    async def series(
+        self, source: MetadataSource, external_id: str, *, validator: str | None = None
+    ) -> MetadataFetch[ProviderSeriesRead]:
+        from pullbox.services.metadata_source_reads import read_series
+
+        return await read_series(self, source, external_id, validator=validator)
+
+    async def issue(
+        self, source: MetadataSource, external_id: str, *, validator: str | None = None
+    ) -> MetadataFetch[ProviderIssueRead]:
+        from pullbox.services.metadata_source_reads import read_issue
+
+        return await read_issue(self, source, external_id, validator=validator)
+
+    async def issues(
+        self,
+        source: MetadataSource,
+        external_id: str,
+        *,
+        page: int = 1,
+        validator: str | None = None,
+    ) -> MetadataFetch[MetadataPage[ProviderIssueRead]]:
+        from pullbox.services.metadata_source_reads import read_issues
+
+        return await read_issues(self, source, external_id, page=page, validator=validator)
