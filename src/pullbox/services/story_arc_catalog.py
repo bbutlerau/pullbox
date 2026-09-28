@@ -98,7 +98,7 @@ class StoryArcCatalogService:
 
     def __init__(
         self,
-        provider: _CatalogProvider,
+        provider: _CatalogProvider | None = None,
         *,
         source: MetadataSource = MetadataSource.COMICVINE_API,
         source_revision: int | None = None,
@@ -111,6 +111,8 @@ class StoryArcCatalogService:
     async def search(
         self, query: str, *, limit: int = 20, offset: int = 0
     ) -> tuple[list[StoryArcSearchResult], int]:
+        if self.provider is None:
+            raise StoryArcCatalogError("provider_required", "Use the source registry to search")
         return await self.provider.search_story_arcs_page(query, limit=limit, offset=offset)
 
     async def find_existing(
@@ -123,6 +125,8 @@ class StoryArcCatalogService:
     async def preview(
         self, provider_id: str, *, known_series_provider_ids: Collection[str] = ()
     ) -> StoryArcCatalogPreview:
+        if self.provider is None:
+            raise StoryArcCatalogError("provider_required", "Use the source registry to preview")
         catalog_provider_id(provider_id, self.source)
         metadata = await self.provider.get_story_arc(provider_id)
         if metadata.provider_id != provider_id:
