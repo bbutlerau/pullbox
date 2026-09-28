@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import structlog
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import select
 
 from pullbox.api.deps import DbSession, InteractiveOperatorUser
@@ -769,13 +769,45 @@ async def save_comicvine_key(
     body: dict[str, str],
 ) -> dict[str, object]:
     """Save (encrypted) the ComicVine API key to the database."""
-    from pullbox.core.comicvine_key import obfuscate_api_key, save_comicvine_api_key
+    from pydantic import SecretStr
+
+    from pullbox.core.comicvine_key import obfuscate_api_key
+    from pullbox.core.metadata_identity import MetadataSource
+    from pullbox.schemas.metadata_sources import SourcePolicyWrite
+    from pullbox.services.metadata_sources import (
+        SourceConfigurationConflictError,
+        read_source_policies,
+        save_source_policy,
+    )
 
     api_key = body.get("api_key", "").strip()
     if not api_key:
         return {"saved": False, "message": "No API key provided."}
 
-    await save_comicvine_api_key(session, api_key)
+    policy = next(
+        item
+        for item in await read_source_policies(session)
+        if item.source is MetadataSource.COMICVINE_API
+    )
+    if policy.configuration_status is not None:
+        raise HTTPException(409, "Source configuration needs attention before saving a new key")
+    try:
+        await save_source_policy(
+            session,
+            MetadataSource.COMICVINE_API,
+            SourcePolicyWrite(
+                revision=policy.revision,
+                enabled=policy.enabled,
+                priority=policy.priority,
+                domain_priorities=policy.domain_priorities,
+                settings=policy.settings,
+                credential=SecretStr(api_key),
+            ),
+        )
+    except SourceConfigurationConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, "Could not save the provider token; check its format") from exc
     return {
         "saved": True,
         "message": "API key saved.",

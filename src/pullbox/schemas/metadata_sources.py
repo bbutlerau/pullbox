@@ -77,6 +77,28 @@ class SourcePolicyRead(BaseModel):
     configuration_status: SourceStatus | None = None
 
 
+class SourcePriorityWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    order: list[MetadataSource] = Field(min_length=5, max_length=5)
+    revisions: dict[MetadataSource, Annotated[int, Field(ge=0, lt=2**63, strict=True)]]
+    domain_orders: dict[MetadataDomain, list[MetadataSource]] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def complete_orders(self) -> Self:
+        sources = set(MetadataSource)
+        if set(self.order) != sources or set(self.revisions) != sources:
+            raise ValueError("Include every metadata source exactly once with its saved revision")
+        for domain, order in self.domain_orders.items():
+            allowed = sources - (
+                {MetadataSource.GCD_LOCAL, MetadataSource.GCD_API_V2}
+                if domain is MetadataDomain.ARTWORK
+                else set()
+            )
+            if len(order) != len(allowed) or set(order) != allowed:
+                raise ValueError("Include every eligible source exactly once in each domain order")
+        return self
+
+
 class SeriesDiscoveryQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
     query: str = Field(min_length=1, max_length=300)

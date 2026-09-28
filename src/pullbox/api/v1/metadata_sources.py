@@ -7,23 +7,23 @@ from fastapi import APIRouter, HTTPException
 
 from pullbox.api.deps import AuthenticatedUser, DbSession, InteractiveOperatorUser, Settings
 from pullbox.core.metadata_identity import MetadataSource
-from pullbox.providers.metadata.sources import comicvine_sources
 from pullbox.schemas.metadata_sources import (
     SeriesDiscoveryQuery,
     SeriesDiscoveryRead,
     SourceDescriptor,
     SourcePolicyRead,
     SourcePolicyWrite,
-    SourceStatus,
+    SourcePriorityWrite,
     SourceTestRead,
 )
-from pullbox.services.metadata_discovery import MetadataSourceRegistry
+from pullbox.services.metadata_discovery import MetadataSourceRegistry, describe_source_policies
 from pullbox.services.metadata_sources import (
     SourceConfigurationConflictError,
     load_source_runtime,
     read_source_policies,
     record_source_health,
     save_source_policy,
+    save_source_priorities,
 )
 
 router = APIRouter(prefix="/metadata", tags=["metadata"])
@@ -34,27 +34,21 @@ logger = structlog.get_logger(__name__)
 async def sources(
     session: DbSession, _user: InteractiveOperatorUser, settings: Settings
 ) -> list[SourceDescriptor]:
-    registrations = comicvine_sources()
-    result = []
-    for policy in await read_source_policies(session):
-        registration = registrations.get(policy.source)
-        availability = policy.configuration_status
-        if policy.source is MetadataSource.GCD_API_V2 and not settings.metadata_gcd_api_v2_enabled:
-            availability = SourceStatus.FEATURE_DISABLED
-        elif not policy.enabled:
-            availability = availability or SourceStatus.DISABLED
-        elif registration is None:
-            availability = SourceStatus.NOT_IMPLEMENTED
-        elif policy.source is MetadataSource.COMICVINE_API and not policy.credential_configured:
-            availability = SourceStatus.UNCONFIGURED
-        result.append(
-            SourceDescriptor(
-                **policy.model_dump(),
-                capabilities=sorted(registration.capabilities) if registration else [],
-                availability=availability,
-            )
-        )
-    return result
+    return describe_source_policies(
+        await read_source_policies(session), gcd_api_enabled=settings.metadata_gcd_api_v2_enabled
+    )
+
+
+@router.put("/priorities", response_model=list[SourceDescriptor])
+async def save_priorities(
+    body: SourcePriorityWrite, session: DbSession, user: InteractiveOperatorUser, settings: Settings
+) -> list[SourceDescriptor]:
+    try:
+        policies = await save_source_priorities(session, body)
+    except SourceConfigurationConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    logger.info("metadata_source_priorities_updated", user_id=user.id)
+    return describe_source_policies(policies, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled)
 
 
 @router.put("/sources/{source}", response_model=SourcePolicyRead)

@@ -21,6 +21,7 @@ from pullbox.schemas.metadata_sources import (
     SourceOutcome,
     SourcePolicyRead,
     SourcePolicyWrite,
+    SourcePriorityWrite,
     SourceSettings,
     SourceStatus,
 )
@@ -255,3 +256,53 @@ async def record_source_health(
         .returning(MetadataSourceConfig.id)
     )
     return result.scalar_one_or_none() is not None
+
+
+async def save_source_priorities(
+    session: AsyncSession, body: SourcePriorityWrite
+) -> list[SourcePolicyRead]:
+    """Save one revision-checked global and domain ordering transaction."""
+    if session.get_bind().dialect.name == "sqlite":
+        await session.execute(
+            update(MetadataSourceConfig)
+            .where(false())
+            .values(revision=MetadataSourceConfig.revision)
+        )
+    try:
+        async with session.begin_nested():
+            rows = {
+                row.source: row
+                for row in await session.scalars(
+                    select(MetadataSourceConfig)
+                    .order_by(MetadataSourceConfig.source)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            }
+            for source, revision in body.revisions.items():
+                row = rows.get(source.value)
+                if (row.revision if row else 0) != revision:
+                    raise SourceConfigurationConflictError(
+                        "Source settings changed; reload before saving"
+                    )
+            # Missing default rows follow the same lock order as existing rows.
+            for source in sorted(MetadataSource):
+                row = rows.get(source.value)
+                if row is None:
+                    row = MetadataSourceConfig(
+                        source=source.value, enabled=default_policy(source).enabled
+                    )
+                    session.add(row)
+                row.priority = (body.order.index(source) + 1) * 10
+                row.domain_priorities = {
+                    domain.value: (order.index(source) + 1) * 10
+                    for domain, order in body.domain_orders.items()
+                    if source in order
+                }
+                row.revision = body.revisions[source] + 1
+            await session.flush()
+    except IntegrityError as exc:
+        raise SourceConfigurationConflictError(
+            "Source settings changed; reload before saving"
+        ) from exc
+    return await read_source_policies(session)

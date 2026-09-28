@@ -1,0 +1,79 @@
+{% from "components/settings_shell.html" import section_card, settings_footer, ui_icon %}
+{% from "components/order_chevrons.html" import order_chevrons %}
+
+{% macro priority_list(domain) %}
+<ol class="space-y-2" data-testid="metadata-order-{{ domain }}" aria-label="{{ 'Global source priority' if domain == 'global' else domain ~ ' source priority' }}">
+  <template x-for="(source, index) in {{ 'order' if domain == 'global' else 'domainOrders.' ~ domain ~ ' || []' }}" :key="source">
+    <li class="flex items-center gap-3 rounded-xl border border-pb-border px-4 py-3" data-source-row>
+      <span class="w-5 text-center text-sm text-pb-text-sec" x-text="index + 1"></span>
+      {{ order_chevrons(
+        up_action="move('" ~ domain ~ "', index, -1)", down_action="move('" ~ domain ~ "', index, 1)",
+        up_disabled="saving || index === 0", down_disabled="saving || index >= " ~ ('order' if domain == 'global' else 'domainOrders.' ~ domain) ~ ".length - 1",
+        up_label="'Move ' + labels[source] + ' up'", down_label="'Move ' + labels[source] + ' down'"
+      ) }}
+      <span class="min-w-0 text-sm font-medium text-pb-text" data-source-label x-text="labels[source]"></span>
+    </li>
+  </template>
+</ol>
+{% endmacro %}
+
+<div x-data="metadataPriorityEditor()" @metadata-credentials-updated.window="refreshHealth()" data-testid="metadata-source-priority">
+{% call section_card(title="Metadata priority", title_style="plain", body_class="p-0") %}
+  <div class="space-y-4 p-5">
+    <p class="text-sm text-pb-text-sec">Put preferred sources first. Only enabled sources that support the requested information are used. Changing priority never changes a comic's identity.</p>
+    {{ priority_list('global') }}
+    <details class="rounded-xl border border-pb-border p-4">
+      <summary class="flex items-center gap-2 text-sm font-medium text-pb-text">{{ ui_icon('chevron-down') }} Advanced domain priorities</summary>
+      <div class="mt-4 space-y-4">
+        <p class="text-sm text-pb-text-sec">Use the global order unless a type of metadata needs a different preference.</p>
+        {% for domain, label in [('core', 'Core metadata'), ('issues', 'Issue catalogs'), ('artwork', 'Artwork'), ('story_arcs', 'Story arcs')] %}
+        <div class="space-y-3">
+          <label class="flex items-center gap-3 text-sm text-pb-text">
+            <input type="checkbox" class="checkbox-pb" :checked="Boolean(domainOrders.{{ domain }})" :disabled="saving"
+                   @change="toggleDomain('{{ domain }}', $event.target.checked)" aria-label="Use a separate order for {{ label }}">
+            {{ label }}
+          </label>
+          <div x-show="Boolean(domainOrders.{{ domain }})" x-cloak>{{ priority_list(domain) }}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </details>
+    <p role="alert" x-show="error" x-cloak class="text-sm text-pb-danger" x-text="error"></p>
+    <p role="status" x-show="message" x-cloak class="text-sm text-pb-success" x-text="message"></p>
+  </div>
+  {% call settings_footer(align="end") %}
+    <div class="settings-footer-actions ml-auto justify-end">
+      <button type="button" class="btn-ghost" x-show="conflict" x-cloak :disabled="saving || testing" @click="reload()">Load saved priority</button>
+      <button type="button" class="btn-ghost" x-show="dirty" x-cloak :disabled="saving" @click="reset()">Reset</button>
+      <button type="button" class="btn-primary" :disabled="saving || testing || refreshing || !dirty" :aria-busy="saving" @click="save()" x-text="saving ? 'Saving...' : 'Save metadata priority'">Save metadata priority</button>
+    </div>
+  {% endcall %}
+{% endcall %}
+
+<div class="mt-6" data-testid="metadata-source-health">
+{% call section_card(title="Metadata sources", title_style="plain", body_class="p-0") %}
+  <p class="px-5 pt-5 text-sm text-pb-text-sec">Connection checks use saved settings. A previous success does not guarantee a source is available now.</p>
+  <div class="divide-y divide-pb-border p-5">
+    <template x-for="item in sources" :key="item.source">
+      <div class="flex flex-wrap items-center justify-between gap-3 py-3">
+        <div class="min-w-0 space-y-1">
+          <p class="text-sm font-medium text-pb-text" x-text="labels[item.source]"></p>
+          <p class="text-sm text-pb-text-sec" x-text="status(item)"></p>
+        </div>
+        <button type="button" class="btn-ghost" :disabled="saving || testing || refreshing || !canTest(item)"
+                :aria-label="'Test ' + labels[item.source]" :aria-busy="testing === item.source"
+                @click="test(item)" x-text="testing === item.source ? 'Checking...' : 'Test connection'">Test connection</button>
+      </div>
+    </template>
+    <p role="status" x-show="healthMessage" x-cloak class="pt-3 text-sm text-pb-text-sec" x-text="healthMessage"></p>
+  </div>
+{% endcall %}
+</div>
+</div>
+
+<script>
+function metadataPriorityEditor() {
+  const seed = {{ metadata_source_seed|default([])|tojson }};
+  return metadataSourceSettings(seed, {{ csrf_token|tojson }});
+}
+</script>

@@ -2,6 +2,7 @@
 {% from "components/settings_shell.html" import field_note, inline_alert, section_card, settings_footer, settings_row, ui_icon %}
 
 <div class="space-y-6 pt-6" x-data="metadataSettings()">
+  {% include "partials/settings_metadata_sources.html" %}
   {% call section_card(
     title="ComicVine access",
     eyebrow="API credentials",
@@ -169,6 +170,7 @@ function metadataSettings() {
           this.testResult = null;
           this.obfuscatedKey = data.obfuscated;
           this.apiKey = '';
+          window.dispatchEvent(new CustomEvent('metadata-credentials-updated'));
           if (typeof showToast === 'function') showToast({ message: 'API key saved.', level: 'success' });
         } else {
           if (typeof showToast === 'function') showToast({ message: data.message || 'Save failed.', level: 'error' });

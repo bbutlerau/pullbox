@@ -15,7 +15,9 @@ from pullbox.schemas.metadata_sources import (
     SeriesDiscoveryQuery,
     SeriesDiscoveryRead,
     SourceCapability,
+    SourceDescriptor,
     SourceOutcome,
+    SourcePolicyRead,
     SourceStatus,
 )
 
@@ -25,6 +27,35 @@ if TYPE_CHECKING:
     from pullbox.services.metadata_sources import SourceRuntime
 
 logger = structlog.get_logger(__name__)
+
+
+def describe_source_policies(
+    policies: Sequence[SourcePolicyRead], *, gcd_api_enabled: bool
+) -> list[SourceDescriptor]:
+    """Expose capability/configuration snapshots without constructing clients."""
+    from pullbox.providers.metadata.sources import comicvine_sources
+
+    registrations = comicvine_sources()
+    result = []
+    for policy in policies:
+        registration = registrations.get(policy.source)
+        availability = policy.configuration_status
+        if policy.source is MetadataSource.GCD_API_V2 and not gcd_api_enabled:
+            availability = SourceStatus.FEATURE_DISABLED
+        elif not policy.enabled:
+            availability = availability or SourceStatus.DISABLED
+        elif registration is None:
+            availability = SourceStatus.NOT_IMPLEMENTED
+        elif policy.source is MetadataSource.COMICVINE_API and not policy.credential_configured:
+            availability = SourceStatus.UNCONFIGURED
+        result.append(
+            SourceDescriptor(
+                **policy.model_dump(),
+                capabilities=sorted(registration.capabilities) if registration else [],
+                availability=availability,
+            )
+        )
+    return result
 
 
 @dataclass(frozen=True)

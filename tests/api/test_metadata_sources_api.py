@@ -146,3 +146,70 @@ async def test_search_requires_auth_and_csrf_and_rejects_invalid_paging(
         headers=csrf(authenticated_client),
     )
     assert response.status_code == 422
+
+
+async def test_priority_api_is_atomic_and_revision_checked(authenticated_client):
+    sources = (await authenticated_client.get("/api/v1/metadata/sources")).json()
+    payload = {
+        "order": list(reversed([item["source"] for item in sources])),
+        "revisions": {item["source"]: item["revision"] for item in sources},
+        "domain_orders": {},
+    }
+    url = "/api/v1/metadata/priorities"
+    result = await authenticated_client.put(url, json=payload, headers=csrf(authenticated_client))
+    assert result.status_code == 200
+    assert [item["source"] for item in result.json()] == payload["order"]
+    stale = await authenticated_client.put(url, json=payload, headers=csrf(authenticated_client))
+    assert stale.status_code == 409
+    assert (await authenticated_client.get("/api/v1/metadata/sources")).json() == result.json()
+
+
+async def test_priority_api_requires_operator_and_csrf(
+    authenticated_client, unauthenticated_client, sec_api_key
+):
+    url = "/api/v1/metadata/priorities"
+    assert (await authenticated_client.put(url, json={})).status_code == 403
+    assert (
+        await unauthenticated_client.put(url, json={}, headers={"X-API-Key": sec_api_key})
+    ).status_code in {401, 403}
+
+
+async def test_existing_key_save_invalidates_source_revision_and_old_health(
+    authenticated_client, sec_db
+):
+    from datetime import UTC, datetime
+
+    from pullbox.core.metadata_identity import MetadataSource
+    from pullbox.schemas.metadata_sources import SourceOutcome, SourceStatus
+    from pullbox.services.metadata_sources import record_source_health
+
+    url = "/api/v1/metadata/sources/comicvine_api"
+    response = await authenticated_client.put(
+        url,
+        json=policy(enabled=False, priority=13, domain_priorities={"issues": 1}),
+        headers=csrf(authenticated_client),
+    )
+    assert response.status_code == 200
+    revision = response.json()["revision"]
+    now = datetime.now(UTC)
+    outcome = SourceOutcome(source=MetadataSource.COMICVINE_API, status=SourceStatus.OK)
+    async with sec_db.begin() as session:
+        assert await record_source_health(
+            session, MetadataSource.COMICVINE_API, revision, outcome, now
+        )
+    saved = await authenticated_client.post(
+        "/api/v1/config/comicvine/save",
+        json={"api_key": "new-synthetic-key-for-revision"},
+        headers=csrf(authenticated_client),
+    )
+    assert saved.status_code == 200 and saved.json()["saved"]
+    result = (await authenticated_client.get("/api/v1/metadata/sources")).json()
+    source = next(item for item in result if item["source"] == "comicvine_api")
+    assert source["revision"] == revision + 1
+    assert not source["enabled"] and source["priority"] == 13
+    assert source["domain_priorities"] == {"issues": 1}
+    assert source["last_status"] is None and source["last_success_at"] is None
+    async with sec_db.begin() as session:
+        assert not await record_source_health(
+            session, MetadataSource.COMICVINE_API, revision, outcome, now
+        )

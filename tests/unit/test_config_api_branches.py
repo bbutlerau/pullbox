@@ -419,7 +419,7 @@ async def test_comicvine_key_test_and_save_branches(
         FakeComicVineProvider,
     )
     monkeypatch.setattr(
-        "pullbox.core.comicvine_key.save_comicvine_api_key",
+        "pullbox.services.metadata_sources.save_comicvine_api_key",
         fake_save_key,
     )
     monkeypatch.setattr(
