@@ -370,6 +370,27 @@ PostgreSQL where the code already supports it.
 
 ## 4. Schema Conventions
 
+### Metadata Identity Review
+
+Canonical series, issue, and Story Arc provider identities retain append-only
+evidence separately from active ownership. Automatic writers use the shared
+attachment service; non-verifying observations cannot acquire ownership or clear
+a rejected/conflicted decision. Stale and conflicted owners retain uniqueness.
+
+The interactive `/api/v1/metadata-identities/{kind}/{local_id}` endpoints list
+bounded saved claims, preview one saved event, and confirm/reject that event.
+Writes require operator authentication, shared CSRF protection, and a current
+review fingerprint/revision. The server supplies the actor; clients cannot
+supply a provider identity or actor ID in a decision body. A replay receipt
+proves historical completion, not current ownership. Replacing an assignment
+requires explicit rejection first, and dependent issue identities must be
+reviewed before detaching a series. Files and archive metadata are not changed
+by identity review.
+
+Review, observation, and attachment share parent lock ordering and caller-owned
+transactions. Compatibility ComicVine columns and retained history change
+atomically with ownership. Do not bypass these services with ad hoc ID updates.
+
 ### 4.1 Base Model Mixins
 
 **Current Pullbox implementation**
