@@ -53,6 +53,11 @@ async def arc_command_setup(authenticated_client, sec_db, monkeypatch, tmp_path)
             await fixture["on_request"]()
         if fixture["failure"] == request.url.path:
             return httpx.Response(429, headers={"Retry-After": "60"})
+        headers = (
+            {"Last-Modified": "Mon, 28 Sep 2026 10:00:00 GMT"} if fixture.get("conditional") else {}
+        )
+        if headers and request.headers.get("If-Modified-Since") == headers["Last-Modified"]:
+            return httpx.Response(304)
         if request.url.path == "/api/arc/":
             page = int(request.url.params["page"])
             rows = fixture["arc_rows"]
@@ -67,12 +72,13 @@ async def arc_command_setup(authenticated_client, sec_db, monkeypatch, tmp_path)
                 ),
             )
         if request.url.path == "/api/arc/4/":
-            return httpx.Response(200, json={"id": 4, "name": "Native arc"})
+            return httpx.Response(200, json={"id": 4, "name": "Native arc"}, headers=headers)
         if request.url.path == "/api/arc/4/issue_list/":
             page = int(request.url.params["page"])
             rows = fixture["issues"]
             return httpx.Response(
                 200,
+                headers=headers,
                 json=envelope(
                     rows[(page - 1) * 100 : page * 100],
                     count=len(rows),
@@ -82,7 +88,7 @@ async def arc_command_setup(authenticated_client, sec_db, monkeypatch, tmp_path)
                 ),
             )
         assert request.url.path == "/api/series/8/", "Must not fetch whole parent catalogs"
-        return httpx.Response(200, json={**series_row(8), "name": "Parent eight"})
+        return httpx.Response(200, json={**series_row(8), "name": "Parent eight"}, headers=headers)
 
     adapter = sources.MetronSource
 
@@ -108,6 +114,24 @@ async def preview(client, fixture):
     result = await client.post(BASE + "/preview", json=fixture["selection"], headers=csrf(client))
     assert result.status_code == 200, result.text
     return result.json()
+
+
+async def test_catalog_add_revalidates_saved_response_through_real_adapter(
+    authenticated_client, arc_command_setup
+):
+    fixture = arc_command_setup
+    fixture["conditional"] = True
+    snapshot = await preview(authenticated_client, fixture)
+    assert len(fixture["calls"]) == 3
+    result = await authenticated_client.post(
+        BASE, json=decision(fixture, snapshot), headers=csrf(authenticated_client)
+    )
+    assert result.status_code == 201, result.text
+    assert len(fixture["calls"]) == 6
+    assert all(
+        call.headers.get("If-Modified-Since") == "Mon, 28 Sep 2026 10:00:00 GMT"
+        for call in fixture["calls"][3:]
+    )
 
 
 def decision(fixture, snapshot):

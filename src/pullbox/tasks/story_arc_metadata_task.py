@@ -23,6 +23,7 @@ from pullbox.services.import_activity import has_active_import_scheduler_protect
 from pullbox.services.metadata_arc_catalog import StoryArcSourceError, fetch_source_arc_catalog
 from pullbox.services.metadata_arc_commands import catalog_writer
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
+from pullbox.services.metadata_read_cache import source_read_cache
 from pullbox.services.metadata_sources import load_source_runtime
 from pullbox.services.story_arc_catalog_types import StoryArcCatalogError
 from pullbox.services.story_arc_service import StoryArcServiceError
@@ -100,7 +101,10 @@ async def _targets(
 async def _registry(session: AsyncSession) -> MetadataSourceRegistry:
     flag = get_settings().metadata_gcd_api_v2_enabled
     return MetadataSourceRegistry(
-        await load_source_runtime(session, gcd_api_enabled=flag), gcd_api_enabled=flag
+        await load_source_runtime(session, gcd_api_enabled=flag),
+        gcd_api_enabled=flag,
+        read_cache=source_read_cache(session),
+        revalidate_reads=True,
     )
 
 

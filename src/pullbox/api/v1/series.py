@@ -33,6 +33,7 @@ from pullbox.schemas.series import (
 )
 from pullbox.services.cover_url_service import build_series_cover_url
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
+from pullbox.services.metadata_read_cache import source_read_cache
 from pullbox.services.metadata_series_add import source_series_add_transaction
 from pullbox.services.metadata_series_adoption import (
     SeriesAdoptionError,
@@ -396,7 +397,12 @@ async def add_series(
         await session.rollback()
         try:
             bundle = await fetch_source_series_bundle(
-                MetadataSourceRegistry(runtime, gcd_api_enabled=gcd_enabled),
+                MetadataSourceRegistry(
+                    runtime,
+                    gcd_api_enabled=gcd_enabled,
+                    read_cache=source_read_cache(session),
+                    revalidate_reads=True,
+                ),
                 body.source,
                 body.external_id,
                 source_revision=body.source_revision,

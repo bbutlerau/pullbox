@@ -110,11 +110,13 @@ async def _read[T](
     registry: MetadataSourceRegistry,
     source: MetadataSource,
     capability: SourceCapability,
-    operation: Callable[[MetadataSourceAdapter], Awaitable[MetadataFetch[T]]],
+    operation: Callable[[MetadataSourceAdapter, str | None], Awaitable[MetadataFetch[T]]],
     validate: Callable[[T], None],
     validator: str | None,
     *,
     deadline: float | None = None,
+    cache_identity: tuple[str, int] | None = None,
+    model: type[MetadataFetch[T]] | None = None,
 ) -> MetadataFetch[T]:
     if validator is not None and (
         not isinstance(validator, str)
@@ -125,19 +127,55 @@ async def _read[T](
     unavailable = registry._unavailable(source, capability=capability)
     if unavailable is not None:
         return MetadataFetch(status=unavailable)
+    deadline = (
+        deadline
+        if deadline is not None
+        else asyncio.get_running_loop().time() + registry.total_timeout
+    )
+    runtime = registry.runtime[source]
+    if (
+        registry.read_cache is not None
+        and cache_identity is not None
+        and model is not None
+        and validator is None
+        and runtime.policy.revision > 0
+        and runtime.credential is not None
+        and source
+        in {MetadataSource.COMICVINE_API, MetadataSource.METRON_API, MetadataSource.GCD_API_V2}
+    ):
+
+        async def load(current: str | None) -> MetadataFetch[T]:
+            return await _read(
+                registry, source, capability, operation, validate, current, deadline=deadline
+            )
+
+        try:
+            async with asyncio.timeout_at(deadline):
+                result = await registry.read_cache.get(
+                    source,
+                    runtime.policy.revision,
+                    capability,
+                    *cache_identity,
+                    model,
+                    load,
+                    validate,
+                    conditional=SourceCapability.CONDITIONAL_REFRESH
+                    in registry.factories[source].capabilities,
+                    revalidate=registry.revalidate_reads,
+                )
+        except TimeoutError:
+            return MetadataFetch(status=SourceStatus.TIMEOUT)
+        if result.data is not None:
+            validate(result.data)
+        return result
     adapter = None
     try:
-        deadline = (
-            deadline
-            if deadline is not None
-            else asyncio.get_running_loop().time() + registry.total_timeout
-        )
         if asyncio.get_running_loop().time() >= deadline:
             return MetadataFetch(status=SourceStatus.TIMEOUT)
         async with asyncio.timeout_at(deadline), registry.read_slots:
             async with asyncio.timeout(registry.per_source_timeout):
                 adapter = registry.factories[source].factory(registry.runtime[source])
-                result = await operation(adapter)
+                result = await operation(adapter, validator)
                 if result.status is SourceStatus.OK:
                     if result.data is None:
                         raise ValueError("Missing source metadata")
@@ -176,10 +214,12 @@ async def read_series(
 ) -> MetadataFetch[ProviderSeriesRead]:
     identifier = source_id(source, MetadataEntityKind.SERIES, external_id)
 
-    async def operation(adapter: MetadataSourceAdapter) -> MetadataFetch[ProviderSeriesRead]:
+    async def operation(
+        adapter: MetadataSourceAdapter, current: str | None
+    ) -> MetadataFetch[ProviderSeriesRead]:
         if not isinstance(adapter, SeriesDetailAdapter):
             raise MetadataSourceError(SourceStatus.UNSUPPORTED)
-        return await adapter.series(identifier, validator=validator)
+        return await adapter.series(identifier, validator=current)
 
     def validate(row: ProviderSeriesRead) -> None:
         _identity(row, source, MetadataEntityKind.SERIES)
@@ -193,6 +233,8 @@ async def read_series(
         operation,
         validate,
         validator,
+        cache_identity=(identifier, 1),
+        model=MetadataFetch[ProviderSeriesRead],
     )
 
 
@@ -205,10 +247,12 @@ async def read_issue(
 ) -> MetadataFetch[ProviderIssueRead]:
     identifier = source_id(source, MetadataEntityKind.ISSUE, external_id)
 
-    async def operation(adapter: MetadataSourceAdapter) -> MetadataFetch[ProviderIssueRead]:
+    async def operation(
+        adapter: MetadataSourceAdapter, current: str | None
+    ) -> MetadataFetch[ProviderIssueRead]:
         if not isinstance(adapter, IssueDetailAdapter):
             raise MetadataSourceError(SourceStatus.UNSUPPORTED)
-        return await adapter.issue(identifier, validator=validator)
+        return await adapter.issue(identifier, validator=current)
 
     def validate(row: ProviderIssueRead) -> None:
         _issue(row, source)
@@ -222,6 +266,8 @@ async def read_issue(
         operation,
         validate,
         validator,
+        cache_identity=(identifier, 1),
+        model=MetadataFetch[ProviderIssueRead],
     )
 
 
@@ -238,10 +284,11 @@ async def read_issues(
 
     async def operation(
         adapter: MetadataSourceAdapter,
+        current: str | None,
     ) -> MetadataFetch[MetadataPage[ProviderIssueRead]]:
         if not isinstance(adapter, IssueListAdapter):
             raise MetadataSourceError(SourceStatus.UNSUPPORTED)
-        return await adapter.issues(identifier, page=page, validator=validator)
+        return await adapter.issues(identifier, page=page, validator=current)
 
     def validate(result: MetadataPage[ProviderIssueRead]) -> None:
         validate_metadata_page(result, page)
@@ -257,6 +304,8 @@ async def read_issues(
         operation,
         validate,
         validator,
+        cache_identity=(identifier, page),
+        model=MetadataFetch[MetadataPage[ProviderIssueRead]],
     )
 
 
@@ -305,10 +354,12 @@ async def read_story_arc(
 ) -> MetadataFetch[ProviderStoryArcRead]:
     identifier = source_id(source, MetadataEntityKind.STORY_ARC, external_id)
 
-    async def operation(adapter: MetadataSourceAdapter) -> MetadataFetch[ProviderStoryArcRead]:
+    async def operation(
+        adapter: MetadataSourceAdapter, current: str | None
+    ) -> MetadataFetch[ProviderStoryArcRead]:
         if not isinstance(adapter, StoryArcDetailAdapter):
             raise MetadataSourceError(SourceStatus.UNSUPPORTED)
-        return await adapter.story_arc(identifier, validator=validator)
+        return await adapter.story_arc(identifier, validator=current)
 
     def validate(row: ProviderStoryArcRead) -> None:
         _arc(row, source)
@@ -316,7 +367,14 @@ async def read_story_arc(
             raise ValueError("Source returned a different story arc")
 
     return await _read(
-        registry, source, SourceCapability.STORY_ARC_DETAILS, operation, validate, validator
+        registry,
+        source,
+        SourceCapability.STORY_ARC_DETAILS,
+        operation,
+        validate,
+        validator,
+        cache_identity=(identifier, 1),
+        model=MetadataFetch[ProviderStoryArcRead],
     )
 
 
@@ -335,10 +393,11 @@ async def read_story_arc_issues(
 
     async def operation(
         adapter: MetadataSourceAdapter,
+        current: str | None,
     ) -> MetadataFetch[MetadataPage[ProviderIssueRead]]:
         if not isinstance(adapter, StoryArcIssueAdapter):
             raise MetadataSourceError(SourceStatus.UNSUPPORTED)
-        return await adapter.story_arc_issues(identifier, page=page, validator=validator)
+        return await adapter.story_arc_issues(identifier, page=page, validator=current)
 
     def validate(result: MetadataPage[ProviderIssueRead]) -> None:
         validate_metadata_page(result, page)
@@ -348,7 +407,14 @@ async def read_story_arc_issues(
             _issue(row, source)
 
     return await _read(
-        registry, source, SourceCapability.STORY_ARC_ISSUES, operation, validate, validator
+        registry,
+        source,
+        SourceCapability.STORY_ARC_ISSUES,
+        operation,
+        validate,
+        validator,
+        cache_identity=(identifier, page),
+        model=MetadataFetch[MetadataPage[ProviderIssueRead]],
     )
 
 
@@ -362,6 +428,7 @@ async def read_story_arcs(
 ) -> MetadataFetch[MetadataPage[ProviderStoryArcRead]]:
     async def operation(
         adapter: MetadataSourceAdapter,
+        current: str | None,
     ) -> MetadataFetch[MetadataPage[ProviderStoryArcRead]]:
         if not isinstance(adapter, StoryArcSearchAdapter):
             raise MetadataSourceError(SourceStatus.UNSUPPORTED)

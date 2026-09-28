@@ -18,6 +18,7 @@ from pullbox.schemas.metadata_arc_catalog import (
 from pullbox.schemas.metadata_sources import StoryArcPreviewQuery
 from pullbox.services.metadata_arc_catalog import fetch_source_arc_catalog
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
+from pullbox.services.metadata_read_cache import source_read_cache
 from pullbox.services.metadata_sources import load_source_runtime
 from pullbox.services.story_arc_catalog import StoryArcCatalogService
 from pullbox.services.story_arc_catalog_identity import require_catalog_source_revision
@@ -58,7 +59,12 @@ async def fetch_current_arc_catalog(
     runtime = await load_source_runtime(session, gcd_api_enabled=gcd_api_enabled)
     await session.rollback()
     return await fetch_source_arc_catalog(
-        MetadataSourceRegistry(runtime, gcd_api_enabled=gcd_api_enabled),
+        MetadataSourceRegistry(
+            runtime,
+            gcd_api_enabled=gcd_api_enabled,
+            read_cache=source_read_cache(session),
+            revalidate_reads=True,
+        ),
         selection.source,
         selection.external_id,
         source_revision=selection.source_revision,

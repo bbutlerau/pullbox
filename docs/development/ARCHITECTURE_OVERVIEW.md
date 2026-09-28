@@ -333,10 +333,25 @@ and rechecks source configuration, uses shared identity attachment and caller-ow
 transactions, and preserves existing exact owners rather than treating Add as
 Refresh. Native issues require exact parent evidence; foreign issue crosswalks
 remain observations until independently verified. Unsupported designations and
-conflicting ownership fail without partial library rows. This internal workflow
-is not yet connected to the Add API/UI or filesystem/event side effects.
+conflicting ownership fail without partial library rows. The Add Series API/UI
+uses this command with caller-owned transactions, managed-folder rollback and
+post-commit events. Source-aware Story Arc search, complete command snapshots,
+Add/refresh UI and scheduled membership refresh use the same registry and
+existing catalog ownership, placement and reading-order services.
 
-The existing import/cache and Add Series/Story Arc UI consumers are not yet
+Normalized remote detail and issue-page reads reuse `metadata_provider_cache`
+through `services/metadata_read_cache.py`. Keys bind source, policy revision,
+operation, external ID and page; credentials are never cache key material.
+Responses are fresh for five minutes (not-found for 15 seconds), with validators
+retained for one day. Add and refresh commands always revalidate. A not-modified
+response requires an exact saved response; outages never become cached success.
+The cache is limited to 128 entries of at most 256 KiB each, separate from legacy
+ComicVine import entries. It owns short database sessions outside provider I/O,
+coalesces at most eight concurrent reads per database, and drains cancelled work.
+Availability checks precede cache reads; local catalog reads stay generation-bound
+in their existing reader rather than entering this remote-response cache.
+
+The existing import/cache and ordinary series-refresh consumers have not yet
 migrated to this registry. Metron has token settings, bounded transport and
 series/issue/arc adapter operations; GCD execution remains unimplemented, and
 GCD API v2 is additionally disabled by the release feature flag. Capability

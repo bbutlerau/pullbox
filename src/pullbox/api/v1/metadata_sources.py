@@ -32,6 +32,7 @@ from pullbox.schemas.metadata_sources import (
 )
 from pullbox.services.metadata_arc_preview import preview_source_arc
 from pullbox.services.metadata_discovery import MetadataSourceRegistry, describe_source_policies
+from pullbox.services.metadata_read_cache import source_read_cache
 from pullbox.services.metadata_series_preview import preview_series_folder, preview_source_series
 from pullbox.services.metadata_sources import (
     SourceConfigurationConflictError,
@@ -87,7 +88,11 @@ async def preview_story_arc(
     )
     await session.rollback()
     result = await preview_source_arc(
-        MetadataSourceRegistry(runtime, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled),
+        MetadataSourceRegistry(
+            runtime,
+            gcd_api_enabled=settings.metadata_gcd_api_v2_enabled,
+            read_cache=source_read_cache(session),
+        ),
         body.source,
         body.external_id,
     )
@@ -111,7 +116,9 @@ async def story_arc_issues(
         raise HTTPException(409, "Metadata source settings changed. Preview the story arc again.")
     await session.rollback()
     result = await MetadataSourceRegistry(
-        runtime, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled
+        runtime,
+        gcd_api_enabled=settings.metadata_gcd_api_v2_enabled,
+        read_cache=source_read_cache(session),
     ).story_arc_issues(body.source, body.external_id, page=body.page)
     await _require_source_revision(session, body.source, body.source_revision, subject="story arc")
     return result
@@ -128,7 +135,11 @@ async def preview_series(
     )
     await session.rollback()
     result = await preview_source_series(
-        MetadataSourceRegistry(runtime, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled),
+        MetadataSourceRegistry(
+            runtime,
+            gcd_api_enabled=settings.metadata_gcd_api_v2_enabled,
+            read_cache=source_read_cache(session),
+        ),
         body.source,
         body.external_id,
     )
@@ -161,7 +172,9 @@ async def series_issues(
         raise HTTPException(409, "Metadata source settings changed. Preview the series again.")
     await session.rollback()
     result = await MetadataSourceRegistry(
-        runtime, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled
+        runtime,
+        gcd_api_enabled=settings.metadata_gcd_api_v2_enabled,
+        read_cache=source_read_cache(session),
     ).issues(body.source, body.external_id, page=body.page)
     await _require_source_revision(session, body.source, body.source_revision)
     return result

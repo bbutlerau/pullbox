@@ -31,6 +31,7 @@ from pullbox.schemas.metadata_sources import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
+    from pullbox.services.metadata_read_cache import MetadataReadCache
     from pullbox.services.metadata_sources import SourceRuntime
 
 logger = structlog.get_logger(__name__)
@@ -111,6 +112,8 @@ class MetadataSourceRegistry:
         per_source_timeout: float = 8,
         total_timeout: float = 15,
         concurrency: int = 3,
+        read_cache: MetadataReadCache | None = None,
+        revalidate_reads: bool = False,
     ) -> None:
         if factories is None:
             from pullbox.providers.metadata.sources import metadata_sources
@@ -127,6 +130,8 @@ class MetadataSourceRegistry:
         self.total_timeout = total_timeout
         self.concurrency = concurrency
         self.read_slots = asyncio.Semaphore(concurrency)
+        self.read_cache = read_cache
+        self.revalidate_reads = revalidate_reads
 
     def _unavailable(
         self,
