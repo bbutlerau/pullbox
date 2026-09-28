@@ -185,6 +185,77 @@ async def test_replay_does_not_restore_released_ownership(identity_probe_db):
     assert await _counts(factory) == (0, 1)
 
 
+@pytest.mark.parametrize("problem", [None, "released", "stale", "conflicted", "rejected", "legacy"])
+async def test_current_ownership_replay_does_not_accept_historical_receipt_alone(
+    identity_probe_db,
+    problem,
+):
+    _, factory, _ = identity_probe_db
+    first, _ = await _series(factory)
+    request = _request(first)
+    async with factory.begin() as session:
+        receipt = (await attach_verified_identities(session, [request]))[0]
+        if problem == "released":
+            await session.execute(delete(SeriesExternalIdentity))
+        elif problem in {"stale", "conflicted"}:
+            await session.execute(update(SeriesExternalIdentity).values(verification_state=problem))
+        elif problem == "legacy":
+            await session.execute(update(Series).values(comicvine_id=None))
+        elif problem == "rejected":
+            later = prepare_identity_event(replace(request, operation_id=uuid4()))
+            session.add(
+                SeriesIdentityEvent(
+                    series_id=first,
+                    identity_namespace=IdentityNamespace.COMICVINE,
+                    external_id="42",
+                    verification_state=IdentityVerificationState.REJECTED,
+                    evidence_kind=IdentityEvidenceKind.PROVIDER_RESULT,
+                    event_key=later.event_key,
+                    request_fingerprint=later.request_fingerprint,
+                    request_json=later.request_json,
+                )
+            )
+    async with factory.begin() as session:
+        if problem:
+            with pytest.raises((IdentityAttachmentConflictError, IdentityReviewRequiredError)):
+                await attach_verified_identities(session, [request], require_current_ownership=True)
+        else:
+            replay = (
+                await attach_verified_identities(session, [request], require_current_ownership=True)
+            )[0]
+            assert replay.replayed and replay.event_id == receipt.event_id
+        assert await session.scalar(select(func.count()).select_from(SeriesIdentityEvent)) == (
+            2 if problem == "rejected" else 1
+        )
+
+
+@pytest.mark.parametrize("problem", ["parent", "parent_state", "issue_state", "issue_legacy"])
+async def test_current_issue_replay_rechecks_parent_and_issue(identity_probe_db, problem):
+    _, factory, _ = identity_probe_db
+    first, second = await _series(factory)
+    parent = ExternalIdentityRef(IdentityNamespace.COMICVINE, MetadataEntityKind.SERIES, "42")
+    async with factory.begin() as session:
+        await attach_verified_identities(session, [_request(first), _request(second, "43")])
+        issue = Issue(series_id=first, issue_number=1)
+        session.add(issue)
+        await session.flush()
+        request = _request(issue.id, "91", kind=MetadataEntityKind.ISSUE, parent=parent)
+        await attach_verified_identities(session, [request])
+        if problem == "parent":
+            issue.series_id = second
+        elif problem == "parent_state":
+            await session.execute(update(SeriesExternalIdentity).values(verification_state="stale"))
+        elif problem == "issue_legacy":
+            issue.comicvine_id = None
+        else:
+            await session.execute(
+                update(IssueExternalIdentity).values(verification_state="conflicted")
+            )
+    async with factory.begin() as session:
+        with pytest.raises((IdentityAttachmentConflictError, IdentityReviewRequiredError)):
+            await attach_verified_identities(session, [request], require_current_ownership=True)
+
+
 async def test_replay_rejects_changed_parent_or_corrupt_payload(identity_probe_db):
     _, factory, _ = identity_probe_db
     first, _ = await _series(factory)

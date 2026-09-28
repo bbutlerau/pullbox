@@ -42,12 +42,12 @@ from pullbox.services.metadata_identity_attachment import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Sequence
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from pullbox.models import Issue
-    from pullbox.providers.base import IssueSummary, SeriesMetadata
+    from pullbox.providers.base import IssueMetadata, IssueSummary, SeriesMetadata
 
 
 @dataclass(frozen=True)
@@ -134,7 +134,7 @@ def _request(
     operation: UUID,
     local_id: int,
     identity: ExternalIdentityRef,
-    metadata: SeriesMetadata | IssueSummary | None,
+    metadata: SeriesMetadata | IssueMetadata | IssueSummary | None,
     local: _LocalEvidence | None,
     parent: ExternalIdentityRef | None = None,
 ) -> IdentityEventRequest:
@@ -193,6 +193,30 @@ async def attach_issue_summary_identities(
     session: AsyncSession,
     series: Series,
     members: list[tuple[Issue, IssueSummary]],
+    origin: ImportIdentityOrigin | None,
+) -> None:
+    await _attach_issue_identities(session, series, members, origin)
+
+
+async def attach_issue_metadata_identity(
+    session: AsyncSession,
+    series: Series,
+    issue: Issue,
+    metadata: IssueMetadata,
+) -> None:
+    parent = comicvine_identity(MetadataEntityKind.SERIES, metadata.series_provider_id)
+    identity = comicvine_identity(MetadataEntityKind.ISSUE, metadata.provider_id)
+    if series.comicvine_id != int(parent.external_id) or issue.comicvine_id != int(
+        identity.external_id
+    ):
+        raise IdentityAttachmentConflictError("Full issue metadata disagrees with its local target")
+    await _attach_issue_identities(session, series, [(issue, metadata)], None)
+
+
+async def _attach_issue_identities(
+    session: AsyncSession,
+    series: Series,
+    members: Sequence[tuple[Issue, IssueSummary | IssueMetadata]],
     origin: ImportIdentityOrigin | None,
 ) -> None:
     if not members:

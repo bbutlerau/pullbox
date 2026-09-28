@@ -197,7 +197,7 @@ async def _attach_member_identities(
                 )
             )
     try:
-        await attach_verified_identities(session, requests)
+        await attach_verified_identities(session, requests, require_current_ownership=True)
     except (IdentityAttachmentConflictError, IdentityReviewRequiredError) as exc:
         raise StoryArcCatalogError(
             "identity_conflict", "Canonical identity needs review before adding these members"

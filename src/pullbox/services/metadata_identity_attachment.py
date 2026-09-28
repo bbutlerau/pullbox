@@ -47,13 +47,18 @@ class IdentityAttachmentReceipt:
 
 
 async def attach_verified_identities(
-    session: AsyncSession, requests: Sequence[IdentityEventRequest]
+    session: AsyncSession,
+    requests: Sequence[IdentityEventRequest],
+    *,
+    require_current_ownership: bool = False,
 ) -> list[IdentityAttachmentReceipt]:
     """Attach adapter-validated exact evidence in the caller's transaction.
 
     This is not a transport API or an authorization boundary. Adapters must
     establish evidence trust before calling it. Explicit user decisions use a
     separate review path; this path must never override their retained history.
+    Consumers that depend on present ownership must opt in to replay validation;
+    an ordinary receipt proves only that the historical operation succeeded.
     """
     if not requests:
         return []
@@ -101,7 +106,12 @@ async def attach_verified_identities(
                 group = list(members)
                 for offset in range(0, len(group), _BATCH_SIZE):
                     receipts.update(
-                        await _attach_batch(session, kind, group[offset : offset + _BATCH_SIZE])
+                        await _attach_batch(
+                            session,
+                            kind,
+                            group[offset : offset + _BATCH_SIZE],
+                            require_current_ownership=require_current_ownership,
+                        )
                     )
     except IntegrityError as exc:
         raise IdentityAttachmentConflictError(
@@ -191,7 +201,11 @@ async def _locked_targets(
 
 
 async def _attach_batch(
-    session: AsyncSession, kind: MetadataEntityKind, requests: list[IdentityEventRequest]
+    session: AsyncSession,
+    kind: MetadataEntityKind,
+    requests: list[IdentityEventRequest],
+    *,
+    require_current_ownership: bool,
 ) -> dict[str, IdentityAttachmentReceipt]:
     target_key = f"{kind.value}_id"
     active = Base.metadata.tables[f"{kind.value}_external_identities"]
@@ -234,7 +248,8 @@ async def _attach_batch(
     fresh = [
         request for request in requests if prepare_identity_event(request).event_key not in receipts
     ]
-    if not fresh:
+    checked = requests if require_current_ownership else fresh
+    if not checked:
         return receipts
 
     active_rows = (
@@ -242,14 +257,14 @@ async def _attach_batch(
             await session.execute(
                 select(active).where(
                     or_(
-                        active.c[target_key].in_([request.local_id for request in fresh]),
+                        active.c[target_key].in_([request.local_id for request in checked]),
                         tuple_(active.c.identity_namespace, active.c.external_id).in_(
                             [
                                 (
                                     request.evidence.claim.identity.namespace,
                                     request.evidence.claim.identity.external_id,
                                 )
-                                for request in fresh
+                                for request in checked
                             ]
                         ),
                     )
@@ -272,7 +287,7 @@ async def _attach_batch(
                         request.evidence.claim.identity.namespace,
                         request.evidence.claim.identity.external_id,
                     )
-                    for request in fresh
+                    for request in checked
                 ]
             )
         )
@@ -284,9 +299,33 @@ async def _attach_batch(
             await session.execute(select(history).where(history.c.id.in_(latest_ids)))
         ).mappings()
     }
-    await _validate_legacy_owners(session, kind, fresh, targets)
+    await _validate_legacy_owners(session, kind, checked, targets)
     if kind is MetadataEntityKind.ISSUE:
-        await _validate_issue_parents(session, fresh, targets)
+        await _validate_issue_parents(session, checked, targets)
+
+    if require_current_ownership:
+        for request in requests:
+            if prepare_identity_event(request).event_key not in receipts:
+                continue
+            identity = request.evidence.claim.identity
+            target = (request.local_id, identity.namespace)
+            existing = by_target.get(target)
+            if (
+                existing is None
+                or existing.external_id != identity.external_id
+                or existing.verification_state is not IdentityVerificationState.VERIFIED
+                or decisions.get((*target, identity.external_id))
+                is not IdentityVerificationState.VERIFIED
+                or (
+                    identity.namespace is IdentityNamespace.COMICVINE
+                    and targets[request.local_id].comicvine_id != int(identity.external_id)
+                )
+            ):
+                raise IdentityReviewRequiredError(
+                    "Historical identity receipt no longer proves current ownership"
+                )
+    if not fresh:
+        return receipts
 
     now = datetime.now(UTC)
     creates: dict[tuple[int, IdentityNamespace], dict[str, object]] = {}

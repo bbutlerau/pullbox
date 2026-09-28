@@ -40,6 +40,7 @@ from pullbox.providers.metadata.comicvine import ComicVineError
 from pullbox.services.catalog.reader import CatalogIssueSummary, CatalogSeriesMetadata
 from pullbox.services.cover_cache_service import purge_series_cover_cache
 from pullbox.services.metadata_writer_identity import (
+    attach_issue_metadata_identity,
     attach_issue_summary_identities,
     attach_series_metadata_identity,
     comicvine_identity,
@@ -623,11 +624,35 @@ class MetadataService:
         except ComicVineError as exc:
             raise _provider_error_from_comicvine(exc) from exc
 
-        existing = (
-            await session.execute(select(Issue).where(Issue.comicvine_id == comicvine_id))
-        ).scalar_one_or_none()
+        identity = comicvine_identity(MetadataEntityKind.ISSUE, meta.provider_id)
+        if int(identity.external_id) != comicvine_id:
+            raise ValidationError("The returned metadata belongs to a different ComicVine issue.")
+        target = (
+            await session.execute(
+                select(Issue.id, Issue.series_id).where(Issue.comicvine_id == comicvine_id)
+            )
+        ).one_or_none()
+        if target is None:
+            raise NotFoundError("Issue", comicvine_id)
 
-        if existing:
+        async with metadata_write_scope(session):
+            # Match attachment lock order: parent before child, and recheck the
+            # relationship after locking in case recovery moved it meanwhile.
+            series = await session.scalar(
+                select(Series)
+                .where(Series.id == target.series_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            existing = await session.scalar(
+                select(Issue)
+                .where(Issue.id == target.id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if series is None or existing is None or existing.series_id != series.id:
+                raise ValidationError("The issue changed during refresh. Reload before retrying.")
+            await attach_issue_metadata_identity(session, series, existing, meta)
             existing.issue_number = meta.issue_number
             existing.issue_number_text = _exact_issue_number_text(
                 meta.issue_number,
@@ -646,9 +671,6 @@ class MetadataService:
             existing.metadata_source = "comicvine"
             issue = existing
             log.debug("metadata_issue_updated", issue_id=issue.id)
-        else:
-            raise NotFoundError("Issue", comicvine_id)
-
         return issue
 
     async def prefetch_issue_metadata_batch(
