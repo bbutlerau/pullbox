@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 
+from pullbox.core.comicvine_arc_identity import normalize_comicvine_arc_id
 from pullbox.core.metadata_identity import (
     ExactIdentityConflict,
     ExactIdentityEvidence,
@@ -157,6 +158,8 @@ async def read_legacy_identity_page(
             for row_id, local_id, source, value in arc_rows:
                 storage = LegacyIdentityStorage.STORY_ARC_RELATION
                 try:
+                    if source == IdentityNamespace.COMICVINE:
+                        value = normalize_comicvine_arc_id(value)
                     identity = ExternalIdentityRef(IdentityNamespace(source), entity_kind, value)
                 except ValueError:
                     problems.append(

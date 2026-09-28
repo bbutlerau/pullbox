@@ -373,7 +373,7 @@ async def test_materializes_exact_ordered_entries_identities_and_multiple_arcs(
     ]
     assert {item.issue_id for item in memberships if item.issue_id == million.id} == {million.id}
     assert {(item.source, item.namespace, item.external_id) for item in identities} == {
-        ("comicvine", "story_arc", "4045-12"),
+        ("comicvine", "story_arc", "12"),
         ("mylar3", "story_arc", "arc-local-1"),
         ("mylar3", "story_arc", "arc-local-2"),
     }

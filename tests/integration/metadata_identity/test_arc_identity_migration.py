@@ -18,6 +18,7 @@ from sqlalchemy import (
     String,
     Table,
     UniqueConstraint,
+    event,
     func,
     insert,
     inspect,
@@ -156,7 +157,7 @@ async def test_arc_migration_backfills_proof_and_preserves_import_scopes(identit
 
 
 @pytest.mark.parametrize(
-    "problem", ["duplicate_provider", "column_disagreement", "other_owner", "padded", "invalid"]
+    "problem", ["duplicate_provider", "column_disagreement", "other_owner", "wrong_type", "invalid"]
 )
 async def test_arc_migration_refuses_ambiguous_legacy_evidence_before_ddl(
     identity_probe_db, problem
@@ -179,7 +180,7 @@ async def test_arc_migration_refuses_ambiguous_legacy_evidence_before_ddl(
     elif problem == "other_owner":
         rows[0]["story_arc_id"] = second
     else:
-        rows[0]["external_id"] = "0031" if problem == "padded" else "unparseable"
+        rows[0]["external_id"] = "4050-31" if problem == "wrong_type" else "unparseable"
     async with engine.begin() as connection:
         await connection.execute(insert(old), rows)
         before = (await connection.execute(select(old))).all()
@@ -190,6 +191,230 @@ async def test_arc_migration_refuses_ambiguous_legacy_evidence_before_ddl(
             lambda conn: {c["name"] for c in inspect(conn).get_columns(_NAME)}
         )
         assert not _NEW & columns
+
+
+@pytest.mark.parametrize("raw", ["4045-31", "0031", " 4045-0031 "])
+async def test_arc_migration_normalizes_proven_legacy_keys_reversibly(identity_probe_db, raw):
+    engine, factory, _ = identity_probe_db
+    old = await _old_schema(engine)
+    first, _ = await _arcs(factory)
+    async with engine.begin() as connection:
+        await connection.execute(
+            insert(old).values(
+                story_arc_id=first,
+                source="comicvine",
+                namespace="story_arc",
+                external_id=raw,
+                source_url="https://comicvine.gamespot.com/arc/4045-31/",
+                evidence={"imported_story_arc_id": 17, "unknown": {"keep": True}},
+            )
+        )
+        before = (await connection.execute(select(old))).mappings().one()
+        await connection.run_sync(lambda conn: _migration(conn).upgrade())
+        active = Base.metadata.tables[_NAME]
+        events = Base.metadata.tables["story_arc_identity_events"]
+        after = (await connection.execute(select(active))).mappings().one()
+        assert after.external_id == "31"
+        assert after.id == before.id
+        # Use the same legacy projection, not different UTC result processors.
+        assert await connection.scalar(select(old.c.created_at)) == before.created_at
+        assert after.source_url == before.source_url
+        assert after.evidence["unknown"] == before.evidence["unknown"]
+        assert after.evidence["_pullbox_identity_normalization"] == {
+            "schema_version": 1,
+            "external_id": raw,
+        }
+        assert after.verification_state == "verified"
+        event = (await connection.execute(select(events))).mappings().one()
+        assert json.loads(event.request_json)["identity"]["external_id"] == "31"
+        assert json.loads(event.request_json)["legacy_external_id"] == raw
+        await connection.run_sync(lambda conn: _migration(conn).upgrade())
+        assert await connection.scalar(select(func.count()).select_from(events)) == 1
+        await connection.run_sync(lambda conn: _migration(conn).downgrade())
+        assert (await connection.execute(select(old))).mappings().one() == before
+        await connection.run_sync(lambda conn: _migration(conn).upgrade())
+        assert await connection.scalar(select(active.c.external_id)) == "31"
+
+
+@pytest.mark.parametrize(
+    "problem", ["alias_owner", "alias_same_owner", "column_owner", "bad_late", "marker"]
+)
+async def test_arc_normalization_refuses_ambiguity_before_any_write(identity_probe_db, problem):
+    engine, factory, _ = identity_probe_db
+    old = await _old_schema(engine)
+    ids = await _arcs(factory, (None,) * 205)
+    rows = [
+        {
+            "story_arc_id": local_id,
+            "source": "comicvine",
+            "namespace": "story_arc",
+            "external_id": f"4045-{index + 100}",
+            "evidence": {},
+        }
+        for index, local_id in enumerate(ids)
+    ]
+    if problem in {"alias_owner", "alias_same_owner"}:
+        rows[-1]["external_id"] = "00100"
+        if problem == "alias_same_owner":
+            rows[-1]["story_arc_id"] = ids[0]
+    elif problem == "bad_late":
+        rows[-1]["external_id"] = "4000-100"
+    elif problem == "marker":
+        rows[-1]["evidence"] = {"_pullbox_identity_normalization": {"user": "data"}}
+    async with engine.begin() as connection:
+        await connection.execute(insert(old), rows)
+        if problem == "column_owner":
+            await connection.execute(
+                update(StoryArc).where(StoryArc.id == ids[-1]).values(comicvine_id=100)
+            )
+        before = (await connection.execute(select(old).order_by(old.c.id))).all()
+        with pytest.raises(RuntimeError, match="review"):
+            await connection.run_sync(lambda conn: _migration(conn).upgrade())
+        assert (await connection.execute(select(old).order_by(old.c.id))).all() == before
+        columns = await connection.run_sync(
+            lambda conn: {c["name"] for c in inspect(conn).get_columns(_NAME)}
+        )
+        assert not _NEW & columns
+
+
+async def test_frozen_arc_parser_matches_runtime_boundary(identity_probe_db):
+    from pullbox.core.comicvine_arc_identity import normalize_comicvine_arc_id
+
+    engine, _, _ = identity_probe_db
+    valid = ["12", "00012", " 4045-00012 ", f"4045-{2**63 - 1}"]
+    invalid = ["", " ", "4045-0", "4000-12", "4045- 12", "4045-12/", "\t12", "\uff11", str(2**63)]
+    async with engine.connect() as connection:
+        for value in valid:
+            result = await connection.run_sync(
+                lambda conn, value=value: _migration(conn)._canonical_id("comicvine", value)
+            )
+            assert result == normalize_comicvine_arc_id(value)
+        for value in invalid:
+            with pytest.raises(ValueError):
+                normalize_comicvine_arc_id(value)
+            with pytest.raises(RuntimeError, match="review"):
+                await connection.run_sync(
+                    lambda conn, value=value: _migration(conn)._canonical_id("comicvine", value)
+                )
+
+
+async def test_normalization_downgrade_preserves_later_decisions(identity_probe_db):
+    engine, factory, _ = identity_probe_db
+    old = await _old_schema(engine)
+    first, _ = await _arcs(factory)
+    async with engine.begin() as connection:
+        await connection.execute(
+            insert(old).values(
+                story_arc_id=first,
+                source="comicvine",
+                namespace="story_arc",
+                external_id="4045-31",
+            )
+        )
+        await connection.run_sync(lambda conn: _migration(conn).upgrade())
+        active = Base.metadata.tables[_NAME]
+        await connection.execute(update(active).values(verification_state="conflicted", revision=2))
+        with pytest.raises(RuntimeError, match="review"):
+            await connection.run_sync(lambda conn: _migration(conn).downgrade())
+        assert await connection.scalar(select(active.c.external_id)) == "31"
+        assert await connection.scalar(select(active.c.verification_state)) == "conflicted"
+
+
+async def test_arc_migration_checks_all_current_proof_before_normalizing(identity_probe_db):
+    engine, factory, _ = identity_probe_db
+    first, second = await _arcs(factory, (None, None))
+    active = Base.metadata.tables[_NAME]
+    async with engine.begin() as connection:
+        await connection.execute(
+            insert(active),
+            [
+                {
+                    "story_arc_id": first,
+                    "source": "comicvine",
+                    "namespace": "story_arc",
+                    "external_id": "4045-31",
+                },
+                {
+                    "story_arc_id": second,
+                    "source": "comicvine",
+                    "namespace": "story_arc",
+                    "external_id": "32",
+                },
+            ],
+        )
+        await connection.execute(
+            update(active)
+            .where(active.c.story_arc_id == second)
+            .values(verification_state="conflicted", revision=2)
+        )
+        before = (await connection.execute(select(active).order_by(active.c.id))).all()
+        with pytest.raises(RuntimeError, match="review"):
+            await connection.run_sync(lambda conn: _migration(conn).upgrade())
+        assert (await connection.execute(select(active).order_by(active.c.id))).all() == before
+
+
+async def test_arc_migration_preserves_existing_history_before_normalizing(identity_probe_db):
+    engine, factory, _ = identity_probe_db
+    old = await _old_schema(engine)
+    first, _ = await _arcs(factory)
+    events = Base.metadata.tables["story_arc_identity_events"]
+    async with engine.begin() as connection:
+        await connection.execute(
+            insert(old).values(
+                story_arc_id=first, source="comicvine", namespace="story_arc", external_id="4045-31"
+            )
+        )
+        receipt = await connection.run_sync(
+            lambda conn: _migration(conn)._expected(first, "comicvine", "31")[1]
+        )
+        await connection.execute(insert(events).values(**receipt))
+        before = (await connection.execute(select(old))).all()
+        with pytest.raises(RuntimeError, match="review"):
+            await connection.run_sync(lambda conn: _migration(conn).upgrade())
+        assert (await connection.execute(select(old))).all() == before
+        assert await connection.scalar(select(func.count()).select_from(events)) == 1
+
+
+async def test_arc_normalization_pages_large_legacy_libraries(identity_probe_db):
+    engine, factory, _ = identity_probe_db
+    old = await _old_schema(engine)
+    ids = await _arcs(factory, (None,) * 210)
+    maximum_binds = 0
+    query_count = 0
+
+    def track(_conn, _cursor, _statement, parameters, _context, many):
+        nonlocal maximum_binds, query_count
+        query_count += 1
+        maximum_binds = max(
+            maximum_binds,
+            max((len(row) for row in parameters), default=0) if many else len(parameters),
+        )
+
+    async with engine.begin() as connection:
+        await connection.execute(
+            insert(old),
+            [
+                {
+                    "story_arc_id": local_id,
+                    "source": "comicvine",
+                    "namespace": "story_arc",
+                    "external_id": f"4045-{i + 100}",
+                }
+                for i, local_id in enumerate(ids)
+            ],
+        )
+        before = (await connection.execute(select(old).order_by(old.c.id))).all()
+        event.listen(engine.sync_engine, "before_cursor_execute", track)
+        try:
+            await connection.run_sync(lambda conn: _migration(conn).upgrade())
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", track)
+        assert maximum_binds <= 999
+        assert query_count < 650
+        events = Base.metadata.tables["story_arc_identity_events"]
+        assert await connection.scalar(select(func.count()).select_from(events)) == 210
+        await connection.run_sync(lambda conn: _migration(conn).downgrade())
+        assert (await connection.execute(select(old).order_by(old.c.id))).all() == before
 
 
 @pytest.mark.parametrize("change", ["state", "history", "revision", "scoped_lifecycle"])

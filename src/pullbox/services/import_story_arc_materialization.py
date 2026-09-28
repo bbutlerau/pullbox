@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.orm import selectinload
 
+from pullbox.core.comicvine_arc_identity import normalize_comicvine_arc_id
 from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.story_arc_naming import (
     validate_story_arc_file_template,
@@ -466,6 +467,7 @@ async def _load_batch_external_identity_evidence(
     """Scan provider-neutral entry evidence without materializing entry ORM rows."""
     staged_arc_ids = [int(staged_arc.id) for staged_arc in staged_arcs]
     comicvine_ids: dict[int, set[str]] = {arc_id: set() for arc_id in staged_arc_ids}
+    invalid_arc_ids: set[int] = set()
     row_count = 0
     result = await session.stream(
         select(
@@ -483,8 +485,14 @@ async def _load_batch_external_identity_evidence(
         async for imported_story_arc_id, evidence in result:
             values = comicvine_ids[int(imported_story_arc_id)]
             cv_arc_id = _mapping(evidence).get("cv_arc_id")
-            if cv_arc_id is not None and str(cv_arc_id).strip() and len(values) < 2:
-                values.add(str(cv_arc_id))
+            if cv_arc_id is not None:
+                try:
+                    normalized = normalize_comicvine_arc_id(cv_arc_id)
+                except ValueError:
+                    invalid_arc_ids.add(int(imported_story_arc_id))
+                else:
+                    if len(values) < 2:
+                        values.add(normalized)
             row_count += 1
             if row_count % entry_page_size == 0:
                 await _checkpoint(cancellation_check)
@@ -498,7 +506,9 @@ async def _load_batch_external_identity_evidence(
             identities.append((staged_arc.source_kind.value, "story_arc", staged_arc.source_arc_id))
         values = comicvine_ids[int(staged_arc.id)]
         warning_code = None
-        if len(values) == 1:
+        if int(staged_arc.id) in invalid_arc_ids:
+            warning_code = "invalid_external_identity_evidence"
+        elif len(values) == 1:
             identities.append(("comicvine", "story_arc", next(iter(values))))
         elif len(values) > 1:
             warning_code = "conflicting_external_identity_evidence"
