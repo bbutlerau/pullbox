@@ -100,14 +100,18 @@ def _window_requires_full(
 
 
 async def sync_scheduled_issue_catalog(
-    session: AsyncSession, series_id: int, *, refresh_days: int
+    session: AsyncSession,
+    series_id: int,
+    *,
+    refresh_days: int,
+    registry: MetadataSourceRegistry | None = None,
 ) -> ScheduledSeriesRefresh:
     """Read outside transactions, then save issues and progress for the task to commit."""
     if session.new or session.dirty or session.deleted:
         raise SeriesRefreshError("Finish pending library changes before synchronizing issues.")
     try:
         async with asyncio.timeout(120):
-            return await _sync(session, series_id, refresh_days=refresh_days)
+            return await _sync(session, series_id, refresh_days=refresh_days, registry=registry)
     except SeriesRefreshError:
         raise
     except (ValueError, IntegrityError, ValidationError) as exc:
@@ -121,7 +125,11 @@ async def sync_scheduled_issue_catalog(
 
 
 async def _sync(
-    session: AsyncSession, series_id: int, *, refresh_days: int
+    session: AsyncSession,
+    series_id: int,
+    *,
+    refresh_days: int,
+    registry: MetadataSourceRegistry | None = None,
 ) -> ScheduledSeriesRefresh:
     before = await read_series_refresh_state(session, series_id)
     series = await session.get(Series, series_id)
@@ -129,7 +137,7 @@ async def _sync(
     cadence = _cadence(series)
     covers = await resolve_covers_dir(session)
     enabled = get_settings().metadata_gcd_api_v2_enabled
-    registry = MetadataSourceRegistry(
+    registry = registry or MetadataSourceRegistry(
         await load_source_runtime(session, gcd_api_enabled=enabled),
         gcd_api_enabled=enabled,
         revalidate_reads=True,
@@ -161,12 +169,12 @@ async def _sync(
         if before.series.values.status == SeriesStatus.ENDED.value
         else 1
     )
-    failures = []
+    failures: list[SourceOutcome] = []
     for source in sources:
         checkpoint = checkpoints[source]
         full = _full_due(cadence, checkpoint, now, refresh_days)
         if not full and checkpoint is not None and now - checkpoint.checked_at < interval:
-            return ScheduledSeriesRefresh(0, False, None, covers)
+            return ScheduledSeriesRefresh(0, False, None, covers, tuple(failures))
         full = (
             full or registry.source_availability(source, SourceCapability.RECENT_ISSUES) is not None
         )
@@ -198,7 +206,7 @@ async def _sync(
                     session, before, cadence, checkpoint, fetched.data, started_at
                 )
                 return ScheduledSeriesRefresh(
-                    len(created), cadence.monitored and bool(created), None, covers
+                    len(created), cadence.monitored and bool(created), None, covers, tuple(failures)
                 )
         if full:
             try:
@@ -219,6 +227,7 @@ async def _sync(
                 result.series.monitored and bool(result.created_issue_ids),
                 result.series.cover_url,
                 covers,
+                (*failures, *result.outcomes),
             )
     raise SeriesRefreshError(
         "No configured source could supply the issue catalog. Check source status and retry.",

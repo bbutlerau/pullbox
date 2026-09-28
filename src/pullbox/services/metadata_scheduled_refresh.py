@@ -12,7 +12,7 @@ from pullbox.core.metadata_identity_state import IdentityVerificationState
 from pullbox.models import Issue, Series
 from pullbox.models.issue import IssueStatus
 from pullbox.models.metadata_identity import SeriesExternalIdentity
-from pullbox.schemas.metadata_sources import SourceCapability
+from pullbox.schemas.metadata_sources import SourceCapability, SourceOutcome
 from pullbox.services.cover_resolver import resolve_covers_dir
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
 from pullbox.services.metadata_series_refresh import refresh_series_catalog_from_sources
@@ -50,12 +50,17 @@ class ScheduledSeriesRefresh:
     search_wanted: bool
     cover_url: str | None
     covers: Path
+    outcomes: tuple[SourceOutcome, ...] = ()
 
 
-async def refresh_scheduled_series(session: AsyncSession, series_id: int) -> ScheduledSeriesRefresh:
+async def refresh_scheduled_series(
+    session: AsyncSession, series_id: int, *, registry: MetadataSourceRegistry | None = None
+) -> ScheduledSeriesRefresh:
     """Fill gaps and synchronize a complete catalog; the task commits progress too."""
     covers = await resolve_covers_dir(session)
-    result = await refresh_series_catalog_from_sources(session, series_id, replace_managed=False)
+    result = await refresh_series_catalog_from_sources(
+        session, series_id, registry=registry, replace_managed=False
+    )
     wanted = (
         await session.scalar(
             select(Issue.id)
@@ -74,4 +79,5 @@ async def refresh_scheduled_series(session: AsyncSession, series_id: int) -> Sch
         result.series.monitored and wanted is not None,
         result.series.cover_url,
         covers,
+        result.outcomes,
     )

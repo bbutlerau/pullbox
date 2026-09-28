@@ -680,8 +680,9 @@ Nightly issue and metadata sweeps checkpoint their last completed series and
 initial upper bound in `SystemConfig`. Each batch handles at most 25 series and
 checks a two-minute budget between series; an individual series has a separate
 15-minute timeout. Pending batches resume through hidden continuations, including
-after restart. Provider throttling pauses the sweep at its saved position instead
-of repeatedly failing every remaining series. Provider reads happen before the
+after restart. Deferred provider work lives in `metadata_series_retries`, keyed
+by task, series and source, rather than holding the shared sweep cursor. Batches
+reserve space for fresh work and due retries. Provider reads happen before the
 atomic library/progress write; optional cover work follows its commit.
 The scheduled metadata refresh selects verified identities backed by executable,
 configured sources, including native Metron and local ComicVine without an API
@@ -692,9 +693,15 @@ cover-cache work. Structured source failures preserve durable retry deadlines;
 disabling the last eligible source clears the continuation.
 The daily issue sweep uses the same configured-source eligibility, with partial
 windows where a valid source checkpoint permits them. Native and local sources
-do not require a ComicVine API key. Failed sources retain their checkpoints;
-if fallback also fails, earlier retryable outcomes retain the sweep's retry
-deadline. Independent per-provider retry progress remains future work.
+do not require a ComicVine API key. Failed sources retain their checkpoints,
+including when a fallback succeeds. Retry attempts restrict reads to deferred
+sources and commit retry settlement with library/cursor changes. Authentication
+failures have no timed retry: a changed source policy or credential scope admits
+them again. Only one-way configuration scope keys are stored, never credentials.
+Cancellation, failed commits and stale attempts cannot discard or resurrect
+settled retry work. Infrastructure lock failures retain a sweep-level pause.
+Durable account-wide cooldown admission across different series remains separate
+from these entity retries; existing provider clients retain process-local throttling.
 Post-restore aftercare keeps its recovery marker while continuation batches remain
 active; it observes completion without retaining a database transaction between checks.
 Cancellation leaves the marker and sweep checkpoint available for the next startup.

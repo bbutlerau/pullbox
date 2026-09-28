@@ -73,6 +73,7 @@ from pullbox.models.metadata_identity import (
     SeriesIdentityEvent,
     StoryArcIdentityEvent,
 )
+from pullbox.models.metadata_series_retry import MetadataSeriesRetry
 from pullbox.models.metadata_source import MetadataSourceConfig
 from pullbox.models.operation_progress import (
     OperationProgress,
@@ -201,6 +202,7 @@ __all__ = [
     "MatchConfidence",
     "MatchingSuggestion",
     "MetadataProviderCacheEntry",
+    "MetadataSeriesRetry",
     "MetadataSourceConfig",
     "OperationProgress",
     "OperationProgressState",

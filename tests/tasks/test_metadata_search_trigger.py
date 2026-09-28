@@ -6,10 +6,11 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from pullbox.core.metadata_identity import MetadataSource
-from pullbox.models import Base, Series
+from pullbox.models import Base, MetadataSeriesRetry, Series
 from pullbox.schemas.metadata_sources import SourceOutcome, SourceStatus
 from pullbox.services.metadata_scheduled_refresh import ScheduledSeriesRefresh
 from pullbox.services.metadata_series_refresh import SeriesRefreshError
@@ -48,11 +49,11 @@ def _make_metadata_svc(_unused):
 
 @contextlib.contextmanager
 def _sync_patches(factory, service, scheduler, *, search=False):
-    async def refresh(session, series_id):
+    async def refresh(session, series_id, *, registry):
         await service.refresh_series(session, series_id)
         return ScheduledSeriesRefresh(int(search), search, None, Path("/unused-test-covers"))
 
-    async def daily(session, series_id, *, refresh_days):
+    async def daily(session, series_id, *, refresh_days, registry):
         await service.fetch_series(session, series_id)
         return ScheduledSeriesRefresh(int(search), search, None, Path("/unused-test-covers"))
 
@@ -208,7 +209,7 @@ async def test_bounded_sweep_keeps_initial_upper_bound_and_commits_searches(
 @pytest.mark.parametrize("task_id", ["sync_new_issues", "refresh_metadata"])
 async def test_provider_retry_retains_cursor_and_survives_restart(restore_db_factory, task_id):
     factory = restore_db_factory
-    await _create_series(factory, comicvine_id=91001)
+    series_id = await _create_series(factory, comicvine_id=91001)
     service = _make_metadata_svc([])
     operation = service.fetch_series if task_id == "sync_new_issues" else service.refresh_series
     operation.side_effect = SeriesRefreshError(
@@ -228,7 +229,10 @@ async def test_provider_retry_retains_cursor_and_survives_restart(restore_db_fac
     operation.assert_awaited_once()
     async with factory() as session:
         state = await load_sweep(session, task_id)
-        assert state.cursor == 0 and state.active and state.retry_at > 0
+        assert state.cursor == series_id and state.active and state.retry_at > 0
+        retry = await session.scalar(select(MetadataSeriesRetry))
+        assert retry.source == MetadataSource.METRON_API.value
+        assert retry.retry_at.timestamp() == state.retry_at
     scheduler._scheduler.add_job.assert_not_called()
 
 

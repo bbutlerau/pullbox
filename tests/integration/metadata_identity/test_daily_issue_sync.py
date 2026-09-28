@@ -10,7 +10,7 @@ from sqlalchemy import select, update
 from pullbox.core.comicvine_key import save_comicvine_api_key
 from pullbox.core.metadata_identity import MetadataEntityKind as Kind
 from pullbox.core.metadata_identity import MetadataSource as Source
-from pullbox.models import Issue, Series, SeriesCatalogCheckpoint
+from pullbox.models import Issue, MetadataSeriesRetry, Series, SeriesCatalogCheckpoint
 from pullbox.models.issue import IssueStatus
 from pullbox.models.metadata_source import MetadataSourceConfig
 from pullbox.models.series import IssueCatalogState, SeriesStatus
@@ -191,12 +191,19 @@ async def test_daily_window_failure_preserves_issue_checkpoint_and_durable_retry
     offer(adapter, data)
     adapter.recent_failure = failure
     result = await metadata_task.sync_new_issues()
-    assert result.status == "waiting"
+    auth = failure is SourceStatus.AUTHENTICATION_FAILED
+    assert result.status == ("completed" if auth else "waiting")
     async with factory() as session:
         assert await load_catalog_checkpoint(session, series_id, Source.METRON_API) == old
         assert (await session.get(Series, series_id)).issue_count == 1
         state = await load_sweep(session, "sync_new_issues")
-        assert state.cursor == 0 and state.retry_at > datetime.now(UTC).timestamp()
+        assert state.cursor == series_id
+        row = await session.scalar(select(MetadataSeriesRetry))
+        assert row.source == Source.METRON_API.value and row.status == failure.value
+        if auth:
+            assert not state.active and row.retry_at is None
+        else:
+            assert state.retry_at == row.retry_at.timestamp() > datetime.now(UTC).timestamp()
     await metadata_task.sync_new_issues()
     assert len(adapter.calls) == 1
     scheduler._scheduler.add_job.assert_not_called()
@@ -292,12 +299,14 @@ async def test_daily_source_fallback_preserves_failed_source_progress(
     factories = {**registry(api).factories, **registry(local).factories}
     monkeypatch.setattr(sources, "metadata_sources", lambda: factories)
     result = await metadata_task.sync_new_issues()
-    assert result.status == ("waiting" if fallback_fails else "completed")
+    assert result.status == "waiting", "Fallback success must retain deferred source work"
     assert [call[0] for call in api.calls] == ["recent"]
     assert [call[0] for call in local.calls] == (["series"] if fallback_fails else ["recent"])
     async with factory() as session:
         assert await load_catalog_checkpoint(session, series_id, Source.COMICVINE_API) == old_api
         assert (await session.get(Series, series_id)).issue_count == (1 if fallback_fails else 2)
+        retry = await session.scalar(select(MetadataSeriesRetry))
+        assert retry.source == Source.COMICVINE_API.value and retry.retry_at is not None
     assert scheduler._scheduler.add_job.call_count == int(not fallback_fails)
 
 

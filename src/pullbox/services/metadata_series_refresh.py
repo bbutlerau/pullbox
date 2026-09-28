@@ -3,7 +3,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -76,6 +76,7 @@ class SeriesRefreshError(ValueError):
 class SeriesCatalogRefresh:
     series: Series
     created_issue_ids: tuple[int, ...]
+    outcomes: tuple[SourceOutcome, ...] = ()
 
 
 @asynccontextmanager
@@ -278,7 +279,7 @@ async def refresh_series_catalog_from_sources(
             source=bundle.series.source.value,
             catalog_count=bundle.catalog_total,
         )
-        return result
+        return replace(result, outcomes=tuple(failed.values()))
     except SeriesRefreshError:
         raise
     except IssueCatalogConflictError as exc:

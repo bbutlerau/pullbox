@@ -377,7 +377,9 @@ class TestRefreshMetadataWrapper:
             failing_id = series_two.id
             fresh_id = fresh_series.id
 
-        async def _refresh_series(session: AsyncSession, series_id: int) -> ScheduledSeriesRefresh:
+        async def _refresh_series(
+            session: AsyncSession, series_id: int, *, registry: object
+        ) -> ScheduledSeriesRefresh:
             series = await session.get(Series, series_id)
             assert series is not None
             if series_id == failing_id:

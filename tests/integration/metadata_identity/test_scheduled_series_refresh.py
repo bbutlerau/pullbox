@@ -13,7 +13,7 @@ from pullbox.core.encryption import encrypt_secret
 from pullbox.core.metadata_identity import IdentityNamespace as Namespace
 from pullbox.core.metadata_identity import MetadataEntityKind as Kind
 from pullbox.core.metadata_identity import MetadataSource as Source
-from pullbox.models import Issue, Series
+from pullbox.models import Issue, MetadataSeriesRetry, Series
 from pullbox.models.issue import IssueStatus
 from pullbox.models.metadata_identity import SeriesExternalIdentity
 from pullbox.models.metadata_source import MetadataSourceConfig
@@ -201,7 +201,7 @@ async def test_ineligible_series_never_contact_a_provider(scheduled, reason):
         SourceStatus.UNAVAILABLE,
     ],
 )
-async def test_scheduled_failure_is_atomic_and_stays_at_retry_cursor(scheduled, operation, status):
+async def test_scheduled_failure_is_atomic_and_keeps_source_retry(scheduled, operation, status):
     factory, adapter, scheduler = scheduled
     series_id, data = await add_series(factory)
     offer(adapter, data)
@@ -213,11 +213,18 @@ async def test_scheduled_failure_is_atomic_and_stays_at_retry_cursor(scheduled, 
     setattr(adapter, operation, throttled)
     started = datetime.now(UTC).timestamp()
     result = await metadata_task.refresh_metadata()
-    assert result.status == "waiting", "Structured source throttles must keep the sweep resumable"
+    auth = status is SourceStatus.AUTHENTICATION_FAILED
+    assert result.status == ("completed" if auth else "waiting")
     async with factory() as session:
         state = await load_sweep(session, "refresh_metadata")
-        assert state.active and state.cursor == 0 and state.upper_bound == series_id
-        assert started + 719 <= state.retry_at <= datetime.now(UTC).timestamp() + 721
+        assert state.cursor == state.upper_bound == series_id
+        retry = await session.scalar(select(MetadataSeriesRetry))
+        assert retry.source == Source.METRON_API.value and retry.status == status.value
+        if auth:
+            assert not state.active and retry.retry_at is None
+        else:
+            assert state.active and retry.retry_at.timestamp() == state.retry_at
+            assert started + 719 <= state.retry_at <= datetime.now(UTC).timestamp() + 721
         assert (await load_metadata_baseline(session, Kind.SERIES, series_id)).revision == 1
     calls = list(adapter.calls)
     await metadata_task.refresh_metadata()
@@ -329,7 +336,8 @@ async def test_failed_metadata_commit_never_fetches_artwork_or_schedules_search(
         await original(session, task_id, state)
 
     monkeypatch.setattr(metadata_task, "save_sweep", fail_checkpoint)
-    await metadata_task.refresh_metadata()
+    with pytest.raises(RuntimeError, match="checkpoint failed before commit"):
+        await metadata_task.refresh_metadata()
     assert adapter.calls
     artwork.assert_not_awaited()
     scheduler._scheduler.add_job.assert_not_called()
