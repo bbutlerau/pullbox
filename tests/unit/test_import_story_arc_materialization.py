@@ -1655,7 +1655,7 @@ async def test_actual_mutations_are_journaled_once_in_reverse_safe_order(
     assert [action.action_type for action in first_actions] == [
         "story_arc_created",
         "story_arc_external_identity_created",
-        "story_arc_external_identity_created",
+        "story_arc_identity_verified",
         "story_arc_membership_created",
     ]
     assert [action.id for action in second_actions] == [action.id for action in first_actions]

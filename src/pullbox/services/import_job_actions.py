@@ -10,9 +10,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
+from sqlalchemy import false, or_
 from sqlalchemy import func as sa_func
 from sqlalchemy import insert as sa_insert
-from sqlalchemy import or_
 from sqlalchemy import select as sa_select
 from sqlalchemy import update as sa_update
 
@@ -21,6 +21,7 @@ from pullbox.core.library_file_ownership import (
     build_file_identity_signature,
     build_managed_placement_signature,
 )
+from pullbox.core.metadata_identity import IdentityNamespace
 from pullbox.models.blocklist import BlocklistEntry
 from pullbox.models.direct_acquisition import DirectAcquisitionAttempt
 from pullbox.models.download import DownloadHistory
@@ -40,6 +41,7 @@ from pullbox.models.library import (
     LibraryRoot,
     MatchConfidence,
 )
+from pullbox.models.metadata_identity import StoryArcIdentityEvent
 from pullbox.models.pending_match import PendingMatch
 from pullbox.models.reader import IssueReaderState
 from pullbox.models.search_log import SearchLog
@@ -56,6 +58,11 @@ from pullbox.models.story_arc import (
 )
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
 from pullbox.models.story_arc_sync import StoryArcSyncWork, StoryArcSyncWorkState
+from pullbox.services.import_story_arc_identity import (
+    IDENTITY_VERIFIED_ACTION,
+    require_owned_arc_identity_history,
+    rollback_import_arc_identity,
+)
 from pullbox.utilities.settings import restore_file_from_utility_trash
 
 if TYPE_CHECKING:
@@ -788,6 +795,16 @@ async def rollback_action(
         await _rollback_updated_story_arc_membership(session, action, payload)
     elif action_type == "story_arc_external_identity_created":
         await _rollback_created_story_arc_external_identity(session, action, payload)
+    elif action_type == IDENTITY_VERIFIED_ACTION:
+        await _require_story_arc_ownership(
+            session,
+            action=action,
+            imported_story_arc_id=_positive_int(
+                payload.get("imported_story_arc_id"), "imported_story_arc_id"
+            ),
+            story_arc_id=_positive_int(payload.get("story_arc_id"), "story_arc_id"),
+        )
+        await rollback_import_arc_identity(session, action)
     elif action_type == "story_arc_policy_updated":
         await _rollback_story_arc_policy_update(session, action, payload)
     elif action_type == "story_arc_created":
@@ -2619,7 +2636,12 @@ async def _rollback_created_story_arc_external_identity(
     identity_id = _positive_int(payload.get("external_identity_id"), "external_identity_id")
     story_arc_id = _positive_int(payload.get("story_arc_id"), "story_arc_id")
     expected_after = _payload_mapping(payload, "expected_after")
-    identity = await session.get(StoryArcExternalIdentity, identity_id)
+    if session.get_bind().dialect.name == "sqlite":
+        await session.execute(sa_update(StoryArc).where(false()).values(revision=StoryArc.revision))
+    await session.execute(
+        sa_select(StoryArc.id).where(StoryArc.id == story_arc_id).with_for_update()
+    )
+    identity = await session.get(StoryArcExternalIdentity, identity_id, populate_existing=True)
     if identity is None:
         return
     await _require_story_arc_ownership(
@@ -2635,6 +2657,25 @@ async def _rollback_created_story_arc_external_identity(
         or _external_identity_state(identity) != expected_after
     ):
         raise ValueError("Story-arc external identity changed after import; rollback refused")
+    if identity.source in set(IdentityNamespace) and identity.namespace == "story_arc":
+        history = await session.scalar(
+            sa_select(StoryArcIdentityEvent.id)
+            .where(
+                StoryArcIdentityEvent.story_arc_id == story_arc_id,
+                StoryArcIdentityEvent.identity_namespace == identity.source,
+            )
+            .limit(1)
+        )
+        if (
+            identity.verification_state is not None
+            or identity.evidence_kind is not None
+            or identity.evidence_locator is not None
+            or identity.verified_at is not None
+            or identity.last_seen_at is not None
+            or identity.revision != 1
+            or history is not None
+        ):
+            raise ValueError("Story-arc external identity changed after import; rollback refused")
     await session.delete(identity)
 
 
@@ -2669,7 +2710,14 @@ async def _rollback_created_story_arc(
 ) -> None:
     story_arc_id = _positive_int(payload.get("story_arc_id"), "story_arc_id")
     expected_after = _payload_mapping(payload, "expected_after")
-    arc = await session.get(StoryArc, story_arc_id)
+    if session.get_bind().dialect.name == "sqlite":
+        await session.execute(sa_update(StoryArc).where(false()).values(revision=StoryArc.revision))
+    arc = await session.scalar(
+        sa_select(StoryArc)
+        .where(StoryArc.id == story_arc_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if arc is None:
         return
     await _require_story_arc_ownership(
@@ -2714,6 +2762,9 @@ async def _rollback_created_story_arc(
     )
     if membership_count or identity_count or placement_count:
         raise ValueError("Story arc still has related rows; rollback refused")
+    await require_owned_arc_identity_history(
+        session, arc_id=story_arc_id, import_job_id=action.import_job_id
+    )
     await session.delete(arc)
 
 

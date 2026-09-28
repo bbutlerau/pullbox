@@ -24,6 +24,8 @@ class IdentityEvidenceRecordKind(enum.StrEnum):
     STORY_ARC_IDENTITY = "story_arc_identity"
     IMPORTED_SERIES = "imported_series"
     IMPORTED_FILE = "imported_file"
+    IMPORTED_STORY_ARC = "imported_story_arc"
+    IMPORT_JOB_ACTION = "import_job_action"
     LIBRARY_FILE = "library_file"
 
 
