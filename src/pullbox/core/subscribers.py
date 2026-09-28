@@ -145,10 +145,12 @@ async def _download_covers_for_series(event: SeriesAdded) -> None:
     """
     from sqlalchemy import select
 
-    from pullbox.core.comicvine_key import get_comicvine_api_key
     from pullbox.models.series import Series
-    from pullbox.providers.metadata.comicvine import ComicVineProvider
-    from pullbox.services.metadata_service import MetadataService
+    from pullbox.services.provider_artwork import (
+        ProviderArtworkClient,
+        issue_cover_stem,
+        pending_provider_cover,
+    )
 
     log = logger.bind(series_id=event.series_id)
     log.info("subscriber_cover_download_start")
@@ -166,21 +168,23 @@ async def _download_covers_for_series(event: SeriesAdded) -> None:
                 log.warning("subscriber_cover_download_series_not_found")
                 return
 
-            api_key = await get_comicvine_api_key(session)
             series_id = series.id
             series_cover_url = series.cover_url
             series_has_cover = bool(series.cover_path)
 
-            # Collect issue cover work list: (issue_id, cover_url, issue_number)
+            # Preserve exact designations: numeric compatibility values can collide.
             result = await session.execute(
-                select(Issue.id, Issue.cover_url, Issue.issue_number).where(
+                select(
+                    Issue.id, Issue.cover_url, Issue.issue_number, Issue.issue_number_text
+                ).where(
                     Issue.series_id == event.series_id,
                     Issue.cover_url.isnot(None),
                     Issue.cover_path.is_(None),
                 )
             )
-            issue_work: list[tuple[int, str, float]] = [
-                (row.id, row.cover_url, row.issue_number) for row in result.all()
+            issue_work: list[tuple[int, str, float, str | None]] = [
+                (row.id, row.cover_url, row.issue_number, row.issue_number_text)
+                for row in result.all()
             ]
     except Exception:
         log.exception("subscriber_cover_download_load_failed")
@@ -198,47 +202,55 @@ async def _download_covers_for_series(event: SeriesAdded) -> None:
 
     covers_dir = covers_base / str(series_id)
 
-    provider = ComicVineProvider(api_key=api_key)
-    svc = MetadataService(provider=provider, covers_dir=covers_base)
-
-    # Download series cover
-    if series_cover_url and not series_has_cover:
-        try:
-            series_cover_dest = covers_dir / "series.jpg"
-            await svc.download_cover(series_cover_url, series_cover_dest)
-            if series_cover_dest.exists():
-                async with factory() as session:
-                    series_obj = await session.get(Series, series_id)
-                    if series_obj and not series_obj.cover_path:
-                        series_obj.cover_path = f"/api/v1/series/{series_id}/cover"
-                        await session.commit()
-                        log.info("subscriber_series_cover_downloaded")
-        except Exception:
-            log.exception("subscriber_series_cover_failed")
-
-    # Download issue covers
     downloaded = 0
-    for issue_id, cover_url, issue_number in issue_work:
-        try:
-            num_str = (
-                f"{int(issue_number):03d}"
-                if issue_number == int(issue_number)
-                else f"{issue_number:06.1f}"
-            )
-            cover_dest = covers_dir / f"issue_{num_str}.jpg"
-            await svc.download_cover(cover_url, cover_dest)
-            if cover_dest.exists():
-                async with factory() as session:
-                    issue_obj = await session.get(Issue, issue_id)
-                    if issue_obj and not issue_obj.cover_path:
-                        issue_obj.cover_path = f"/api/v1/issues/{issue_id}/cover"
-                        await session.commit()
-                        downloaded += 1
-        except Exception:
-            log.exception("subscriber_issue_cover_failed", issue_id=issue_id)
+    async with ProviderArtworkClient() as artwork:
+        if series_cover_url and not series_has_cover:
+            try:
+                series_cover_dest = covers_dir / "series.jpg"
+                async with pending_provider_cover(
+                    artwork, series_cover_url, series_cover_dest
+                ) as pending:
+                    if pending is not None:
+                        async with factory() as session:
+                            series_obj = await session.get(Series, series_id)
+                            if (
+                                series_obj
+                                and not series_obj.cover_path
+                                and series_obj.cover_url == series_cover_url
+                            ):
+                                pending.replace(series_cover_dest)
+                                series_obj.cover_path = f"/api/v1/series/{series_id}/cover"
+                                await session.commit()
+                                log.info("subscriber_series_cover_downloaded")
+            except Exception:
+                log.exception("subscriber_series_cover_failed")
 
-        # Small delay to respect CDN rate limits
-        await asyncio.sleep(0.2)
+        for issue_id, cover_url, issue_number, exact in issue_work:
+            try:
+                stem = issue_cover_stem(issue_number, exact)
+                cover_dest = covers_dir / f"{stem}.jpg"
+                async with pending_provider_cover(artwork, cover_url, cover_dest) as pending:
+                    if pending is not None:
+                        async with factory() as session:
+                            issue_obj = await session.get(Issue, issue_id)
+                            if (
+                                issue_obj
+                                and not issue_obj.cover_path
+                                and issue_obj.series_id == series_id
+                                and issue_obj.cover_url == cover_url
+                                and issue_cover_stem(
+                                    issue_obj.issue_number, issue_obj.issue_number_text
+                                )
+                                == stem
+                            ):
+                                pending.replace(cover_dest)
+                                issue_obj.cover_path = f"/api/v1/issues/{issue_id}/cover"
+                                await session.commit()
+                                downloaded += 1
+            except Exception:
+                log.exception("subscriber_issue_cover_failed", issue_id=issue_id)
+
+            await asyncio.sleep(0.2)
 
     log.info(
         "subscriber_cover_download_complete",

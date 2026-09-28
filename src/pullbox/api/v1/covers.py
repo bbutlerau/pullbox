@@ -174,14 +174,14 @@ async def get_issue_cover(
     if issue is None:
         raise NotFoundError("Issue", issue_id)
 
-    # Format issue number for filename (e.g. 1.0 → "001", 1.5 → "001.5")
-    num = issue.issue_number
-    issue_num_str = f"{int(num):03d}" if num == int(num) else f"{num:06.1f}"
+    from pullbox.services.provider_artwork import issue_cover_stem
+
+    stem = issue_cover_stem(issue.issue_number, issue.issue_number_text)
 
     # 1. Try series folder (by issue number — human-readable, survives DB rebuilds)
     if issue.series and issue.series.path:
         series_path = Path(issue.series.path)
-        cover = _find_cover_file(series_path, f"issue_{issue_num_str}")
+        cover = _find_cover_file(series_path, stem)
         if cover:
             return _serve_issue_image(cover)
 
@@ -191,7 +191,7 @@ async def get_issue_cover(
     covers_base = await resolve_covers_dir(session)
     if issue.series:
         covers_dir = covers_base / str(issue.series_id)
-        cover = _find_cover_file(covers_dir, f"issue_{issue_num_str}")
+        cover = _find_cover_file(covers_dir, stem)
         if cover:
             return _serve_issue_image(cover)
 
