@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from pullbox.providers.base import SeriesMetadata
+    from pullbox.schemas.metadata_sources import ProviderSeriesRead
     from pullbox.services.story_arc_catalog_types import StoryArcCatalogPreview
 
 
@@ -115,7 +116,21 @@ async def seed_members(
                     raise StoryArcCatalogError(
                         "parent_metadata_missing", "Canonical parent changed; refresh the preview"
                     )
-                parent = await _new_series(session, parent_metadata, root, preview.source)
+                profile = (
+                    next(
+                        (
+                            row
+                            for row in preview.source_evidence.series
+                            if row.external_id == parent_key
+                        ),
+                        None,
+                    )
+                    if preview.source_evidence
+                    else None
+                )
+                parent = await _new_series(
+                    session, parent_metadata, root, preview.source, profile=profile
+                )
             parents[parent_key] = parent
         number, exact_number = parse_issue_number_text(
             metadata.issue_number_text or metadata.issue_number
@@ -257,12 +272,19 @@ async def attach_arc_identity(
         and preview.metadata.comicvine_url is not None
     ):
         owner.source_url = preview.metadata.comicvine_url
+    if preview.source_evidence is not None and preview.source_evidence.arc.resource_url:
+        owner.source_url = preview.source_evidence.arc.resource_url
     owner.evidence = {**owner.evidence, "snapshot_fingerprint": preview.fingerprint}
     await session.refresh(arc, ["comicvine_id"])
 
 
 async def _new_series(
-    session: AsyncSession, metadata: SeriesMetadata, root: LibraryRoot, source: MetadataSource
+    session: AsyncSession,
+    metadata: SeriesMetadata,
+    root: LibraryRoot,
+    source: MetadataSource,
+    *,
+    profile: ProviderSeriesRead | None = None,
 ) -> Series:
     series = Series(
         comicvine_id=exact_provider_id(metadata.provider_id)
@@ -294,6 +316,14 @@ async def _new_series(
         ),
         library_root_id=root.id,
     )
+    if profile is not None:
+        series.status = (
+            SeriesStatus(profile.status)
+            if profile.status is not None and profile.status in SeriesStatus
+            else SeriesStatus.UNKNOWN
+        )
+        if profile.series_type is not None and profile.series_type in SeriesType:
+            series.series_type = SeriesType(profile.series_type)
     identifier = await publisher_id(session, metadata.publisher)
     series.publisher = await session.get(Publisher, identifier) if identifier is not None else None
     session.add(series)

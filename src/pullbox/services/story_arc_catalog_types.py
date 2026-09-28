@@ -19,6 +19,27 @@ if TYPE_CHECKING:
     from pullbox.models.story_arc import StoryArc
     from pullbox.providers.base import IssueMetadata, SeriesMetadata
     from pullbox.providers.story_arcs import StoryArcMetadata
+    from pullbox.schemas.metadata_sources import (
+        ProviderIssueRead,
+        ProviderSeriesRead,
+        ProviderStoryArcRead,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SourceArcCatalogEvidence:
+    """Normalized source evidence retained alongside the legacy catalog projection."""
+
+    arc: ProviderStoryArcRead
+    issues: tuple[ProviderIssueRead, ...]
+    series: tuple[ProviderSeriesRead, ...]
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "arc": self.arc.model_dump(mode="json"),
+            "issues": [issue.model_dump(mode="json") for issue in self.issues],
+            "series": [parent.model_dump(mode="json") for parent in self.series],
+        }
 
 
 class StoryArcCatalogError(StoryArcValidationError):
@@ -39,6 +60,7 @@ class StoryArcCatalogPreview:
     fingerprint: str
     source: MetadataSource = MetadataSource.COMICVINE_API
     source_revision: int | None = None
+    source_evidence: SourceArcCatalogEvidence | None = None
 
     @property
     def membership_complete(self) -> bool:
@@ -85,6 +107,8 @@ def catalog_snapshot(preview: StoryArcCatalogPreview) -> dict[str, object]:
     }
     if preview.source is not MetadataSource.COMICVINE_API or preview.source_revision is not None:
         snapshot.update(source=preview.source.value, source_revision=preview.source_revision)
+    if preview.source_evidence is not None:
+        snapshot["source_evidence"] = preview.source_evidence.snapshot()
     return snapshot
 
 

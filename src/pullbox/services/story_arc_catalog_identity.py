@@ -5,7 +5,12 @@ from collections.abc import Sequence
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pullbox.core.metadata_identity import IdentityNamespace, MetadataEntityKind, MetadataSource
+from pullbox.core.metadata_identity import (
+    ExternalIdentityRef,
+    IdentityNamespace,
+    MetadataEntityKind,
+    MetadataSource,
+)
 from pullbox.models import Issue, Series, StoryArc, StoryArcExternalIdentity
 from pullbox.models.metadata_identity import IssueExternalIdentity, SeriesExternalIdentity
 from pullbox.models.metadata_source import MetadataSourceConfig
@@ -13,6 +18,7 @@ from pullbox.services.story_arc_catalog_types import (
     StoryArcCatalogError,
     StoryArcCatalogPreview,
     catalog_provider_id,
+    exact_provider_id,
 )
 
 
@@ -20,7 +26,7 @@ async def catalog_owners(
     session: AsyncSession,
     kind: MetadataEntityKind,
     provider_ids: Sequence[str],
-    source: MetadataSource,
+    source: MetadataSource | IdentityNamespace,
 ) -> dict[str, int]:
     """Include retained ownership and legacy CV keys; never match by title or number."""
     mappings: dict[
@@ -39,13 +45,23 @@ async def catalog_owners(
     }
     model, active_model, owner_key = mappings[kind]
     active = active_model.__table__
-    namespace = source.identity_namespace
+    namespace = source.identity_namespace if isinstance(source, MetadataSource) else source
     scope = (
         (active.c.source == namespace.value, active.c.namespace == "story_arc")
         if (kind is MetadataEntityKind.STORY_ARC)
         else (active.c.identity_namespace == namespace,)
     )
-    ids = list(dict.fromkeys(catalog_provider_id(value, source) for value in provider_ids))
+    if isinstance(source, MetadataSource):
+        ids = list(dict.fromkeys(catalog_provider_id(value, source) for value in provider_ids))
+    else:
+        ids = list(
+            dict.fromkeys(
+                ExternalIdentityRef(namespace, kind, value).external_id for value in provider_ids
+            )
+        )
+        if namespace is IdentityNamespace.COMICVINE:
+            for value in ids:
+                exact_provider_id(value)
     result: dict[str, int] = {}
     for offset in range(0, len(ids), 200):
         batch = ids[offset : offset + 200]

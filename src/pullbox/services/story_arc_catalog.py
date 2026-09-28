@@ -20,6 +20,15 @@ from pullbox.models.story_arc import (
     StoryArcResolutionState,
     StoryArcSourceKind,
 )
+from pullbox.services.metadata_arc_catalog import (
+    MAX_CATALOG_MEMBERS,
+    MAX_CATALOG_PARENTS,
+    project_source_arc_catalog,
+)
+from pullbox.services.story_arc_catalog_evidence import (
+    record_catalog_crosswalks,
+    require_crosswalk_ownership,
+)
 from pullbox.services.story_arc_catalog_identity import (
     catalog_owners,
     require_catalog_source_revision,
@@ -59,15 +68,14 @@ if TYPE_CHECKING:
     from pullbox.providers.story_arcs import StoryArcMetadata, StoryArcSearchResult
 
 __all__ = [
+    "MAX_CATALOG_MEMBERS",
+    "MAX_CATALOG_PARENTS",
     "StoryArcCatalogError",
     "StoryArcCatalogPreview",
     "StoryArcCatalogRefreshPreview",
     "StoryArcCatalogRefreshResult",
     "StoryArcCatalogService",
 ]
-
-MAX_CATALOG_MEMBERS = 2_000
-MAX_CATALOG_PARENTS = 200
 
 
 class _CatalogProvider(Protocol):
@@ -197,6 +205,7 @@ class StoryArcCatalogService:
         try:
             async with session.begin_nested():
                 await require_catalog_source_revision(session, preview)
+                await require_crosswalk_ownership(session, preview)
                 existing_identity = await session.scalar(
                     select(StoryArcExternalIdentity.id).where(
                         StoryArcExternalIdentity.source == preview.source.identity_namespace.value,
@@ -230,6 +239,7 @@ class StoryArcCatalogService:
                 arc.policy_snapshot = policy.snapshot
                 await attach_arc_identity(session, arc, preview)
                 issues = await seed_members(session, preview, root, order)
+                await record_catalog_crosswalks(session, preview)
                 for position, provider_id in enumerate(order, start=1):
                     member = await self._member(
                         session, arc, preview, issues[provider_id], provider_id, position
@@ -330,6 +340,7 @@ class StoryArcCatalogService:
         try:
             async with session.begin_nested():
                 await require_catalog_source_revision(session, preview)
+                await require_crosswalk_ownership(session, preview)
                 claimed = await session.execute(
                     update(StoryArc)
                     .where(StoryArc.id == arc.id, StoryArc.revision == expected_revision)
@@ -343,6 +354,7 @@ class StoryArcCatalogService:
                 issues = await seed_members(
                     session, preview, root, preview.metadata.issue_provider_ids
                 )
+                await record_catalog_crosswalks(session, preview)
                 rows = list(
                     (
                         await session.scalars(
@@ -518,6 +530,17 @@ class StoryArcCatalogService:
                 ) from exc
 
     def _validate_preview(self, preview: StoryArcCatalogPreview) -> None:
+        if preview.source_evidence is not None:
+            if preview.source_revision is None:
+                raise StoryArcCatalogError(
+                    "source_changed", "Source snapshot needs a current policy revision"
+                )
+            projected = project_source_arc_catalog(preview.source_evidence, preview.source_revision)
+            if catalog_snapshot(projected) != catalog_snapshot(preview):
+                raise StoryArcCatalogError(
+                    "snapshot_changed",
+                    "Catalog projection disagrees with source evidence; preview the arc again",
+                )
         if preview.source is not self.source:
             raise StoryArcCatalogError(
                 "identity_conflict", "Catalog snapshot belongs to another source"
