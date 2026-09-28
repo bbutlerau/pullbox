@@ -1,0 +1,447 @@
+"""Server-fetched source metadata adoption; never accepts browser metadata."""
+
+import asyncio
+import hashlib
+import json
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from uuid import UUID
+
+import structlog
+from sqlalchemy import select, tuple_
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from pullbox.core.exceptions import ValidationError
+from pullbox.core.issue_numbers import parse_issue_number_text
+from pullbox.core.metadata_identity import (
+    ExactIdentityEvidence,
+    ExternalIdentityRef,
+    IdentityEvidenceKind,
+    IdentityNamespace,
+    MetadataEntityKind,
+    MetadataSource,
+)
+from pullbox.core.metadata_identity_events import IdentityEventEvidence, IdentityEventRequest
+from pullbox.core.metadata_identity_state import IdentityVerificationAction
+from pullbox.core.naming import classify_series_type
+from pullbox.models import Issue, Series
+from pullbox.models.issue import IssueStatus
+from pullbox.models.metadata_identity import IssueExternalIdentity, SeriesExternalIdentity
+from pullbox.models.metadata_source import MetadataSourceConfig
+from pullbox.models.series import IssueCatalogState, SeriesStatus, SeriesType
+from pullbox.schemas.metadata_sources import ProviderIssueRead, ProviderSeriesRead, SourceStatus
+from pullbox.services.metadata_discovery import MetadataSourceRegistry
+from pullbox.services.metadata_identity_attachment import attach_verified_identities
+from pullbox.services.metadata_identity_review import record_identity_observation
+from pullbox.services.metadata_service import MetadataService, classify_issue_metadata
+from pullbox.services.metadata_source_reads import source_id
+from pullbox.services.metadata_writer_identity import metadata_write_scope
+
+logger = structlog.get_logger(__name__)
+
+
+def _metadata_label(source: MetadataSource) -> str:
+    # Existing refresh precedence depends on these legacy ComicVine labels.
+    return {
+        MetadataSource.COMICVINE_API: "comicvine",
+        MetadataSource.COMICVINE_LOCAL: "pullbox_catalog",
+    }.get(source, source.value)
+
+
+class SeriesAdoptionError(ValueError):
+    """A complete, consistent source catalog could not be adopted safely."""
+
+
+@dataclass(frozen=True)
+class SourceSeriesBundle:
+    series: ProviderSeriesRead
+    issues: tuple[ProviderIssueRead, ...]
+    source_revision: int
+    catalog_total: int
+
+
+@dataclass(frozen=True)
+class SeriesAdoptionResult:
+    series: Series
+    created: bool
+
+
+async def fetch_source_series_bundle(
+    registry: MetadataSourceRegistry,
+    source: MetadataSource,
+    external_id: str,
+    *,
+    source_revision: int,
+    max_issues: int = 10000,
+    timeout: float = 120,
+) -> SourceSeriesBundle:
+    identifier = source_id(source, MetadataEntityKind.SERIES, external_id)
+    runtime = registry.runtime.get(source)
+    if runtime is None or runtime.policy.revision != source_revision:
+        raise SeriesAdoptionError("Metadata source settings changed. Preview the series again.")
+    if type(max_issues) is not int or not 1 <= max_issues <= 10000 or not 0 < timeout <= 120:
+        raise ValueError("Invalid adoption resource limits")
+    try:
+        async with asyncio.timeout(timeout):
+            profile = await registry.series(source, identifier)
+            if profile.status is not SourceStatus.OK or profile.data is None:
+                raise SeriesAdoptionError(f"Could not read the series: {profile.status.value}.")
+            if profile.data.issue_count is not None and profile.data.issue_count > max_issues:
+                raise SeriesAdoptionError("The issue catalog exceeds the interactive add limit.")
+            issues: list[ProviderIssueRead] = []
+            seen: set[str] = set()
+            page = 1
+            total: int | None = None
+            while True:
+                result = await registry.issues(source, identifier, page=page)
+                if result.status is not SourceStatus.OK or result.data is None:
+                    raise SeriesAdoptionError(
+                        f"Could not finish the issue catalog: {result.status.value}. Retry the add."
+                    )
+                current = result.data
+                if total is None:
+                    total = current.total
+                if current.total != total or (
+                    profile.data.issue_count is not None and profile.data.issue_count != total
+                ):
+                    raise SeriesAdoptionError("The provider catalog count changed. Retry the add.")
+                if total > max_issues:
+                    raise SeriesAdoptionError(
+                        "The issue catalog exceeds the interactive add limit."
+                    )
+                for issue in current.results:
+                    if source is MetadataSource.COMICVINE_LOCAL and (
+                        profile.data.source_updated_at is None
+                        or issue.source_updated_at != profile.data.source_updated_at
+                    ):
+                        raise SeriesAdoptionError("The local catalog changed. Retry the add.")
+                    if issue.external_id in seen:
+                        raise SeriesAdoptionError(
+                            "The issue catalog repeats an identity. Retry the add."
+                        )
+                    seen.add(issue.external_id)
+                    issues.append(issue)
+                if current.next_page is None:
+                    if len(issues) != total:
+                        raise SeriesAdoptionError("The issue catalog is incomplete. Retry the add.")
+                    return SourceSeriesBundle(profile.data, tuple(issues), source_revision, total)
+                page = current.next_page
+    except TimeoutError as exc:
+        raise SeriesAdoptionError("The issue catalog request timed out. Retry the add.") from exc
+
+
+async def adopt_source_series_bundle(
+    session: AsyncSession, bundle: SourceSeriesBundle, *, monitored: bool = False
+) -> SeriesAdoptionResult:
+    """Persist a server-owned bundle, leaving transactions and side effects to the caller.
+
+    Add is not refresh: an existing exact owner keeps its metadata, issue catalog,
+    monitoring and files. Crosswalk issue IDs remain observations until their
+    foreign parent has been verified independently.
+    """
+    numbers = _validate_bundle(bundle)
+    try:
+        async with metadata_write_scope(session):
+            config = await session.scalar(
+                select(MetadataSourceConfig)
+                .where(MetadataSourceConfig.source == bundle.series.source.value)
+                .with_for_update(read=True)
+                .execution_options(populate_existing=True)
+            )
+            if config is None or not config.enabled or config.revision != bundle.source_revision:
+                raise SeriesAdoptionError(
+                    "Metadata source settings changed. Preview the series again."
+                )
+            return await _adopt(session, bundle, numbers, monitored=monitored)
+    except (ValidationError, IntegrityError) as exc:
+        raise SeriesAdoptionError(
+            "Metadata identity conflicts with an existing match. Review the match before retrying."
+        ) from exc
+
+
+def _identities(
+    metadata: ProviderSeriesRead | ProviderIssueRead, kind: MetadataEntityKind
+) -> tuple[ExternalIdentityRef, ...]:
+    native = ExternalIdentityRef(metadata.source.identity_namespace, kind, metadata.external_id)
+    if (
+        native.namespace != metadata.identity_namespace
+        or native.external_id != metadata.external_id
+    ):
+        raise SeriesAdoptionError("Metadata does not match the selected source identity.")
+    identities = {native.namespace: native}
+    for crosswalk in metadata.cross_identities:
+        if crosswalk.entity_kind is not kind or (
+            crosswalk.namespace in identities and identities[crosswalk.namespace] != crosswalk
+        ):
+            raise SeriesAdoptionError(
+                "Provider identities disagree. Review the match before retrying."
+            )
+        identities[crosswalk.namespace] = crosswalk
+    for identity in identities.values():
+        if identity.namespace is IdentityNamespace.COMICVINE and int(identity.external_id) >= 2**63:
+            raise SeriesAdoptionError("ComicVine identity exceeds the supported range.")
+    return tuple(identities.values())
+
+
+def _validate_bundle(bundle: SourceSeriesBundle) -> list[tuple[float, str]]:
+    profile = bundle.series
+    _identities(profile, MetadataEntityKind.SERIES)
+    if (
+        not profile.title.strip()
+        or len(profile.title) > 500
+        or len(bundle.issues) > 10000
+        or type(bundle.catalog_total) is not int
+        or bundle.catalog_total != len(bundle.issues)
+        or (profile.issue_count is not None and profile.issue_count != len(bundle.issues))
+    ):
+        raise SeriesAdoptionError("The series profile or issue catalog is incomplete.")
+    numbers = []
+    seen_numbers: set[str] = set()
+    seen_ids: set[ExternalIdentityRef] = set()
+    for issue in bundle.issues:
+        if issue.source is not profile.source or issue.series_external_id != profile.external_id:
+            raise SeriesAdoptionError("An issue belongs to a different source or series.")
+        for identity in _identities(issue, MetadataEntityKind.ISSUE):
+            if identity in seen_ids:
+                raise SeriesAdoptionError("The issue catalog repeats an identity.")
+            seen_ids.add(identity)
+        try:
+            number = parse_issue_number_text(issue.issue_number_text)
+        except ValueError as exc:
+            raise SeriesAdoptionError(
+                "This catalog contains an unsupported issue designation; no issues were added."
+            ) from exc
+        if number[1] in seen_numbers:
+            raise SeriesAdoptionError(
+                "Multiple provider issues use the same designation. Review the catalog."
+            )
+        seen_numbers.add(number[1])
+        numbers.append(number)
+    return numbers
+
+
+def _request(
+    bundle: SourceSeriesBundle,
+    metadata: ProviderSeriesRead | ProviderIssueRead,
+    identity: ExternalIdentityRef,
+    local_id: int,
+    *,
+    observation: bool = False,
+) -> IdentityEventRequest:
+    native = ExternalIdentityRef(
+        metadata.identity_namespace, identity.entity_kind, metadata.external_id
+    )
+    # Content digest for evidence/retry identity, never an authentication token.
+    revision = hashlib.sha256(
+        json.dumps(
+            {
+                "source_revision": bundle.source_revision,
+                "metadata": metadata.model_dump(mode="json"),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode()
+    ).hexdigest()
+    parent = (
+        ExternalIdentityRef(
+            metadata.identity_namespace, MetadataEntityKind.SERIES, metadata.series_external_id
+        )
+        if isinstance(metadata, ProviderIssueRead) and identity == native
+        else None
+    )
+    return IdentityEventRequest(
+        UUID(hex=revision[:32]),
+        local_id,
+        IdentityVerificationAction.OBSERVE if observation else IdentityVerificationAction.VERIFY,
+        IdentityEventEvidence(
+            ExactIdentityEvidence(
+                identity,
+                IdentityEvidenceKind.PROVIDER_RESULT
+                if identity == native
+                else IdentityEvidenceKind.PROVIDER_CROSSWALK,
+                metadata.source,
+            ),
+            revision,
+            source_identity=native,
+            parent_identity=parent,
+        ),
+    )
+
+
+async def _series_owner(
+    session: AsyncSession, identities: tuple[ExternalIdentityRef, ...]
+) -> Series | None:
+    owners = set(
+        await session.scalars(
+            select(SeriesExternalIdentity.series_id).where(
+                tuple_(
+                    SeriesExternalIdentity.identity_namespace, SeriesExternalIdentity.external_id
+                ).in_([(identity.namespace, identity.external_id) for identity in identities])
+            )
+        )
+    )
+    cv = next((item for item in identities if item.namespace is IdentityNamespace.COMICVINE), None)
+    if cv is not None:
+        owners.update(
+            await session.scalars(
+                select(Series.id).where(Series.comicvine_id == int(cv.external_id))
+            )
+        )
+    if len(owners) > 1:
+        raise SeriesAdoptionError(
+            "Provider identities belong to different library series. Review the match."
+        )
+    if not owners:
+        return None
+    result = await session.execute(
+        select(Series).where(Series.id == next(iter(owners))).with_for_update()
+    )
+    return result.scalar_one_or_none()
+
+
+async def _require_unowned_issues(session: AsyncSession, bundle: SourceSeriesBundle) -> None:
+    identities = [
+        identity
+        for issue in bundle.issues
+        for identity in _identities(issue, MetadataEntityKind.ISSUE)
+    ]
+    for offset in range(0, len(identities), 200):
+        batch = identities[offset : offset + 200]
+        owner = await session.scalar(
+            select(IssueExternalIdentity.issue_id)
+            .where(
+                tuple_(
+                    IssueExternalIdentity.identity_namespace, IssueExternalIdentity.external_id
+                ).in_([(identity.namespace, identity.external_id) for identity in batch])
+            )
+            .limit(1)
+        )
+        cv_ids = [
+            int(item.external_id) for item in batch if item.namespace is IdentityNamespace.COMICVINE
+        ]
+        legacy = (
+            await session.scalar(select(Issue.id).where(Issue.comicvine_id.in_(cv_ids)).limit(1))
+            if cv_ids
+            else None
+        )
+        if owner is not None or legacy is not None:
+            raise SeriesAdoptionError(
+                "An issue already belongs to another library series. Review the match."
+            )
+
+
+async def _adopt(
+    session: AsyncSession,
+    bundle: SourceSeriesBundle,
+    numbers: list[tuple[float, str]],
+    *,
+    monitored: bool,
+) -> SeriesAdoptionResult:
+    profile = bundle.series
+    identities = _identities(profile, MetadataEntityKind.SERIES)
+    series = await _series_owner(session, identities)
+    created = series is None
+    if series is None:
+        await _require_unowned_issues(session, bundle)
+        publisher_id = (
+            await MetadataService._ensure_publisher(session, profile.publisher)
+            if profile.publisher
+            else None
+        )
+        now = datetime.now(UTC)
+        series = Series(
+            title=profile.title,
+            sort_title=profile.sort_title or profile.title,
+            year_start=profile.year_start,
+            year_end=profile.year_end,
+            description=profile.description,
+            cover_url=profile.image_url,
+            status=SeriesStatus(profile.status)
+            if profile.status is not None and profile.status in SeriesStatus
+            else SeriesStatus.UNKNOWN,
+            series_type=SeriesType(profile.series_type)
+            if profile.series_type is not None and profile.series_type in SeriesType
+            else SeriesType(
+                classify_series_type(
+                    profile.title,
+                    description=profile.description,
+                    issue_count=bundle.catalog_total,
+                    year_start=profile.year_start,
+                )
+            ),
+            issue_count=len(bundle.issues),
+            monitored=monitored,
+            publisher_id=publisher_id,
+            metadata_source=_metadata_label(profile.source),
+            metadata_last_refreshed=profile.source_updated_at or now,
+            issue_catalog_state=IssueCatalogState.COMPLETE,
+            issue_catalog_last_synced_at=now,
+            issue_catalog_last_checked_at=now,
+            comicvine_url=profile.resource_url
+            if profile.identity_namespace is IdentityNamespace.COMICVINE
+            else None,
+        )
+        session.add(series)
+        await session.flush()
+    await attach_verified_identities(
+        session,
+        [_request(bundle, profile, identity, series.id) for identity in identities],
+        require_current_ownership=True,
+    )
+    await session.refresh(series, attribute_names=["comicvine_id"])
+    if not created:
+        logger.info(
+            "metadata_series_add_existing", series_id=series.id, source=profile.source.value
+        )
+        return SeriesAdoptionResult(series, False)
+    for offset in range(0, len(bundle.issues), 200):
+        members = []
+        for metadata, (number, text) in zip(
+            bundle.issues[offset : offset + 200], numbers[offset : offset + 200], strict=True
+        ):
+            issue = Issue(
+                series_id=series.id,
+                issue_number=number,
+                issue_number_text=text,
+                title=metadata.title,
+                description=metadata.description,
+                release_date=metadata.cover_date,
+                store_date=metadata.store_date,
+                cover_url=metadata.image_url,
+                page_count=metadata.page_count,
+                status=IssueStatus.WANTED if monitored else IssueStatus.SKIPPED,
+                metadata_source=_metadata_label(metadata.source),
+                issue_type=classify_issue_metadata(series.series_type, metadata.title)[1],
+                comicvine_url=metadata.resource_url
+                if metadata.identity_namespace is IdentityNamespace.COMICVINE
+                else None,
+            )
+            session.add(issue)
+            members.append((issue, metadata))
+        await session.flush()
+        await attach_verified_identities(
+            session,
+            [
+                _request(
+                    bundle, metadata, _identities(metadata, MetadataEntityKind.ISSUE)[0], issue.id
+                )
+                for issue, metadata in members
+            ],
+        )
+        for issue, metadata in members:
+            for crosswalk in _identities(metadata, MetadataEntityKind.ISSUE)[1:]:
+                await record_identity_observation(
+                    session, _request(bundle, metadata, crosswalk, issue.id, observation=True)
+                )
+    await session.flush()
+    if profile.status is None:
+        await MetadataService.infer_series_status(session, series)
+    logger.info(
+        "metadata_series_added",
+        series_id=series.id,
+        source=profile.source.value,
+        issue_count=len(bundle.issues),
+    )
+    return SeriesAdoptionResult(series, True)

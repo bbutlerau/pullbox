@@ -116,6 +116,24 @@ def _named(value: object) -> str | None:
     return _text(object_row(value).get("name"), required=True) if value is not None else None
 
 
+def _series_type(value: object) -> str | None:
+    if value is None:
+        return None
+    row = object_row(value)
+    _named(value)
+    return {
+        5: "one_shot",
+        6: "annual",
+        8: "hardcover",
+        9: "graphic_novel",
+        10: "tpb",
+        11: "standard",
+        12: "standard",
+        13: "standard",
+        14: "omnibus",
+    }.get(_integer(row.get("id")) or 0)
+
+
 def series(value: object, *, detail: bool = False) -> ProviderSeriesRead:
     row = object_row(value)
     title = _text(row.get("name" if detail else "series"), required=True)
@@ -150,8 +168,15 @@ def series(value: object, *, detail: bool = False) -> ProviderSeriesRead:
         source_updated_at=_updated(row.get("modified")),
         sort_title=_text(row.get("sort_name")),
         volume=str(volume) if volume is not None else None,
-        series_type=_named(row.get("series_type")),
-        status=status.lower() if status else None,
+        series_type=_series_type(row.get("series_type")),
+        status={
+            "ongoing": "continuing",
+            "completed": "ended",
+            "cancelled": "ended",
+            "hiatus": "unknown",
+        }.get(status.casefold(), "unknown")
+        if status
+        else None,
         language=_text(row.get("language")),
     )
 

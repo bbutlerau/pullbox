@@ -120,6 +120,24 @@ _EXPLICIT_IMPORT_METADATA_SOURCES = frozenset({"provisional_import", "import_pla
 _UNTRUSTED_LEGACY_SERIES_TYPES = frozenset({SeriesType.ONE_SHOT, SeriesType.SPECIAL})
 
 
+def classify_issue_metadata(
+    series_type: SeriesType, title: str | None, provider_type: str | None = None
+) -> tuple[IssueType, IssueType]:
+    """Return explicit evidence and effective type, keeping inheritance separate."""
+    explicit = IssueType.ISSUE
+    with contextlib.suppress(ValueError):
+        explicit = IssueType(provider_type or "")
+    if explicit == IssueType.ISSUE:
+        with contextlib.suppress(ValueError):
+            explicit = IssueType(detect_issue_type_from_metadata_title(title))
+    effective = (
+        _SERIES_TO_ISSUE_TYPE.get(series_type, IssueType.ISSUE)
+        if explicit == IssueType.ISSUE
+        else explicit
+    )
+    return explicit, effective
+
+
 def _series_type_from_complete_issue_evidence(
     issue_types: list[IssueType],
 ) -> SeriesType | None:
@@ -920,19 +938,10 @@ class MetadataService:
 
             # Compact provider type and provider title are explicit evidence.
             # Series inheritance is a fallback and cannot establish consensus.
-            explicit_type = IssueType.ISSUE
-            with contextlib.suppress(ValueError):
-                explicit_type = IssueType(summary.issue_type)
-            if explicit_type == IssueType.ISSUE:
-                with contextlib.suppress(ValueError):
-                    explicit_type = IssueType(detect_issue_type_from_metadata_title(summary.title))
+            explicit_type, detected_type = classify_issue_metadata(
+                series.series_type, summary.title, summary.issue_type
+            )
             summary_evidence_types.append(explicit_type)
-            detected_type = explicit_type
-            if detected_type == IssueType.ISSUE:
-                detected_type = _SERIES_TO_ISSUE_TYPE.get(
-                    series.series_type,
-                    IssueType.ISSUE,
-                )
 
             if existing:
                 if sync_issue_identity:

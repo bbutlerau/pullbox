@@ -27,7 +27,7 @@ def series_row(identifier=1):
         "volume": 1,
         "issue_count": 3,
         "publisher": {"id": 5, "name": "Fixture Press"},
-        "series_type": {"id": 1, "name": "Single Issue"},
+        "series_type": {"id": 13, "name": "Single Issue"},
         "cv_id": 9000 + identifier,
         "gcd_id": 8000 + identifier,
         "modified": "2026-09-16T12:00:00Z",
@@ -155,7 +155,7 @@ async def test_detail_normalization_and_conditional_status():
                 "sort_name": "Fixture Special",
                 "desc": "<p>Good</p><script>bad()</script>",
                 "language": "en",
-                "status": "Continuing",
+                "status": "Ongoing",
                 "resource_url": "https://metron.cloud/series/fixture-2024/",
             },
         )
@@ -164,11 +164,65 @@ async def test_detail_normalization_and_conditional_status():
     try:
         result = await client.series("0008")
         assert result.status == SourceStatus.OK and result.data.title == "Fixture (Special)"
+        assert result.data.status == "continuing"
         assert result.data.description == "<p>Good</p>" and result.validator == MODIFIED
         unchanged = await client.series("8", validator=result.validator)
         assert unchanged.status == SourceStatus.NOT_MODIFIED and unchanged.data is None
         assert seen[-1].headers["if-modified-since"] == MODIFIED
         assert seen[-1].url.path == "/api/series/8/"
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [
+        ("Ongoing", "continuing"),
+        ("Completed", "ended"),
+        ("Cancelled", "ended"),
+        ("Hiatus", "unknown"),
+    ],
+)
+async def test_series_lifecycle_is_normalized_for_library_adoption(status, expected):
+    client = source(
+        lambda request: httpx.Response(
+            200, json={**series_row(8), "name": "Fixture", "status": status}
+        )
+    )
+    try:
+        assert (await client.series("8")).data.status == expected
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize(
+    "type_id,expected",
+    [
+        (5, "one_shot"),
+        (6, "annual"),
+        (8, "hardcover"),
+        (9, "graphic_novel"),
+        (10, "tpb"),
+        (11, "standard"),
+        (12, "standard"),
+        (13, "standard"),
+        (14, "omnibus"),
+        (999, None),
+    ],
+)
+async def test_series_format_is_normalized_for_library_adoption(type_id, expected):
+    client = source(
+        lambda request: httpx.Response(
+            200,
+            json={
+                **series_row(8),
+                "name": "Fixture",
+                "series_type": {"id": type_id, "name": "Provider format"},
+            },
+        )
+    )
+    try:
+        assert (await client.series("8")).data.series_type == expected
     finally:
         await client.close()
 

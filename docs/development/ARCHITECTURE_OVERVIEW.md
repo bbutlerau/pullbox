@@ -326,6 +326,16 @@ authentication and the existing session CSRF protection. Source namespace,
 entity identity, issue parent, page completeness and continuation are checked
 before returning data. Preview is read-only and is not an adoption proof.
 
+`services/metadata_series_adoption.py` separates a complete server-side catalog
+fetch from transactional adoption. Traversal rejects partial pages, repeated
+identities, changed counts and mixed local catalog generations. The writer locks
+and rechecks source configuration, uses shared identity attachment and caller-owned
+transactions, and preserves existing exact owners rather than treating Add as
+Refresh. Native issues require exact parent evidence; foreign issue crosswalks
+remain observations until independently verified. Unsupported designations and
+conflicting ownership fail without partial library rows. This internal workflow
+is not yet connected to the Add API/UI or filesystem/event side effects.
+
 The existing import/cache and Add Series/Story Arc UI consumers are not yet
 migrated to this registry. Metron has token settings, bounded transport and
 series/issue/arc adapter operations; GCD execution remains unimplemented, and
