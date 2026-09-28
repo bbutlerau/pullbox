@@ -14,12 +14,16 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from stat import S_ISLNK
+from typing import TYPE_CHECKING
 
 import structlog
 
 from pullbox.core.archive_format import archive_format
 from pullbox.core.comicinfo import ComicInfoData, parse_comicinfo
 from pullbox.core.rar_backend import RarBackendUnavailableError, configure_rarfile_backend
+
+if TYPE_CHECKING:
+    from pullbox.core.archive_metadata import ArchiveMetadataFiles
 
 logger = structlog.get_logger(__name__)
 _ARCHIVE_IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp", ".gif", ".tif", ".tiff"})
@@ -159,6 +163,16 @@ class ArchiveReader:
 
         xml_bytes = self.read_file(comicinfo_name)
         return parse_comicinfo(xml_bytes.decode("utf-8", errors="replace"))
+
+    def read_metadata_files(
+        self, *, max_solid_scan_bytes: int = 2000 * 1024 * 1024
+    ) -> ArchiveMetadataFiles:
+        """Read ComicInfo and MetronInfo together without changing legacy readers."""
+        from pullbox.core.archive_metadata import read_archive_metadata
+
+        return read_archive_metadata(
+            self._path, self.format, max_solid_scan_bytes=max_solid_scan_bytes
+        )
 
     # -- CBZ (ZIP) ----------------------------------------------------------
 
