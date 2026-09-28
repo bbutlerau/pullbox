@@ -7,7 +7,7 @@ from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 from pydantic import SecretStr, ValidationError
-from sqlalchemy import false, select, update
+from sqlalchemy import false, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from pullbox.config import get_settings
@@ -18,6 +18,7 @@ from pullbox.models.config import SystemConfig
 from pullbox.models.metadata_source import MetadataSourceConfig
 from pullbox.schemas.metadata_sources import (
     MetadataDomain,
+    SourceOutcome,
     SourcePolicyRead,
     SourcePolicyWrite,
     SourceSettings,
@@ -25,6 +26,8 @@ from pullbox.schemas.metadata_sources import (
 )
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -220,3 +223,35 @@ async def load_source_runtime(
                 status = SourceStatus.INVALID_CONFIG
         result.append(SourceRuntime(policy, credential, status))
     return result
+
+
+async def record_source_health(
+    session: AsyncSession,
+    source: MetadataSource,
+    revision: int,
+    outcome: SourceOutcome,
+    checked_at: datetime,
+) -> bool:
+    """Apply only to the tested configuration, never over a newer probe."""
+    if outcome.source is not source:
+        raise ValueError("Health outcome belongs to another metadata source")
+    result = await session.execute(
+        update(MetadataSourceConfig)
+        .where(
+            MetadataSourceConfig.source == source.value,
+            MetadataSourceConfig.revision == revision,
+            or_(
+                MetadataSourceConfig.last_tested_at.is_(None),
+                MetadataSourceConfig.last_tested_at <= checked_at,
+            ),
+        )
+        .values(
+            last_tested_at=checked_at,
+            last_status=outcome.status.value,
+            last_success_at=checked_at
+            if outcome.status is SourceStatus.OK
+            else MetadataSourceConfig.last_success_at,
+        )
+        .returning(MetadataSourceConfig.id)
+    )
+    return result.scalar_one_or_none() is not None

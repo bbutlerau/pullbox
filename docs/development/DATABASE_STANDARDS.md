@@ -391,6 +391,21 @@ Review, observation, and attachment share parent lock ordering and caller-owned
 transactions. Compatibility ComicVine columns and retained history change
 atomically with ownership. Do not bypass these services with ad hoc ID updates.
 
+### Metadata Source Configuration
+
+`metadata_source_configs` stores one revision-checked policy per executable source,
+using the normal integer identity and timestamp mixins plus a unique source slug.
+It has no cascading relationship to provider identities. Reads do not create rows;
+the migration seeds default ComicVine local/API policies and disabled other sources.
+The canonical ComicVine credential remains in its existing configuration key.
+Other API tokens use encrypted columns, never the ordinary settings JSON or read DTOs.
+
+Services leave transaction ownership to callers. Settings writes use revision
+checks and row locks (plus a SQLite write transaction before the savepoint).
+Health checks perform no provider I/O inside a database transaction. Their short
+result write applies only to the tested revision and cannot replace a newer probe.
+Cached health is diagnostic, not proof that a source is safe or available now.
+
 ### 4.1 Base Model Mixins
 
 **Current Pullbox implementation**

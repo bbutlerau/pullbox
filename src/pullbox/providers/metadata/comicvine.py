@@ -396,10 +396,12 @@ class ComicVineError(Exception):
         *,
         retryable: bool = False,
         retry_after_seconds: int | None = None,
+        timed_out: bool = False,
     ) -> None:
         self.status_code = status_code
         self.retryable = retryable
         self.retry_after_seconds = retry_after_seconds
+        self.timed_out = timed_out
         super().__init__(message)
 
 
@@ -495,6 +497,7 @@ class ComicVineProvider:
                 0,
                 f"Request timed out: {endpoint}",
                 retryable=True,
+                timed_out=True,
             ) from None
         except httpx.HTTPStatusError as exc:
             http_status = exc.response.status_code
@@ -600,6 +603,7 @@ class ComicVineProvider:
         limit: int = 20,
         offset: int = 0,
         suppress_errors: bool = True,
+        strict_response: bool = False,
     ) -> tuple[list[SeriesSearchResult], int]:
         """Search for series and return the current page plus ComicVine's total."""
         log = logger.bind(query=query, year=year, limit=limit, offset=offset)
@@ -623,6 +627,13 @@ class ComicVineProvider:
             if suppress_errors:
                 return [], 0
             raise
+
+        if strict_response and (
+            not isinstance(data.get("results"), list)
+            or type(data.get("number_of_total_results")) is not int
+            or data["number_of_total_results"] < 0
+        ):
+            raise ValueError("Invalid ComicVine search response")
 
         total_results = _safe_int(data.get("number_of_total_results")) or 0
 

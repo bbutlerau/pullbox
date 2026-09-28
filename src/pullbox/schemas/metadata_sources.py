@@ -2,9 +2,9 @@
 
 import enum
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from pullbox.core.metadata_identity import IdentityNamespace, MetadataSource
 
@@ -43,6 +43,7 @@ class SourceStatus(enum.StrEnum):
     UNAVAILABLE = "unavailable"
     INCOMPATIBLE_RESPONSE = "incompatible_response"
     UNSUPPORTED = "unsupported"
+    NOT_QUERIED = "not_queried"
 
 
 class SourceSettings(BaseModel):
@@ -83,7 +84,22 @@ class SeriesDiscoveryQuery(BaseModel):
     sources: list[MetadataSource] | None = Field(default=None, min_length=1, max_length=5)
     mode: Literal["interactive", "automatic"] = "interactive"
     limit_per_source: int = Field(default=20, ge=1, le=100)
-    offsets: dict[MetadataSource, int] = Field(default_factory=dict, max_length=5)
+    offsets: dict[MetadataSource, Annotated[int, Field(ge=0, le=10000, strict=True)]] = Field(
+        default_factory=dict, max_length=5
+    )
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> Self:
+        self.query = self.query.strip()
+        if not self.query:
+            raise ValueError("Enter a series title")
+        if self.sources is not None and len(set(self.sources)) != len(self.sources):
+            raise ValueError("Choose each source only once")
+        if self.sources is not None and self.offsets.keys() - set(self.sources):
+            raise ValueError("Pagination must refer to a selected source")
+        if any(offset % self.limit_per_source for offset in self.offsets.values()):
+            raise ValueError("Offsets must start at a source page boundary")
+        return self
 
 
 class ProviderSeriesRead(BaseModel):
@@ -106,8 +122,20 @@ class SourceOutcome(BaseModel):
     total: int | None = None
     next_offset: int | None = None
     retry_after_seconds: int | None = None
+    rejected_results: int = 0
+    truncated: bool = False
 
 
 class SeriesDiscoveryRead(BaseModel):
     results: list[ProviderSeriesRead]
     sources: list[SourceOutcome]
+
+
+class SourceDescriptor(SourcePolicyRead):
+    capabilities: list[SourceCapability]
+    availability: SourceStatus | None = None
+
+
+class SourceTestRead(BaseModel):
+    outcome: SourceOutcome
+    recorded: bool

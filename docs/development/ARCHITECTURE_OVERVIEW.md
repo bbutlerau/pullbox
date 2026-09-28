@@ -303,6 +303,25 @@ constructed, and provider instances are registered for service use.
 AirDC++ uses `src/pullbox/composition/airdcpp.py` because its authenticated REST
 session and WebSocket lifecycle are supervised per exact configured client.
 
+The v2 metadata platform has a separate source-aware registry in
+`services/metadata_discovery.py`. Its ComicVine local/API adapters share the
+ComicVine identity namespace but retain separate priorities, capabilities,
+pagination, and typed outcomes. Interactive discovery fans out with bounded
+concurrency; automatic discovery cascades and stops only when its caller's
+explicit satisfaction predicate succeeds. Search results do not attach identities.
+
+`/api/v1/metadata/sources` exposes operator-only configuration and connection
+checks; `/api/v1/metadata/search` requires authentication. Session writes use
+the existing CSRF contract. Database reads end before provider I/O, clients close
+after each operation, and one provider failure does not hide other results.
+Read-only local catalog work retains at most two owned in-flight operations per
+event loop. Cancelled requests can return without abandoning disk cleanup or
+creating an unbounded background queue.
+The existing import/cache and Add Series/Story Arc consumers are not yet migrated
+to this registry. Metron and GCD execution remain unimplemented; GCD API v2 is
+also disabled by the release feature flag. Capability lists describe implemented
+adapter operations, not planned features.
+
 **Required standard**
 
 - Keep provider quirks inside provider modules.
