@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import sqlite3
 import threading
@@ -59,6 +60,19 @@ class CatalogReader:
     @property
     def available(self) -> bool:
         return (self.root / "active.json").exists()
+
+    async def cache_token(self) -> str | None:
+        """Fingerprint the validated active file without exposing its location."""
+
+        def token() -> str | None:
+            if not self.available:
+                return None
+            path, cutoff = self._generation()
+            stat = path.stat()
+            identity = (str(path), stat.st_ino, stat.st_mtime_ns, stat.st_size, cutoff.isoformat())
+            return hashlib.sha256(repr(identity).encode()).hexdigest()
+
+        return await disk_work(token)
 
     def _generation(self) -> tuple[Path, datetime]:
         reference = load_json(self.root / "active.json")

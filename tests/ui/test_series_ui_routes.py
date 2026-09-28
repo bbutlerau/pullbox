@@ -939,12 +939,12 @@ class TestSeriesRouteContracts:
 
         with (
             patch(
-                "pullbox.core.comicvine_key.get_comicvine_api_key",
+                "pullbox.services.metadata_sources.get_comicvine_api_key",
                 new_callable=AsyncMock,
                 return_value="fake-key",
             ),
             patch(
-                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_globally",
+                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_candidates_page",
                 new_callable=AsyncMock,
                 return_value=([mock_result], 1),
             ),
@@ -957,7 +957,8 @@ class TestSeriesRouteContracts:
         assert 'data-testid="add-series-footer-dock"' in response.text
         assert 'data-testid="add-series-results"' in response.text
         assert 'data-testid="add-series-result-card"' in response.text
-        assert 'onclick="selectResult(12345' in response.text
+        assert 'data-series-external-id="12345"' in response.text
+        assert 'onclick="selectResult(this.dataset.seriesExternalId, this)"' in response.text
         assert "Add" in response.text
         assert "Add series" not in response.text
 
@@ -982,7 +983,7 @@ class TestSeriesRouteContracts:
 
         with (
             patch(
-                "pullbox.core.comicvine_key.get_comicvine_api_key",
+                "pullbox.services.metadata_sources.get_comicvine_api_key",
                 new_callable=AsyncMock,
                 return_value="fake-key",
             ),
@@ -992,7 +993,7 @@ class TestSeriesRouteContracts:
                 return_value=([mock_result], 1),
             ) as page_search,
             patch(
-                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_globally",
+                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_candidates_page",
                 new_callable=AsyncMock,
             ) as global_search,
         ):
@@ -1007,11 +1008,13 @@ class TestSeriesRouteContracts:
         assert "Quick preview" in response.text
         assert "Quick Matches" in response.text
         assert "Preview" in response.text
-        assert "Search all ComicVine results" in response.text
+        assert "Search all results" in response.text
         assert 'data-testid="add-series-full-search-button"' in response.text
         assert 'hx-get="/series/add?q=The+Punisher&amp;sort=relevance"' in response.text
         assert "search_mode=preview" not in response.text
-        page_search.assert_awaited_once_with("The Punisher", None, limit=20)
+        page_search.assert_awaited_once_with(
+            "The Punisher", None, limit=20, offset=0, suppress_errors=False, strict_response=True
+        )
         global_search.assert_not_awaited()
 
     async def test_add_series_full_search_does_not_show_preview_notice(
@@ -1035,7 +1038,7 @@ class TestSeriesRouteContracts:
 
         with (
             patch(
-                "pullbox.core.comicvine_key.get_comicvine_api_key",
+                "pullbox.services.metadata_sources.get_comicvine_api_key",
                 new_callable=AsyncMock,
                 return_value="fake-key",
             ),
@@ -1044,7 +1047,7 @@ class TestSeriesRouteContracts:
                 new_callable=AsyncMock,
             ) as page_search,
             patch(
-                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_globally",
+                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_candidates_page",
                 new_callable=AsyncMock,
                 return_value=([mock_result], 1),
             ) as global_search,
@@ -1061,16 +1064,13 @@ class TestSeriesRouteContracts:
         assert "Quick Matches" not in response.text
         assert "Full search" in response.text
         page_search.assert_not_awaited()
-        from pullbox.ui.series_routes import COMICVINE_SERIES_SEARCH_LIMIT
-
         global_search.assert_awaited_once_with(
             "The Punisher",
-            max_results=COMICVINE_SERIES_SEARCH_LIMIT,
-            batch_size=100,
-            suppress_errors=True,
+            limit=100,
+            offset=0,
         )
 
-    async def test_add_series_full_search_reuses_persistent_cache_between_requests(
+    async def test_add_series_full_search_reuses_snapshot_cache_between_requests(
         self,
         authenticated_client,
     ) -> None:  # type: ignore[no-untyped-def]
@@ -1091,12 +1091,12 @@ class TestSeriesRouteContracts:
 
         with (
             patch(
-                "pullbox.core.comicvine_key.get_comicvine_api_key",
+                "pullbox.services.metadata_sources.get_comicvine_api_key",
                 new_callable=AsyncMock,
                 return_value="fake-key",
             ),
             patch(
-                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_globally",
+                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_candidates_page",
                 new_callable=AsyncMock,
                 return_value=([mock_result], 1),
             ) as global_search,
@@ -1124,7 +1124,7 @@ class TestSeriesRouteContracts:
 
         with (
             patch(
-                "pullbox.core.comicvine_key.get_comicvine_api_key",
+                "pullbox.services.metadata_sources.get_comicvine_api_key",
                 new_callable=AsyncMock,
             ) as api_key,
             patch(
@@ -1132,7 +1132,7 @@ class TestSeriesRouteContracts:
                 new_callable=AsyncMock,
             ) as page_search,
             patch(
-                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_globally",
+                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_candidates_page",
                 new_callable=AsyncMock,
             ) as global_search,
         ):
@@ -1183,12 +1183,12 @@ class TestSeriesRouteContracts:
 
         with (
             patch(
-                "pullbox.core.comicvine_key.get_comicvine_api_key",
+                "pullbox.services.metadata_sources.get_comicvine_api_key",
                 new_callable=AsyncMock,
                 return_value="fake-key",
             ),
             patch(
-                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_globally",
+                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_candidates_page",
                 new_callable=AsyncMock,
                 return_value=([mock_result], 1),
             ),
@@ -1229,12 +1229,12 @@ class TestSeriesRouteContracts:
 
         with (
             patch(
-                "pullbox.core.comicvine_key.get_comicvine_api_key",
+                "pullbox.services.metadata_sources.get_comicvine_api_key",
                 new_callable=AsyncMock,
                 return_value="fake-key",
             ),
             patch(
-                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_globally",
+                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_candidates_page",
                 new_callable=AsyncMock,
                 return_value=([older, newer], 2),
             ),
@@ -1282,12 +1282,12 @@ class TestSeriesRouteContracts:
 
         with (
             patch(
-                "pullbox.core.comicvine_key.get_comicvine_api_key",
+                "pullbox.services.metadata_sources.get_comicvine_api_key",
                 new_callable=AsyncMock,
                 return_value="fake-key",
             ),
             patch(
-                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_globally",
+                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_candidates_page",
                 new_callable=AsyncMock,
                 return_value=([panini_result, correct_result], 2),
             ) as search_mock,
@@ -1297,9 +1297,8 @@ class TestSeriesRouteContracts:
         assert response.status_code == 200
         search_mock.assert_awaited_once_with(
             "X-Men",
-            max_results=1000,
-            batch_size=100,
-            suppress_errors=True,
+            limit=100,
+            offset=0,
         )
         assert response.text.index("X-Men (2024)") < response.text.index("X-Men (2025)")
 
@@ -1351,12 +1350,12 @@ class TestSeriesRouteContracts:
 
         with (
             patch(
-                "pullbox.core.comicvine_key.get_comicvine_api_key",
+                "pullbox.services.metadata_sources.get_comicvine_api_key",
                 new_callable=AsyncMock,
                 return_value="fake-key",
             ),
             patch(
-                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_globally",
+                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_candidates_page",
                 new_callable=AsyncMock,
                 return_value=(results, len(results)),
             ),
@@ -1417,12 +1416,12 @@ class TestSeriesRouteContracts:
 
         with (
             patch(
-                "pullbox.core.comicvine_key.get_comicvine_api_key",
+                "pullbox.services.metadata_sources.get_comicvine_api_key",
                 new_callable=AsyncMock,
                 return_value="fake-key",
             ),
             patch(
-                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_globally",
+                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_candidates_page",
                 new_callable=AsyncMock,
                 return_value=(results, len(results)),
             ),
@@ -1461,12 +1460,12 @@ class TestSeriesRouteContracts:
 
         with (
             patch(
-                "pullbox.core.comicvine_key.get_comicvine_api_key",
+                "pullbox.services.metadata_sources.get_comicvine_api_key",
                 new_callable=AsyncMock,
                 return_value="fake-key",
             ),
             patch(
-                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_globally",
+                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_candidates_page",
                 new_callable=AsyncMock,
                 return_value=(paged_results, 45),
             ) as mock_search,
@@ -1478,9 +1477,8 @@ class TestSeriesRouteContracts:
         assert response.status_code == 200
         mock_search.assert_awaited_once_with(
             "Batman",
-            max_results=1000,
-            batch_size=100,
-            suppress_errors=True,
+            limit=100,
+            offset=0,
         )
         assert 'data-testid="add-series-footer-dock"' in response.text
         assert 'data-testid="page-dock-pagination"' in response.text
@@ -1516,14 +1514,17 @@ class TestSeriesRouteContracts:
 
         with (
             patch(
-                "pullbox.core.comicvine_key.get_comicvine_api_key",
+                "pullbox.services.metadata_sources.get_comicvine_api_key",
                 new_callable=AsyncMock,
                 return_value="fake-key",
             ),
             patch(
-                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_globally",
+                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_candidates_page",
                 new_callable=AsyncMock,
-                return_value=(paged_results, 220),
+                side_effect=lambda query, *, limit, offset: (
+                    paged_results[offset : offset + limit],
+                    220,
+                ),
             ),
         ):
             middle_response = await authenticated_client.get(
@@ -1590,17 +1591,17 @@ class TestSeriesRouteContracts:
 
         with (
             patch(
-                "pullbox.core.comicvine_key.get_comicvine_api_key",
+                "pullbox.services.metadata_sources.get_comicvine_api_key",
                 new_callable=AsyncMock,
                 return_value="fake-key",
             ),
             patch(
-                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_globally",
+                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_candidates_page",
                 new_callable=AsyncMock,
                 return_value=(paged_results, 45),
             ),
             patch(
-                "pullbox.ui.comicvine_series_search.format_series_folder",
+                "pullbox.ui.metadata_series_search.format_series_folder",
                 return_value="Folder Preview",
             ) as folder_preview,
         ):
@@ -1635,12 +1636,12 @@ class TestSeriesRouteContracts:
 
         with (
             patch(
-                "pullbox.core.comicvine_key.get_comicvine_api_key",
+                "pullbox.services.metadata_sources.get_comicvine_api_key",
                 new_callable=AsyncMock,
                 return_value="fake-key",
             ),
             patch(
-                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_globally",
+                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_candidates_page",
                 new_callable=AsyncMock,
                 return_value=([mock_result], 1),
             ),
@@ -1684,12 +1685,12 @@ class TestSeriesRouteContracts:
 
         with (
             patch(
-                "pullbox.core.comicvine_key.get_comicvine_api_key",
+                "pullbox.services.metadata_sources.get_comicvine_api_key",
                 new_callable=AsyncMock,
                 return_value="fake-key",
             ),
             patch(
-                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_globally",
+                "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_candidates_page",
                 new_callable=AsyncMock,
                 return_value=([mock_result], 1),
             ),

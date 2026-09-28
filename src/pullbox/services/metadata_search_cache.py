@@ -84,13 +84,15 @@ class MetadataSearchCache:
         _, payload = self._entries.pop(key)
         self._bytes -= len(payload)
 
-    async def _load(self, key: str, loader: Callable[[], Awaitable[SeriesDiscoveryRead]]) -> bytes:
+    async def _load(
+        self, key: str, loader: Callable[[], Awaitable[SeriesDiscoveryRead]], *, cache_result: bool
+    ) -> bytes:
         result = await loader()
         task = asyncio.current_task()
         if task is not None and task.cancelling():
             raise asyncio.CancelledError
         payload = result.model_dump_json().encode()
-        if len(payload) <= self.max_bytes:
+        if cache_result and len(payload) <= self.max_bytes:
             while self._entries and (
                 len(self._entries) >= self.max_entries
                 or self._bytes + len(payload) > self.max_bytes
@@ -105,21 +107,29 @@ class MetadataSearchCache:
         return payload
 
     async def get(
-        self, key: str, loader: Callable[[], Awaitable[SeriesDiscoveryRead]]
+        self,
+        key: str,
+        loader: Callable[[], Awaitable[SeriesDiscoveryRead]],
+        *,
+        cache_result: bool = True,
     ) -> SeriesDiscoveryRead:
         for expired in [key for key, (until, _) in self._entries.items() if until <= self.clock()]:
             self._discard(expired)
-        cached = self._entries.get(key)
+        cached = self._entries.get(key) if cache_result else None
         if cached is not None:
             self._entries.move_to_end(key)
             return SeriesDiscoveryRead.model_validate_json(cached[1])
         flight = self._pending.get(key)
+        if flight is not None and flight.task.cancelling():
+            raise MetadataSearchBusyError("The previous search is stopping. Try again shortly.")
         if flight is None:
             if len(self._pending) >= self.max_pending:
                 raise MetadataSearchBusyError(
                     "Other metadata searches are running. Try again shortly."
                 )
-            flight = _Flight(asyncio.create_task(self._load(key, loader)))
+            flight = _Flight(
+                asyncio.create_task(self._load(key, loader, cache_result=cache_result))
+            )
             self._pending[key] = flight
         flight.waiters += 1
         try:

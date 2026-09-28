@@ -21,7 +21,8 @@ MAX_ARTWORK_BYTES = 16 * 1024 * 1024
 MAX_ARTWORK_PIXELS = 20_000_000
 
 
-def _allowed_url(url: str) -> bool:
+def allowed_artwork_url(url: str) -> bool:
+    """Accept only supported public provider artwork, for browser and server use."""
     if len(url) > 4096 or any(char.isspace() or ord(char) < 32 for char in url):
         return False
     try:
@@ -129,7 +130,7 @@ class ProviderArtworkClient:
 
     async def download_cover(self, url: str, destination: Path) -> bool:
         """Publish a verified JPEG atomically, leaving any old cover on failure."""
-        if not _allowed_url(url):
+        if not allowed_artwork_url(url):
             logger.warning("provider_artwork_url_rejected")
             return False
         try:

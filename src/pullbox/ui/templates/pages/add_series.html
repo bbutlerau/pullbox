@@ -74,6 +74,25 @@
             ) }}
 
             <div class="series-toolbar-field">
+              <span class="series-toolbar-label">Source</span>
+              {{ dropdown_select(
+                name="source",
+                value=search_source,
+                size="sm",
+                options=search_source_options,
+                root_testid="add-series-source-select",
+                hx_get="/series/add",
+                hx_target="#add-series-results",
+                hx_swap="morph:outerHTML",
+                hx_push_url="true",
+                hx_sync="#add-series-search-form:replace",
+                hx_include="#add-series-search-form",
+                extra_input_attrs='hx-indicator="#add-series-results-loading"',
+                class_name="series-registry-dropdown",
+                fit_width=true
+              ) }}
+            </div>
+            <div class="series-toolbar-field">
               <span class="series-toolbar-label">Sort</span>
               {{ dropdown_select(
                 name="sort",
@@ -441,7 +460,7 @@ function addSeries() {
 function selectResult(payload, sourceEl = null) {
   const resolvedPayload = (typeof payload === 'number' || typeof payload === 'string')
     ? {
-        id: Number(payload),
+        externalId: sourceEl?.dataset.seriesExternalId || String(payload),
         source: sourceEl?.dataset.seriesSource || 'comicvine_api',
         title: sourceEl?.dataset.seriesTitle || '',
         publisher: sourceEl?.dataset.seriesPublisher || '',

@@ -1,6 +1,7 @@
 """Local matching uses aliases, exact IDs, and normalized issue designations."""
 
 import json
+import os
 
 import pytest
 
@@ -61,3 +62,29 @@ async def test_rejects_active_pointer_outside_catalog(tmp_path):
     )
     with pytest.raises(CatalogError):
         await reader.search("Batman")
+
+
+async def test_cache_token_tracks_file_replacement_and_pointer_cutoff(tmp_path):
+    reader = installed_reader(tmp_path)
+    first = await reader.cache_token()
+    assert isinstance(first, str) and len(first) == 64
+    assert await reader.cache_token() == first
+    path = reader.root / "bases/20260913T050000Z.db"
+    original = path.stat()
+    os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns + 1))
+    second = await reader.cache_token()
+    assert second != first
+    pointer = reader.root / "active.json"
+    value = json.loads(pointer.read_text())
+    value["source_cutoff_at"] = "2026-09-14T05:00:00+00:00"
+    pointer.write_text(json.dumps(value))
+    assert await reader.cache_token() != second
+    assert str(tmp_path) not in first
+
+
+async def test_cache_token_rejects_corrupted_generation(tmp_path):
+    reader = installed_reader(tmp_path)
+    await reader.cache_token()
+    (reader.root / "bases/20260913T050000Z.db").write_bytes(b"not a database")
+    with pytest.raises(CatalogError):
+        await reader.cache_token()

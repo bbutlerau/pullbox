@@ -8,6 +8,7 @@ from pydantic import SecretStr
 
 from pullbox.core.metadata_identity import MetadataSource as Source
 from pullbox.schemas.metadata_sources import (
+    MetadataDomain,
     ProviderSeriesRead,
     SeriesDiscoveryQuery,
     SeriesDiscoveryRead,
@@ -147,6 +148,34 @@ async def test_different_searches_are_admission_bounded():
         await task
 
 
+async def test_arrival_during_cancel_cleanup_does_not_join_dying_search():
+    started, draining, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def load():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            draining.set()
+            await release.wait()
+
+    cache = MetadataSearchCache(max_pending=1)
+    first = asyncio.create_task(cache.get("key", load))
+    await started.wait()
+    first.cancel()
+    await draining.wait()
+    replacement = AsyncMock(return_value=result())
+    try:
+        with pytest.raises(MetadataSearchBusyError):
+            await asyncio.wait_for(cache.get("key", replacement), timeout=0.2)
+        replacement.assert_not_awaited()
+    finally:
+        release.set()
+        await asyncio.gather(first, return_exceptions=True)
+    assert (await cache.get("key", replacement)).results
+    assert replacement.await_count == 1
+
+
 async def test_lru_entry_and_byte_limits_evict_old_snapshots():
     load = AsyncMock(return_value=result())
     cache = MetadataSearchCache(max_entries=2)
@@ -173,6 +202,16 @@ async def test_oversized_result_and_raised_exception_are_not_cached():
     assert (await cache.get("failed", load)).results
 
 
+async def test_uncacheable_load_keeps_admission_without_reusing_or_storing_results():
+    cache = MetadataSearchCache()
+    load = AsyncMock(return_value=result())
+    await cache.get("key", load, cache_result=False)
+    await cache.get("key", load, cache_result=False)
+    assert load.await_count == 2
+    await cache.get("key", load)
+    assert load.await_count == 3
+
+
 def test_key_is_normalized_opaque_and_bound_to_source_configuration_and_generation():
     source = Source.METRON_API
     runtime = [SourceRuntime(default_policy(source), SecretStr("synthetic-private-token"))]
@@ -194,6 +233,6 @@ def test_key_is_normalized_opaque_and_bound_to_source_configuration_and_generati
     enabled = SourceRuntime(runtime[0].policy.model_copy(update={"enabled": True}))
     assert key(r=[enabled]) != original
     priority = SourceRuntime(
-        runtime[0].policy.model_copy(update={"domain_priorities": {"core": 1}})
+        runtime[0].policy.model_copy(update={"domain_priorities": {MetadataDomain.CORE: 1}})
     )
     assert key(r=[priority]) != original

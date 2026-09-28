@@ -66,6 +66,11 @@ async def _catalog_read[T](operation: Callable[[], Awaitable[T]]) -> T:
         raise
 
 
+async def catalog_search_cache_token() -> str | None:
+    """Use the same bounded disk admission as catalog discovery."""
+    return await _catalog_read(get_catalog_reader().cache_token)
+
+
 def _image_url(value: str | None) -> str | None:
     if not value or len(value) > 4096 or any(char.isspace() for char in value):
         return None
