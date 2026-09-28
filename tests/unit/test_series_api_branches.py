@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -267,13 +268,18 @@ async def test_add_update_refresh_and_folder_routes_delegate(
         rename_all_series_folders=AsyncMock(return_value={"renamed": 2, "skipped": 1}),
         rename_series_folder=AsyncMock(return_value="/comics/Absolute Superman (2025)"),
     )
-    metadata_service = SimpleNamespace(refresh_series=AsyncMock())
+    refresh_command = AsyncMock()
+
+    @asynccontextmanager
+    async def refresh_transaction(session, series_id):
+        await refresh_command(session, series_id)
+        yield
+
     load_response = AsyncMock(side_effect=lambda _session, series_id: _series_response(series_id))
     monkeypatch.setattr(series_api, "_build_series_service", AsyncMock(return_value=service))
     monkeypatch.setattr(
-        series_api,
-        "_build_metadata_service",
-        AsyncMock(return_value=metadata_service),
+        "pullbox.services.metadata_series_refresh.source_series_refresh_transaction",
+        refresh_transaction,
     )
     monkeypatch.setattr(series_api, "_load_series_response", load_response)
     monkeypatch.setattr(series_api, "load_search_on_add_default", AsyncMock(return_value=True))
@@ -339,10 +345,9 @@ async def test_add_update_refresh_and_folder_routes_delegate(
     refresh_target = await _seed_series(db_session, title="Refresh Target")
     refreshed = await series_api.refresh_series(refresh_target.id, _user(), db_session)
     assert refreshed.id == refresh_target.id
-    metadata_service.refresh_series.assert_awaited_once_with(
+    refresh_command.assert_awaited_once_with(
         db_session,
         refresh_target.id,
-        force=True,
     )
 
 
@@ -354,11 +359,10 @@ async def test_refresh_series_rejects_duplicate_initial_catalog_sync(
     series = await _seed_series(db_session, title="Hydrating Refresh Target")
     series.issue_catalog_state = IssueCatalogState.HYDRATING
     await db_session.commit()
-    metadata_service = SimpleNamespace(refresh_series=AsyncMock())
+    refresh_command = AsyncMock()
     monkeypatch.setattr(
-        series_api,
-        "_build_metadata_service",
-        AsyncMock(return_value=metadata_service),
+        "pullbox.services.metadata_series_refresh.source_series_refresh_transaction",
+        refresh_command,
     )
 
     with pytest.raises(HTTPException) as exc_info:
@@ -366,7 +370,7 @@ async def test_refresh_series_rejects_duplicate_initial_catalog_sync(
 
     assert exc_info.value.status_code == 409
     assert exc_info.value.detail == "Initial metadata sync is already in progress."
-    metadata_service.refresh_series.assert_not_awaited()
+    refresh_command.assert_not_called()
 
 
 @pytest.mark.asyncio

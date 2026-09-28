@@ -606,7 +606,12 @@ async def refresh_series(
     _user: AuthenticatedUser,
     session: DbSession,
 ) -> SeriesResponse:
-    """Refresh series metadata from ComicVine."""
+    """Refresh metadata and the issue catalog from configured, verified sources."""
+    from pullbox.services.metadata_series_refresh import (
+        SeriesRefreshError,
+        source_series_refresh_transaction,
+    )
+
     series = await session.get(Series, series_id)
     if series is None:
         raise NotFoundError("Series", series_id)
@@ -615,9 +620,12 @@ async def refresh_series(
             status_code=409,
             detail="Initial metadata sync is already in progress.",
         )
-    metadata_svc = await _build_metadata_service(session)
-    await metadata_svc.refresh_series(session, series_id, force=True)
-    return await _load_series_response(session, series_id)
+    try:
+        async with source_series_refresh_transaction(session, series_id):
+            response = await _load_series_response(session, series_id)
+        return response
+    except SeriesRefreshError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/{series_id}/rename-folder", status_code=200)

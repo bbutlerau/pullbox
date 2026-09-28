@@ -199,12 +199,13 @@ def test_rejected_add_requires_new_preview_and_does_not_double_submit(authed_pag
     assert len(previews) == 2
 
 
-def test_real_local_search_preview_add_and_existing_owner(
+def test_real_local_search_preview_add_refresh_and_existing_owner(
     authed_page, seeded_server, monkeypatch, tmp_path
 ):
     from pullbox.api.v1 import series as series_api
     from pullbox.providers.metadata import sources
     from pullbox.services.catalog import reader as catalog_reader
+    from pullbox.services.provider_artwork import ProviderArtworkClient
     from tests.unit.test_catalog_reader import installed_reader
 
     reader = installed_reader(tmp_path)
@@ -213,6 +214,7 @@ def test_real_local_search_preview_add_and_existing_owner(
     # This test owns the browser/database/folder workflow, not scheduled downloads.
     events = AsyncMock()
     monkeypatch.setattr(series_api, "get_event_bus", lambda: events)
+    monkeypatch.setattr(ProviderArtworkClient, "download_cover", AsyncMock(return_value=False))
     page = authed_page
     page.goto(f"{seeded_server}/series/add?q=Dark+Knight")
     trigger = page.locator('[data-add-series-trigger="true"]').first
@@ -239,6 +241,22 @@ def test_real_local_search_preview_add_and_existing_owner(
         "href", f"/series/{record['id']}"
     )
     assert events.emit.await_count == 1
+    page.goto(f"{seeded_server}/series/{record['id']}")
+    with page.expect_response(
+        lambda response: response.url.endswith(f"/series/{record['id']}/refresh")
+    ) as refreshed:
+        page.get_by_test_id("series-action-refresh").click()
+    assert refreshed.value.status == 200, refreshed.value.text()
+    assert refreshed.value.json()["issue_catalog_state"] == "complete"
+    expect(page.get_by_test_id("series-action-refresh")).to_be_enabled()
+    detail = "A provider issue was renumbered. Review the issue match; existing files were kept."
+    page.route(
+        f"**/api/v1/series/{record['id']}/refresh",
+        lambda route: route.fulfill(status=409, json={"detail": detail}),
+    )
+    page.get_by_test_id("series-action-refresh").click()
+    expect(page.get_by_text(detail, exact=True)).to_be_visible()
+    expect(page.get_by_test_id("series-action-refresh")).to_be_enabled()
 
 
 @pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 1280), ("light", 320)])

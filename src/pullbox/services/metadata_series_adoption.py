@@ -65,6 +65,17 @@ def _metadata_label(source: MetadataSource) -> str:
 class SeriesAdoptionError(ValueError):
     """A complete, consistent source catalog could not be adopted safely."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: SourceStatus | None = None,
+        retry_after_seconds: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status = status
+        self.retry_after_seconds = retry_after_seconds
+
 
 @dataclass(frozen=True)
 class SourceSeriesBundle:
@@ -90,6 +101,7 @@ async def fetch_source_series_bundle(
     source_revision: int,
     max_issues: int = 10000,
     timeout: float = 120,
+    profile: ProviderSeriesRead | None = None,
 ) -> SourceSeriesBundle:
     identifier = source_id(source, MetadataEntityKind.SERIES, external_id)
     runtime = registry.runtime.get(source)
@@ -99,10 +111,24 @@ async def fetch_source_series_bundle(
         raise ValueError("Invalid adoption resource limits")
     try:
         async with asyncio.timeout(timeout):
-            profile = await registry.series(source, identifier)
-            if profile.status is not SourceStatus.OK or profile.data is None:
-                raise SeriesAdoptionError(f"Could not read the series: {profile.status.value}.")
-            if profile.data.issue_count is not None and profile.data.issue_count > max_issues:
+            if profile is None:
+                result_profile = await registry.series(source, identifier)
+                if result_profile.status is not SourceStatus.OK or result_profile.data is None:
+                    raise SeriesAdoptionError(
+                        f"Could not read the series: {result_profile.status.value}.",
+                        status=result_profile.status,
+                        retry_after_seconds=result_profile.retry_after_seconds,
+                    )
+                profile = result_profile.data
+            if (
+                profile.source is not source
+                or profile.identity_namespace is not source.identity_namespace
+                or profile.external_id != identifier
+            ):
+                raise SeriesAdoptionError(
+                    "The series profile belongs to a different source identity."
+                )
+            if profile.issue_count is not None and profile.issue_count > max_issues:
                 raise SeriesAdoptionError("The issue catalog exceeds the interactive add limit.")
             issues: list[ProviderIssueRead] = []
             seen: set[str] = set()
@@ -112,13 +138,16 @@ async def fetch_source_series_bundle(
                 result = await registry.issues(source, identifier, page=page)
                 if result.status is not SourceStatus.OK or result.data is None:
                     raise SeriesAdoptionError(
-                        f"Could not finish the issue catalog: {result.status.value}. Retry the add."
+                        f"Could not finish the issue catalog: {result.status.value}. "
+                        "Retry the add.",
+                        status=result.status,
+                        retry_after_seconds=result.retry_after_seconds,
                     )
                 current = result.data
                 if total is None:
                     total = current.total
                 if current.total != total or (
-                    profile.data.issue_count is not None and profile.data.issue_count != total
+                    profile.issue_count is not None and profile.issue_count != total
                 ):
                     raise SeriesAdoptionError("The provider catalog count changed. Retry the add.")
                 if total > max_issues:
@@ -127,8 +156,8 @@ async def fetch_source_series_bundle(
                     )
                 for issue in current.results:
                     if source is MetadataSource.COMICVINE_LOCAL and (
-                        profile.data.source_updated_at is None
-                        or issue.source_updated_at != profile.data.source_updated_at
+                        profile.source_updated_at is None
+                        or issue.source_updated_at != profile.source_updated_at
                     ):
                         raise SeriesAdoptionError("The local catalog changed. Retry the add.")
                     if issue.external_id in seen:
@@ -140,10 +169,12 @@ async def fetch_source_series_bundle(
                 if current.next_page is None:
                     if len(issues) != total:
                         raise SeriesAdoptionError("The issue catalog is incomplete. Retry the add.")
-                    return SourceSeriesBundle(profile.data, tuple(issues), source_revision, total)
+                    return SourceSeriesBundle(profile, tuple(issues), source_revision, total)
                 page = current.next_page
     except TimeoutError as exc:
-        raise SeriesAdoptionError("The issue catalog request timed out. Retry the add.") from exc
+        raise SeriesAdoptionError(
+            "The issue catalog request timed out. Retry the add.", status=SourceStatus.TIMEOUT
+        ) from exc
 
 
 async def adopt_source_series_bundle(

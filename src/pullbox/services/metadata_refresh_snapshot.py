@@ -29,6 +29,7 @@ class MetadataRefreshSnapshot(BaseModel):
     snapshot: MetadataSnapshot
     outcomes: tuple[SourceOutcome, ...]
     revisions: dict[MetadataSource, int]
+    candidates: tuple[MetadataCandidate, ...] = ()
 
 
 async def fetch_metadata_snapshot(
@@ -174,5 +175,8 @@ async def fetch_metadata_snapshot(
             candidates.append(result.data)
             snapshot = assemble(local=True)
     return MetadataRefreshSnapshot(
-        snapshot=snapshot, outcomes=tuple(outcomes.values()), revisions=revisions
+        snapshot=snapshot,
+        outcomes=tuple(outcomes.values()),
+        revisions=revisions,
+        candidates=tuple(candidates),
     )
