@@ -2,8 +2,9 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from pullbox.core.metadata_identity import ExternalIdentityRef, MetadataEntityKind, MetadataSource
 from pullbox.models.series import (
     IssueCatalogState,
     SeriesStatus,
@@ -26,6 +27,34 @@ class SeriesCreate(BaseModel):
             "by the global import policy."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_mixed_source_identity(cls, value: object) -> object:
+        if isinstance(value, dict) and {"source", "external_id", "source_revision"}.intersection(
+            value
+        ):
+            raise ValueError("Choose a source identity or a legacy ComicVine ID, not both.")
+        return value
+
+
+class SourceSeriesCreate(BaseModel):
+    """Select a source identity; metadata is always fetched by the server."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: MetadataSource
+    external_id: str = Field(..., min_length=1, max_length=320)
+    source_revision: int = Field(..., ge=0, strict=True)
+    library_root_id: int | None = Field(None, gt=0)
+    search_on_add: bool | None = None
+
+    @model_validator(mode="after")
+    def canonical_identity(self) -> "SourceSeriesCreate":
+        self.external_id = ExternalIdentityRef(
+            self.source.identity_namespace, MetadataEntityKind.SERIES, self.external_id
+        ).external_id
+        return self
 
 
 class SeriesUpdate(BaseModel):

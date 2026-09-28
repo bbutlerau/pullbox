@@ -63,6 +63,7 @@ from pullbox.utilities.settings import move_path_to_utility_trash
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from pullbox.core.metadata_identity import ExternalIdentityRef
     from pullbox.models.import_job import ImportedSeries
     from pullbox.services.metadata_service import MetadataService
 
@@ -76,6 +77,7 @@ class SeriesFolderCreationResult:
     folder_path: Path
     ownership_boundary_path: Path
     created_directory_paths: tuple[Path, ...]
+    created_directory_identities: tuple[tuple[Path, int, int], ...] = ()
 
     def ownership_payload(self) -> dict[str, object]:
         return {
@@ -89,6 +91,8 @@ class SeriesFolderCreationResult:
 def _create_series_folder_directories(
     folder_path: Path,
     ownership_boundary_path: Path,
+    *,
+    exclusive_leaf: bool = False,
 ) -> tuple[Path, ...]:
     """Create and return only strict descendant directory segments created here."""
     relative = folder_path.relative_to(ownership_boundary_path)
@@ -107,6 +111,8 @@ def _create_series_folder_directories(
             try:
                 current.mkdir()
             except FileExistsError:
+                if exclusive_leaf and current == folder_path:
+                    raise
                 if not current.is_dir():
                     raise
             else:
@@ -125,6 +131,56 @@ def _create_series_folder_directories(
                 continue
         raise
     return tuple(created)
+
+
+def rollback_series_folder_creation(result: SeriesFolderCreationResult) -> None:
+    """Remove only still-owned, empty directories; never remove library contents."""
+    for path, device, inode in reversed(result.created_directory_identities):
+        try:
+            if path.is_symlink() or path.resolve(strict=True) != path:
+                continue
+            path.relative_to(result.ownership_boundary_path)
+            current = path.stat()
+            if path != result.ownership_boundary_path and (current.st_dev, current.st_ino) == (
+                device,
+                inode,
+            ):
+                path.rmdir()
+        except OSError:
+            logger.debug("series_folder_rollback_retained_directory", path=str(path))
+        except ValueError:
+            logger.warning("series_folder_rollback_boundary_changed", path=str(path))
+
+
+async def _create_series_folder_owned(
+    folder_path: Path, root_path: Path, *, exclusive_leaf: bool
+) -> SeriesFolderCreationResult:
+    def create() -> SeriesFolderCreationResult:
+        paths = _create_series_folder_directories(
+            folder_path, root_path, exclusive_leaf=exclusive_leaf
+        )
+        return SeriesFolderCreationResult(
+            folder_path.resolve(strict=True),
+            root_path.resolve(strict=True),
+            paths,
+            tuple((path, stat.st_dev, stat.st_ino) for path in paths for stat in [path.stat()]),
+        )
+
+    # Cancellation cannot stop mkdir in a worker. Collect its receipt before cleanup.
+    worker = asyncio.create_task(asyncio.to_thread(create))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not worker.cancelled() and worker.exception() is None:
+            rollback_series_folder_creation(worker.result())
+        raise
 
 
 def _targeted_import_folder_type_hint(
@@ -501,14 +557,15 @@ class SeriesService:
             "colon_replacement": policy.colon_replacement,
         }
 
+    @staticmethod
     async def _create_series_folder(
-        self,
         session: AsyncSession,
         series: Series,
         library_root_id: int,
-        comicvine_id: int,
+        comicvine_id: int | None,
         *,
         folder_series_type: SeriesType | None = None,
+        source_identity: ExternalIdentityRef | None = None,
     ) -> SeriesFolderCreationResult:
         """Create a series folder on disk inside the given library root.
 
@@ -522,7 +579,7 @@ class SeriesService:
         await validate_managed_library_root(root)
 
         # Load naming config
-        cfg = await self._load_naming_config(session, root)
+        cfg = await SeriesService._load_naming_config(session, root)
 
         # Resolve publisher name for the template
         if series.publisher_id:
@@ -539,7 +596,7 @@ class SeriesService:
         folder_path = root_path / folder_relative
 
         # Reclaim empty/progress-only collision folders left behind by prior interrupted work.
-        if folder_path.exists():
+        if source_identity is None and folder_path.exists():
             reclaimed = await asyncio.to_thread(reclaim_transient_series_folder, folder_path)
             if reclaimed:
                 logger.warning(
@@ -549,8 +606,13 @@ class SeriesService:
                 )
 
         # Handle collision: append [cv-{id}] if folder already exists
-        if folder_path.exists():
-            folder_name_cv = f"{folder_path.name} [cv-{comicvine_id}]"
+        if folder_path.exists() or folder_path.is_symlink():
+            suffix = (
+                f"{source_identity.namespace.value}-{source_identity.external_id}"
+                if source_identity is not None and source_identity.namespace.value != "comicvine"
+                else f"cv-{comicvine_id}"
+            )
+            folder_name_cv = f"{folder_path.name} [{suffix}]"
             folder_path = folder_path.with_name(folder_name_cv)
             logger.info(
                 "series_folder_collision",
@@ -562,10 +624,10 @@ class SeriesService:
         # Create each missing segment independently so import rollback can
         # distinguish directories created here from pre-existing user paths.
         try:
-            created_directory_paths = await asyncio.to_thread(
-                _create_series_folder_directories,
+            receipt = await _create_series_folder_owned(
                 folder_path,
                 root_path,
+                exclusive_leaf=source_identity is not None,
             )
         except (OSError, ValueError) as exc:
             raise ValidationError("Series folder must be created inside its library root") from exc
@@ -580,11 +642,7 @@ class SeriesService:
             series_title=series.title,
             library_root=root.name,
         )
-        return SeriesFolderCreationResult(
-            folder_path=folder_path.resolve(strict=True),
-            ownership_boundary_path=root_path.resolve(strict=True),
-            created_directory_paths=created_directory_paths,
-        )
+        return receipt
 
     @staticmethod
     async def _build_series_folder_name(

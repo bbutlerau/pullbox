@@ -152,6 +152,23 @@ def _series_type_from_complete_issue_evidence(
     return None
 
 
+def infer_series_type_from_issue_evidence(series: Series, issue_types: list[IssueType]) -> None:
+    """Apply complete explicit issue evidence, never inherited or partial evidence."""
+    if (
+        classify_series_type(
+            series.title,
+            description=series.description,
+            issue_count=series.issue_count,
+            year_start=series.year_start,
+        )
+        != SeriesType.STANDARD.value
+    ):
+        return
+    inferred = _series_type_from_complete_issue_evidence(issue_types)
+    if inferred is not None:
+        series.series_type = inferred
+
+
 class MetadataService:
     """Orchestrates metadata fetching and caching.
 
@@ -457,10 +474,12 @@ class MetadataService:
         except ComicVineError as exc:
             raise _provider_error_from_comicvine(exc) from exc
 
+    @staticmethod
     async def classify_and_link_series(
-        self,
         session: AsyncSession,
         series: Series,
+        *,
+        preserve_provider_type: bool = False,
     ) -> None:
         """Detect series type from CV title and link to parent series.
 
@@ -477,6 +496,8 @@ class MetadataService:
                 year_start=series.year_start,
             )
         )
+        if preserve_provider_type and previous_type != SeriesType.STANDARD:
+            detected = previous_type
         if detected == SeriesType.STANDARD and previous_type != SeriesType.STANDARD:
             issue_types = [
                 IssueType(detect_issue_type_from_metadata_title(title))
@@ -494,7 +515,7 @@ class MetadataService:
                 # summary fields that are not represented in local prose.
                 detected = previous_type
         series.series_type = detected
-        await self._repair_issue_types_after_series_change(
+        await MetadataService._repair_issue_types_after_series_change(
             session,
             series,
             previous_type=previous_type,
@@ -511,7 +532,7 @@ class MetadataService:
             return  # Couldn't extract a different base title
 
         # Search for a standard parent series with the base title + similar year
-        parent = await self._find_parent_series(
+        parent = await MetadataService._find_parent_series(
             session,
             base_title,
             series.year_start,
@@ -996,28 +1017,8 @@ class MetadataService:
         # Only a complete catalog where every summary has explicit non-standard
         # evidence may infer the series type. Recent/targeted subsets and a mix
         # of ordinary plus special issues must never reclassify the parent.
-        if (
-            infer_series_type_from_summaries
-            and summaries
-            and classify_series_type(
-                series.title,
-                description=series.description,
-                issue_count=series.issue_count,
-                year_start=series.year_start,
-            )
-            == SeriesType.STANDARD.value
-        ):
-            inferred_series_type = _series_type_from_complete_issue_evidence(summary_evidence_types)
-            if inferred_series_type is not None:
-                series.series_type = inferred_series_type
-                log.debug(
-                    "series_type_inferred_from_issues",
-                    series_id=series_id,
-                    series_type=inferred_series_type.value,
-                    source_issue_types=sorted(
-                        {issue_type.value for issue_type in summary_evidence_types}
-                    ),
-                )
+        if infer_series_type_from_summaries and summaries:
+            infer_series_type_from_issue_evidence(series, summary_evidence_types)
 
         log.debug(
             "metadata_issues_synced",

@@ -11,6 +11,7 @@ from sqlalchemy import case, func, inspect, select, update
 from sqlalchemy.orm import contains_eager
 
 from pullbox.api.deps import AuthenticatedUser, DbSession
+from pullbox.config import get_settings
 from pullbox.core.events import IssueWanted, get_event_bus
 from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.core.library_policy import load_search_on_add_default
@@ -28,9 +29,17 @@ from pullbox.schemas.series import (
     SeriesListResponse,
     SeriesResponse,
     SeriesUpdate,
+    SourceSeriesCreate,
 )
 from pullbox.services.cover_url_service import build_series_cover_url
+from pullbox.services.metadata_discovery import MetadataSourceRegistry
+from pullbox.services.metadata_series_add import source_series_add_transaction
+from pullbox.services.metadata_series_adoption import (
+    SeriesAdoptionError,
+    fetch_source_series_bundle,
+)
 from pullbox.services.metadata_service import MetadataService
+from pullbox.services.metadata_sources import load_source_runtime
 from pullbox.services.search_targets import load_series_wanted_search_targets
 from pullbox.services.series_service import SeriesService
 from pullbox.tasks.search_task import search_series_issues
@@ -372,14 +381,39 @@ async def get_series(
 
 @router.post("", response_model=SeriesResponse, status_code=201)
 async def add_series(
-    body: SeriesCreate,
+    body: SeriesCreate | SourceSeriesCreate,
     _user: AuthenticatedUser,
     session: DbSession,
 ) -> SeriesResponse:
-    """Add a series to the library from ComicVine."""
+    """Add a source-selected series, retaining the legacy ComicVine request."""
     search_on_add = await load_search_on_add_default(session)
     if body.search_on_add is not None and body.search_on_add != search_on_add:
         raise ValidationError("Search on add is now controlled by the global import policy.")
+
+    if isinstance(body, SourceSeriesCreate):
+        gcd_enabled = get_settings().metadata_gcd_api_v2_enabled
+        runtime = await load_source_runtime(session, gcd_api_enabled=gcd_enabled)
+        await session.rollback()
+        try:
+            bundle = await fetch_source_series_bundle(
+                MetadataSourceRegistry(runtime, gcd_api_enabled=gcd_enabled),
+                body.source,
+                body.external_id,
+                source_revision=body.source_revision,
+            )
+            # This command owns commit/cleanup; serialize before committing so
+            # a failed response cannot leave an unexpected library addition.
+            async with source_series_add_transaction(
+                session,
+                bundle,
+                library_root_id=body.library_root_id,
+                search_on_add=search_on_add,
+                event_bus=get_event_bus(),
+            ) as result:
+                response = await _load_series_response(session, result.series.id)
+            return response
+        except SeriesAdoptionError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     series_svc = await _build_series_service(session)
 

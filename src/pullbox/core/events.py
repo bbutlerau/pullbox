@@ -76,7 +76,7 @@ class SeriesAdded:
     """Emitted when a new series is added to the library."""
 
     series_id: int
-    comicvine_id: int
+    comicvine_id: int | None = None
 
 
 @dataclass(frozen=True)
