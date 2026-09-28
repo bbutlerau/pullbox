@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetronInfo xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="MetronInfo.xsd">
+  <IDS><ID source="Metron" primary="true">000101</ID></IDS>
+  <Publisher><Name>Example Press</Name></Publisher>
+  <Series id="00021">
+    <Name>Harbor Lights</Name><Volume>2</Volume><StartYear>2020</StartYear>
+    <Format>Limited Series</Format><IssueCount>12</IssueCount>
+  </Series>
+  <Number>13a</Number>
+  <Stories><Story>New Shores</Story><Story>Homeward</Story></Stories>
+  <CoverDate>2020-06-01</CoverDate><StoreDate>2020-04-15</StoreDate>
+  <Arcs><Arc id="91"><Name>The Crossing</Name><Number>2</Number></Arc></Arcs>
+</MetronInfo>

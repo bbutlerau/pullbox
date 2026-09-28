@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetronInfo xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="MetronInfo.xsd">
+  <IDS>
+    <ID source="Metron" primary="true">101</ID>
+    <ID source="Comic Vine">00202</ID>
+    <ID source="Grand Comics Database">303</ID>
+    <ID source="League of Comic Geeks">404</ID>
+  </IDS>
+  <Series id="21"><Name>Harbor Lights</Name><StartYear>2020</StartYear></Series>
+  <Number>50-x</Number><AlternativeNumber>150</AlternativeNumber>
+  <CommunityRating><AverageRating>4.0</AverageRating></CommunityRating>
+</MetronInfo>

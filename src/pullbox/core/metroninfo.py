@@ -1,0 +1,404 @@
+"""Bounded, read-only MetronInfo evidence; never a matching or write decision."""
+
+from __future__ import annotations
+
+import enum
+import io
+import re
+from dataclasses import dataclass, replace
+from datetime import date
+from xml.etree import ElementTree
+
+from defusedxml import ElementTree as DefusedElementTree
+from defusedxml.common import DefusedXmlException
+
+from pullbox.core.metadata_identity import (
+    ExactIdentityEvidence,
+    ExternalIdentityRef,
+    IdentityEvidenceKind,
+    IdentityNamespace,
+    MetadataEntityKind,
+    find_exact_identity_conflicts,
+)
+from pullbox.core.xml_security import UnsafeXmlError, normalize_xml_for_expat
+
+MAX_METRONINFO_BYTES = 2 * 1024 * 1024
+MAX_METRONINFO_DEPTH = 32
+MAX_METRONINFO_NODES = 4096
+_MAX_ATTRIBUTES = 16
+_MAX_FIELD_LENGTH = 4096
+_CALENDAR_TIMEZONE = r"(?:Z|[+-](?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:00))?"
+_XINCLUDE = "{http://www.w3.org/2001/XInclude}"
+_SCHEMA_HINT = "{http://www.w3.org/2001/XMLSchema-instance}noNamespaceSchemaLocation"
+_SOURCES = {
+    "metron": IdentityNamespace.METRON,
+    "comic vine": IdentityNamespace.COMICVINE,
+    "comicvine": IdentityNamespace.COMICVINE,
+    "grand comics database": IdentityNamespace.GCD,
+    "gcd": IdentityNamespace.GCD,
+    "league of comic geeks": IdentityNamespace.LOCG,
+    "locg": IdentityNamespace.LOCG,
+}
+
+
+class MetronInfoDiagnosticCode(enum.StrEnum):
+    INVALID_XML = "invalid_xml"
+    UNSAFE_XML = "unsafe_xml"
+    TOO_LARGE = "too_large"
+    COMPLEXITY_LIMIT = "complexity_limit"
+    INVALID_ROOT = "invalid_root"
+    UNSUPPORTED_VERSION = "unsupported_version"
+    UNSUPPORTED_ENCODING = "unsupported_encoding"
+    INVALID_ID = "invalid_id"
+    UNKNOWN_SOURCE = "unknown_source"
+    INVALID_PRIMARY = "invalid_primary"
+    MISSING_PRIMARY = "missing_primary"
+    AMBIGUOUS_PRIMARY = "ambiguous_primary"
+    INVALID_FIELD = "invalid_field"
+    AMBIGUOUS_FIELD = "ambiguous_field"
+    EXACT_ID_CONFLICT = "exact_id_conflict"
+    UNMAPPED_CONTENT = "unmapped_content"
+
+
+@dataclass(frozen=True)
+class MetronInfoDiagnostic:
+    code: MetronInfoDiagnosticCode
+    locator: str
+
+
+@dataclass(frozen=True)
+class MetronInfoIdentity:
+    evidence: ExactIdentityEvidence
+    primary: bool = False
+
+
+@dataclass(frozen=True)
+class MetronInfoReleaseReference:
+    """LOCG issue/variant reference, not a canonical issue attachment."""
+
+    external_id: str
+    primary: bool = False
+
+
+@dataclass(frozen=True)
+class MetronInfoArc:
+    name: str
+    number: int | None = None
+    evidence: ExactIdentityEvidence | None = None
+
+
+@dataclass(frozen=True)
+class MetronInfoData:
+    series: str | None = None
+    number: str | None = None
+    alternative_number: str | None = None
+    publisher: str | None = None
+    start_year: int | None = None
+    volume: int | None = None
+    series_format: str | None = None
+    issue_count: int | None = None
+    cover_date: date | None = None
+    store_date: date | None = None
+    stories: tuple[str, ...] = ()
+    arcs: tuple[MetronInfoArc, ...] = ()
+    primary_source: IdentityNamespace | None = None
+    identities: tuple[MetronInfoIdentity, ...] = ()
+    release_references: tuple[MetronInfoReleaseReference, ...] = ()
+    diagnostics: tuple[MetronInfoDiagnostic, ...] = ()
+    has_unmapped_content: bool = False
+
+    @property
+    def evidence(self) -> tuple[ExactIdentityEvidence, ...]:
+        return tuple(item.evidence for item in self.identities)
+
+
+def parse_metroninfo(payload: bytes | str) -> MetronInfoData:
+    """Read local metadata only; callers retain authority and archive safety checks."""
+    try:
+        root = _bounded_tree(payload)
+    except _ReadError as exc:
+        return MetronInfoData(diagnostics=(MetronInfoDiagnostic(exc.code, "MetronInfo"),))
+    return _Reader(root).read()
+
+
+class _ReadError(ValueError):
+    def __init__(self, code: MetronInfoDiagnosticCode) -> None:
+        super().__init__(code.value)
+        self.code = code
+
+
+def _bounded_tree(payload: bytes | str) -> ElementTree.Element:
+    if len(payload) > MAX_METRONINFO_BYTES:
+        raise _ReadError(MetronInfoDiagnosticCode.TOO_LARGE)
+    try:
+        if isinstance(payload, str) and len(payload.encode("utf-8")) > MAX_METRONINFO_BYTES:
+            raise _ReadError(MetronInfoDiagnosticCode.TOO_LARGE)
+        normalized = normalize_xml_for_expat(payload)
+        header = normalized[:512]
+        if isinstance(header, bytes):
+            header = header.decode("ascii", errors="ignore")
+        encoding = re.search(r"<\?xml\b[^>]*\bencoding\s*=\s*['\"]([^'\"]+)", header)
+        if encoding and encoding[1].lower() not in {
+            "utf-8",
+            "utf-16",
+            "utf-16le",
+            "utf-16be",
+            "us-ascii",
+        }:
+            raise _ReadError(MetronInfoDiagnosticCode.UNSUPPORTED_ENCODING)
+        stream = io.StringIO(normalized) if isinstance(normalized, str) else io.BytesIO(normalized)
+        depth = nodes = 0
+        root: ElementTree.Element | None = None
+        iterator = DefusedElementTree.iterparse(
+            stream,
+            events=("start", "end"),
+            forbid_dtd=True,
+            forbid_entities=True,
+            forbid_external=True,
+        )
+        for event, node in iterator:
+            if event == "start":
+                if root is None:
+                    root = node
+                depth += 1
+                nodes += 1
+                if (
+                    depth > MAX_METRONINFO_DEPTH
+                    or nodes > MAX_METRONINFO_NODES
+                    or len(node.attrib) > _MAX_ATTRIBUTES
+                ):
+                    raise _ReadError(MetronInfoDiagnosticCode.COMPLEXITY_LIMIT)
+                if node.tag.startswith(_XINCLUDE):
+                    raise _ReadError(MetronInfoDiagnosticCode.UNSAFE_XML)
+            else:
+                depth -= 1
+    except DefusedXmlException as exc:
+        raise _ReadError(MetronInfoDiagnosticCode.UNSAFE_XML) from exc
+    except (ElementTree.ParseError, UnsafeXmlError, UnicodeError, LookupError) as exc:
+        raise _ReadError(MetronInfoDiagnosticCode.INVALID_XML) from exc
+    if root is None or root.tag != "MetronInfo":
+        raise _ReadError(MetronInfoDiagnosticCode.INVALID_ROOT)
+    return root
+
+
+class _Reader:
+    def __init__(self, root: ElementTree.Element) -> None:
+        self.root = root
+        self.diagnostics: list[MetronInfoDiagnostic] = []
+        self.diagnostic_keys: set[MetronInfoDiagnostic] = set()
+        self.seen: dict[ElementTree.Element, set[str]] = {root: {"version", _SCHEMA_HINT}}
+        self.text_nodes: set[ElementTree.Element] = set()
+        self.identities: dict[ExactIdentityEvidence, bool] = {}
+        self.releases: dict[str, bool] = {}
+
+    def diagnostic(self, code: MetronInfoDiagnosticCode, locator: str) -> None:
+        item = MetronInfoDiagnostic(code, locator)
+        if item not in self.diagnostic_keys:
+            self.diagnostic_keys.add(item)
+            self.diagnostics.append(item)
+
+    def single(
+        self, parent: ElementTree.Element | None, tag: str, locator: str
+    ) -> ElementTree.Element | None:
+        if parent is None:
+            return None
+        nodes = parent.findall(tag)
+        if len(nodes) > 1:
+            self.diagnostic(MetronInfoDiagnosticCode.AMBIGUOUS_FIELD, locator)
+            return None
+        if not nodes:
+            return None
+        self.seen.setdefault(nodes[0], set())
+        return nodes[0]
+
+    def read_text(self, node: ElementTree.Element | None, locator: str) -> str | None:
+        if node is None:
+            return None
+        value = (node.text or "").strip()
+        if len(node) or len(value) > _MAX_FIELD_LENGTH:
+            self.diagnostic(MetronInfoDiagnosticCode.INVALID_FIELD, locator)
+            return None
+        self.text_nodes.add(node)
+        return value or None
+
+    def field(self, parent: ElementTree.Element | None, tag: str, locator: str) -> str | None:
+        return self.read_text(self.single(parent, tag, locator), locator)
+
+    def integer(
+        self,
+        parent: ElementTree.Element | None,
+        tag: str,
+        locator: str,
+        minimum: int = 0,
+        maximum: int = 2**31 - 1,
+    ) -> int | None:
+        value = self.field(parent, tag, locator)
+        if value is None:
+            return None
+        if re.fullmatch(r"\+?[0-9]{1,10}", value) and minimum <= int(value) <= maximum:
+            return int(value)
+        self.diagnostic(MetronInfoDiagnosticCode.INVALID_FIELD, locator)
+        return None
+
+    def year(self, parent: ElementTree.Element | None, tag: str, locator: str) -> int | None:
+        value = self.field(parent, tag, locator)
+        if value is None:
+            return None
+        match = re.fullmatch(rf"([0-9]{{4}}){_CALENDAR_TIMEZONE}", value)
+        if match and int(match[1]) > 0:
+            return int(match[1])
+        self.diagnostic(MetronInfoDiagnosticCode.INVALID_FIELD, locator)
+        return None
+
+    def date(self, tag: str) -> date | None:
+        value = self.field(self.root, tag, tag)
+        if value is None:
+            return None
+        try:
+            match = re.fullmatch(rf"([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}){_CALENDAR_TIMEZONE}", value)
+            if match:
+                return date.fromisoformat(match[1])
+        except ValueError:
+            pass
+        self.diagnostic(MetronInfoDiagnosticCode.INVALID_FIELD, tag)
+        return None
+
+    def external_id(self, value: str | None, locator: str) -> str | None:
+        normalized = (value or "").strip()
+        if (
+            len(normalized) <= 255
+            and normalized.isascii()
+            and normalized.isdecimal()
+            and normalized.lstrip("0")
+        ):
+            return normalized.lstrip("0")
+        self.diagnostic(MetronInfoDiagnosticCode.INVALID_ID, locator)
+        return None
+
+    def claim(
+        self, namespace: IdentityNamespace, kind: MetadataEntityKind, value: str
+    ) -> ExactIdentityEvidence:
+        return ExactIdentityEvidence(
+            ExternalIdentityRef(namespace, kind, value), IdentityEvidenceKind.METRONINFO_XML
+        )
+
+    def read_ids(self) -> IdentityNamespace | None:
+        declarations: list[IdentityNamespace | None] = []
+        invalid_primary = False
+        groups = self.root.findall("IDS")
+        if len(groups) > 1:
+            self.diagnostic(MetronInfoDiagnosticCode.AMBIGUOUS_FIELD, "IDS")
+            invalid_primary = True
+        for group_index, group in enumerate(groups, 1):
+            self.seen[group] = set()
+            for index, node in enumerate(group.findall("ID"), 1):
+                locator = f"IDS[{group_index}]/ID[{index}]"
+                self.seen[node] = {"source", "primary"}
+                namespace = _SOURCES.get(" ".join(node.get("source", "").lower().split()))
+                primary = node.get("primary", "false").strip()
+                if primary not in {"true", "false", "1", "0"}:
+                    invalid_primary = True
+                    self.diagnostic(MetronInfoDiagnosticCode.INVALID_PRIMARY, locator)
+                is_primary = primary in {"true", "1"}
+                if is_primary:
+                    declarations.append(namespace)
+                if namespace is None:
+                    self.diagnostic(MetronInfoDiagnosticCode.UNKNOWN_SOURCE, locator)
+                    continue
+                value = self.external_id(self.read_text(node, locator), locator)
+                if value is None:
+                    continue
+                if namespace is IdentityNamespace.LOCG:
+                    self.releases[value] = self.releases.get(value, False) or is_primary
+                else:
+                    claim = self.claim(namespace, MetadataEntityKind.ISSUE, value)
+                    self.identities[claim] = self.identities.get(claim, False) or is_primary
+        if len(declarations) > 1:
+            self.diagnostic(MetronInfoDiagnosticCode.AMBIGUOUS_PRIMARY, "IDS")
+        if invalid_primary or len(declarations) != 1:
+            return None
+        return declarations[0]
+
+    def parent_identity(
+        self,
+        node: ElementTree.Element | None,
+        namespace: IdentityNamespace | None,
+        kind: MetadataEntityKind,
+        locator: str,
+    ) -> ExactIdentityEvidence | None:
+        if node is None or "id" not in node.attrib:
+            return None
+        self.seen[node].add("id")
+        if namespace is None:
+            self.diagnostic(MetronInfoDiagnosticCode.MISSING_PRIMARY, locator)
+            return None
+        value = self.external_id(node.get("id"), locator)
+        return self.claim(namespace, kind, value) if value is not None else None
+
+    def read_arcs(self, primary: IdentityNamespace | None) -> tuple[MetronInfoArc, ...]:
+        group = self.single(self.root, "Arcs", "Arcs")
+        if group is None:
+            return ()
+        arcs = []
+        for index, node in enumerate(group.findall("Arc"), 1):
+            self.seen[node] = set()
+            locator = f"Arcs/Arc[{index}]"
+            name = self.field(node, "Name", f"{locator}/Name")
+            number = self.integer(node, "Number", f"{locator}/Number", minimum=1)
+            identity = self.parent_identity(node, primary, MetadataEntityKind.STORY_ARC, locator)
+            if name:
+                arcs.append(MetronInfoArc(name, number, identity))
+        return tuple(arcs)
+
+    def read(self) -> MetronInfoData:
+        compatible = self.root.get("version") in {None, "1.0", "1.1"}
+        if not compatible:
+            self.diagnostic(MetronInfoDiagnosticCode.UNSUPPORTED_VERSION, "MetronInfo")
+        primary = self.read_ids() if compatible else None
+        series = self.single(self.root, "Series", "Series")
+        parent = self.parent_identity(series, primary, MetadataEntityKind.SERIES, "Series")
+        if parent is not None:
+            self.identities[parent] = True
+        if find_exact_identity_conflicts(self.identities):
+            self.diagnostic(MetronInfoDiagnosticCode.EXACT_ID_CONFLICT, "IDS")
+        stories_group = self.single(self.root, "Stories", "Stories")
+        stories = []
+        if stories_group is not None:
+            for index, node in enumerate(stories_group.findall("Story"), 1):
+                self.seen[node] = set()
+                value = self.read_text(node, f"Stories/Story[{index}]")
+                if value:
+                    stories.append(value)
+        data = MetronInfoData(
+            series=self.field(series, "Name", "Series/Name"),
+            number=self.field(self.root, "Number", "Number"),
+            alternative_number=self.field(self.root, "AlternativeNumber", "AlternativeNumber"),
+            publisher=self.field(
+                self.single(self.root, "Publisher", "Publisher"), "Name", "Publisher/Name"
+            ),
+            start_year=self.year(series, "StartYear", "Series/StartYear"),
+            volume=self.integer(series, "Volume", "Series/Volume"),
+            series_format=self.field(series, "Format", "Series/Format"),
+            issue_count=self.integer(series, "IssueCount", "Series/IssueCount", minimum=1),
+            cover_date=self.date("CoverDate"),
+            store_date=self.date("StoreDate"),
+            stories=tuple(stories),
+            arcs=self.read_arcs(primary),
+            primary_source=primary,
+            identities=tuple(
+                MetronInfoIdentity(claim, flag) for claim, flag in self.identities.items()
+            ),
+            release_references=tuple(
+                MetronInfoReleaseReference(value, flag) for value, flag in self.releases.items()
+            ),
+        )
+        unmapped = any(
+            node not in self.seen
+            or set(node.attrib) - self.seen[node]
+            or (node not in self.text_nodes and (node.text or "").strip())
+            or (node.tail or "").strip()
+            for node in self.root.iter()
+        )
+        if unmapped:
+            self.diagnostic(MetronInfoDiagnosticCode.UNMAPPED_CONTENT, "MetronInfo")
+        return replace(data, diagnostics=tuple(self.diagnostics), has_unmapped_content=unmapped)
