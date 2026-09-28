@@ -423,6 +423,24 @@ catches the conflict. Future refresh writers must additionally revalidate their
 captured source-policy and ownership revisions and current user values before
 applying network results; the baseline service is not a substitute for that check.
 
+### Source Catalog Checkpoints
+
+`series_catalog_checkpoints` records complete issue-catalog progress separately
+for each series/source pair. Real cascading foreign keys bind it to the series,
+source configuration and active identity row. The saved source revision, identity
+revision and exact external ID must still match before a cursor is usable. A
+local-source checkpoint also retains the catalog generation; incremental readers
+must compare that generation before applying a partial window.
+
+Full Add/refresh writes persist the checkpoint in the same caller-owned
+transaction as catalog rows and canonical baselines. A captured checkpoint
+revision participates in refresh revalidation. Checkpoint timestamps record
+the live request start, never completion or an unvalidated cache hit. Explicit
+full revalidation bypasses response-cache coalescing for that catalog so a
+joined earlier fetch cannot be mistaken for a new modification boundary.
+Migration leaves existing global timestamps untouched and creates no synthetic
+provider checkpoints. Downgrade discards sync progress only.
+
 ### 4.1 Base Model Mixins
 
 **Current Pullbox implementation**

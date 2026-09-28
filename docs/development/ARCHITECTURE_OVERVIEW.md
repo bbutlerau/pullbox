@@ -336,6 +336,16 @@ the full-page response cache, follow continuation links or attach identities.
 Daily issue-sweep integration remains pending; existing cadence/full-sync rules
 must be retained when that caller adopts this contract.
 
+Complete source-aware Add and refresh now persist source-bound catalog
+checkpoints with the same atomic library write. The checkpoint retains the
+source-policy and verified-identity revisions, exact parent and local generation.
+Only proven live catalog reads establish the request-start boundary. Cached
+bundles of unknown age and Add of an existing series do not advance progress.
+Refresh revalidates captured checkpoints along with metadata and policies, so
+an in-flight refresh cannot overwrite newer sync progress. Incremental consumers
+must still handle overlap, generation changes and truncated modification windows;
+this checkpoint storage does not itself implement daily source-aware sync.
+
 `services/metadata_series_adoption.py` separates a complete server-side catalog
 fetch from transactional adoption. Traversal rejects partial pages, repeated
 identities, changed counts and mixed local catalog generations. The writer locks
@@ -353,7 +363,9 @@ Normalized remote detail and issue-page reads reuse `metadata_provider_cache`
 through `services/metadata_read_cache.py`. Keys bind source, policy revision,
 operation, external ID and page; credentials are never cache key material.
 Responses are fresh for five minutes (not-found for 15 seconds), with validators
-retained for one day. Add and refresh commands always revalidate. A not-modified
+retained for one day. Add and refresh commands always revalidate. Complete series
+catalog reads that establish sync checkpoints bypass this cache and its shared
+flights; descriptive reads and other consumers retain the existing cache. A not-modified
 response requires an exact saved response; outages never become cached success.
 The cache is limited to 128 entries of at most 256 KiB each, separate from legacy
 ComicVine import entries. It owns short database sessions outside provider I/O,

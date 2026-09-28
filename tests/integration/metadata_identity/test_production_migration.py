@@ -60,6 +60,7 @@ def _data(connection):
 
 async def _predecessor(engine):
     async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.tables["series_catalog_checkpoints"].drop)
         for name in reversed(_NAMES):
             await connection.run_sync(Base.metadata.tables[name].drop)
 

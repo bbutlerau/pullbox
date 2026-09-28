@@ -65,6 +65,7 @@ from pullbox.models.metadata_baseline import (
     SeriesMetadataBaseline,
     StoryArcMetadataBaseline,
 )
+from pullbox.models.metadata_catalog_checkpoint import SeriesCatalogCheckpoint
 from pullbox.models.metadata_identity import (
     IssueExternalIdentity,
     IssueIdentityEvent,
@@ -213,6 +214,7 @@ __all__ = [
     "SearchLog",
     "SearchType",
     "Series",
+    "SeriesCatalogCheckpoint",
     "SeriesExternalIdentity",
     "SeriesIdentityEvent",
     "SeriesMetadataBaseline",

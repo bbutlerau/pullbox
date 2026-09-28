@@ -29,6 +29,7 @@ from pullbox.schemas.metadata_sources import (
 from pullbox.services.cover_resolver import resolve_covers_dir
 from pullbox.services.metadata_assembly import assemble_metadata
 from pullbox.services.metadata_baselines import MetadataBaselineWrite, save_metadata_baselines
+from pullbox.services.metadata_catalog_checkpoints import save_full_catalog_checkpoint
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
 from pullbox.services.metadata_identity_attachment import attach_verified_identities
 from pullbox.services.metadata_identity_review import record_identity_observation
@@ -230,6 +231,28 @@ async def refresh_series_from_sources(
             series = await _apply(
                 session, current, bundle, snapshot, now, replace_managed=replace_managed
             )
+            if bundle.catalog_started_at is not None:
+                checkpoint = next(
+                    (item for item in current.checkpoints if item.source is bundle.series.source),
+                    None,
+                )
+                identity_revision = next(
+                    revision
+                    for ref, _, revision in current.series.claims
+                    if ref.namespace is bundle.series.identity_namespace
+                    and ref.external_id == bundle.series.external_id
+                )
+                await save_full_catalog_checkpoint(
+                    session,
+                    series.id,
+                    source=bundle.series.source,
+                    source_revision=bundle.source_revision,
+                    identity_revision=identity_revision,
+                    external_id=bundle.series.external_id,
+                    started_at=bundle.catalog_started_at,
+                    source_updated_at=bundle.series.source_updated_at,
+                    expected_revision=checkpoint.revision if checkpoint else 0,
+                )
             await session.flush()
         logger.info(
             "metadata_series_source_refreshed",

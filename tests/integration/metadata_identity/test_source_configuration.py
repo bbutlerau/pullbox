@@ -215,6 +215,8 @@ async def test_actual_source_migration_roundtrip_preserves_canonical_credentials
     async with engine.begin() as connection:
 
         def migrate(sync):
+            checkpoints = _revision("u2o3p4q5r678_add_catalog_checkpoints", sync)
+            checkpoints.downgrade()
             migration = _revision("s0m1n2o3p456_add_metadata_source_configuration", sync)
             migration.downgrade()
             migration.upgrade()
@@ -229,6 +231,7 @@ async def test_actual_source_migration_roundtrip_preserves_canonical_credentials
                 },
             )
             assert compare_metadata(context, expected) == []
+            checkpoints.upgrade()
 
         await connection.run_sync(migrate)
     async with factory() as session:

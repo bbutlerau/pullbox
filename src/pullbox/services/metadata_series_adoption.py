@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+from copy import copy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
@@ -42,6 +43,10 @@ from pullbox.services.metadata_baselines import (
     MetadataBaselineWrite,
     load_metadata_baseline,
     save_metadata_baselines,
+)
+from pullbox.services.metadata_catalog_checkpoints import (
+    CatalogCheckpointConflictError,
+    save_full_catalog_checkpoint,
 )
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
 from pullbox.services.metadata_identity_attachment import attach_verified_identities
@@ -83,6 +88,7 @@ class SourceSeriesBundle:
     issues: tuple[ProviderIssueRead, ...]
     source_revision: int
     catalog_total: int
+    catalog_started_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -109,6 +115,15 @@ async def fetch_source_series_bundle(
         raise SeriesAdoptionError("Metadata source settings changed. Preview the series again.")
     if type(max_issues) is not int or not 1 <= max_issues <= 10000 or not 0 < timeout <= 120:
         raise ValueError("Invalid adoption resource limits")
+    if registry.revalidate_reads and registry.read_cache is not None:
+        # A coalesced response may have started before this fetch. Preserve the
+        # caller's cache and concurrency budget but read this full catalog live.
+        registry = copy(registry)
+        registry.read_cache = None
+    # Cached pages without revalidation cannot establish a new modification floor.
+    started_at = (
+        datetime.now(UTC) if registry.read_cache is None or registry.revalidate_reads else None
+    )
     try:
         async with asyncio.timeout(timeout):
             if profile is None:
@@ -169,7 +184,9 @@ async def fetch_source_series_bundle(
                 if current.next_page is None:
                     if len(issues) != total:
                         raise SeriesAdoptionError("The issue catalog is incomplete. Retry the add.")
-                    return SourceSeriesBundle(profile, tuple(issues), source_revision, total)
+                    return SourceSeriesBundle(
+                        profile, tuple(issues), source_revision, total, started_at
+                    )
                 page = current.next_page
     except TimeoutError as exc:
         raise SeriesAdoptionError(
@@ -200,6 +217,10 @@ async def adopt_source_series_bundle(
                     "Metadata source settings changed. Preview the series again."
                 )
             return await _adopt(session, bundle, numbers, monitored=monitored)
+    except CatalogCheckpointConflictError as exc:
+        raise SeriesAdoptionError(
+            "Catalog progress could not be saved safely. Preview the series again."
+        ) from exc
     except (ValidationError, IntegrityError) as exc:
         raise SeriesAdoptionError(
             "Metadata identity conflicts with an existing match. Review the match before retrying."
@@ -529,6 +550,24 @@ async def _adopt(
         await MetadataService.infer_series_status(session, series)
     if snapshot is not None:
         snapshot = await persist_adoption_series_baseline(session, series, snapshot)
+    if bundle.catalog_started_at is not None:
+        claim = await session.scalar(
+            select(SeriesExternalIdentity).where(
+                SeriesExternalIdentity.series_id == series.id,
+                SeriesExternalIdentity.identity_namespace == profile.identity_namespace,
+            )
+        )
+        assert claim is not None
+        await save_full_catalog_checkpoint(
+            session,
+            series.id,
+            source=profile.source,
+            source_revision=bundle.source_revision,
+            identity_revision=claim.revision,
+            external_id=profile.external_id,
+            started_at=bundle.catalog_started_at,
+            source_updated_at=profile.source_updated_at,
+        )
     logger.info(
         "metadata_series_added",
         series_id=series.id,
