@@ -84,6 +84,32 @@ async def test_source_revision_changed_before_fetch_makes_no_requests():
     assert adapter.calls == []
 
 
+async def test_prefetched_series_profile_is_reused_for_complete_catalog():
+    adapter = CatalogAdapter(101)
+    profile = row(adapter.source).model_copy(update={"issue_count": 101})
+    result = await fetch(adapter, profile=profile)
+    assert result.series == profile and len(result.issues) == 101
+    assert adapter.calls == [("issues", "42", 1), ("issues", "42", 2)]
+
+
+@pytest.mark.parametrize("change", ["source", "identity_namespace", "external_id"])
+async def test_prefetched_series_profile_cannot_cross_source_identity(change):
+    adapter = CatalogAdapter(1)
+    profile = row(adapter.source)
+    profile = profile.model_copy(
+        update={
+            change: {
+                "source": Source.COMICVINE_API,
+                "identity_namespace": Source.COMICVINE_API.identity_namespace,
+                "external_id": "999",
+            }[change]
+        }
+    )
+    with pytest.raises(SeriesAdoptionError, match="different source identity"):
+        await fetch(adapter, profile=profile)
+    assert adapter.calls == []
+
+
 @pytest.mark.parametrize(
     "status", [SourceStatus.RATE_LIMITED, SourceStatus.TIMEOUT, SourceStatus.NOT_FOUND]
 )

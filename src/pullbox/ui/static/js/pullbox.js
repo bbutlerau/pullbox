@@ -19959,19 +19959,26 @@ function seriesDetailPage(config) {
       var self = this;
       if (self.refreshing) return;
       self.refreshing = true;
+      var failureMessage = "Failed to refresh metadata";
       fetch(cfg.refreshUrl, {
         method: "POST",
         headers: { "X-CSRF-Token": self.csrfToken() },
       })
-        .then(function (response) {
-          if (!response.ok) throw new Error("Failed to refresh metadata");
+        .then(async function (response) {
+          if (!response.ok) {
+            var data = await _readJsonBody(response);
+            if (response.status === 409) {
+              failureMessage = _extractApiErrorMessage(response, data, failureMessage);
+            }
+            throw new Error(failureMessage);
+          }
           self.dispatchToast("Metadata refreshed", "success");
           setTimeout(function () {
             window.location.assign(self.currentDetailUrl());
           }, 500);
         })
         .catch(function () {
-          self.dispatchToast("Failed to refresh metadata", "error");
+          self.dispatchToast(failureMessage, "error");
           self.refreshing = false;
         });
     },

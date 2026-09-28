@@ -8,7 +8,7 @@ from pathlib import Path
 
 import structlog
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pullbox.config import get_settings
@@ -78,7 +78,15 @@ async def source_series_refresh_transaction(
         await session.rollback()
         raise
     if cover_url:
-        await _refresh_artwork(session, series_id, cover_url, covers)
+        try:
+            await _refresh_artwork(session, series_id, cover_url, covers)
+        except (OSError, SQLAlchemyError) as exc:
+            # Metadata is already committed; an optional cache write is retryable.
+            logger.warning(
+                "metadata_series_artwork_refresh_failed",
+                series_id=series_id,
+                error_type=type(exc).__name__,
+            )
 
 
 async def _refresh_artwork(session: AsyncSession, series_id: int, url: str, covers: Path) -> None:

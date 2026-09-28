@@ -200,7 +200,7 @@ def test_rejected_add_requires_new_preview_and_does_not_double_submit(authed_pag
 
 
 def test_real_local_search_preview_add_refresh_and_existing_owner(
-    authed_page, seeded_server, monkeypatch, tmp_path
+    authed_page, seeded_server, monkeypatch, tmp_path, request
 ):
     from pullbox.api.v1 import series as series_api
     from pullbox.providers.metadata import sources
@@ -233,6 +233,17 @@ def test_real_local_search_preview_add_refresh_and_existing_owner(
     response = added.value
     assert response.status == 201, response.text()
     record = response.json()
+
+    def remove_test_series():
+        result = page.request.delete(
+            f"{seeded_server}/api/v1/series/{record['id']}",
+            headers={"X-CSRF-Token": page.evaluate("readCsrfTokenFromBody()")},
+        )
+        assert result.status == 204, result.text()
+        # Delete only the empty folder this test's Add created, not library data.
+        Path(record["path"]).rmdir()
+
+    request.addfinalizer(remove_test_series)
     assert record["comicvine_id"] == 10 and record["title"] == "Batman"
     assert Path(record["path"]).is_dir()
     assert Path(record["path"]).name == folder
@@ -242,12 +253,21 @@ def test_real_local_search_preview_add_refresh_and_existing_owner(
     )
     assert events.emit.await_count == 1
     page.goto(f"{seeded_server}/series/{record['id']}")
-    with page.expect_response(
-        lambda response: response.url.endswith(f"/series/{record['id']}/refresh")
-    ) as refreshed:
+    with (
+        page.expect_navigation(
+            url=f"{seeded_server}/series/{record['id']}", wait_until="domcontentloaded"
+        ),
+        page.expect_response(
+            lambda response: response.url.endswith(f"/series/{record['id']}/refresh")
+        ) as refreshed,
+    ):
         page.get_by_test_id("series-action-refresh").click()
-    assert refreshed.value.status == 200, refreshed.value.text()
-    assert refreshed.value.json()["issue_catalog_state"] == "complete"
+    assert refreshed.value.status == 200
+    # The success action navigates away. Verify persisted state without waiting
+    # for a response body attached to the previous document's fetch lifecycle.
+    updated = page.request.get(f"{seeded_server}/api/v1/series/{record['id']}")
+    assert updated.ok
+    assert updated.json()["issue_catalog_state"] == "complete"
     expect(page.get_by_test_id("series-action-refresh")).to_be_enabled()
     detail = "A provider issue was renumbered. Review the issue match; existing files were kept."
     page.route(

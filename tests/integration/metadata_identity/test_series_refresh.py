@@ -2,9 +2,12 @@
 
 import asyncio
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import OperationalError
+from structlog.testing import capture_logs
 
 from pullbox.core.metadata_identity import IdentityNamespace as Namespace
 from pullbox.core.metadata_identity import MetadataEntityKind as Kind
@@ -457,6 +460,63 @@ async def test_cover_fetch_occurs_after_commit_and_rechecks_url(
         await routes.refresh_series(series_id, User(username="tester"), session)
     assert (tmp_path / str(series_id) / "series.jpg").exists() is (not race)
     assert list(tmp_path.rglob(".*series.jpg")) == []
+
+
+@pytest.mark.parametrize("failure", ["download", "publish", "database"])
+async def test_artwork_failure_does_not_report_committed_metadata_as_failed(
+    identity_probe_db, tmp_path, monkeypatch, failure
+):
+    from pullbox.api.v1 import series as routes
+    from pullbox.models.user import User
+    from pullbox.services import metadata_series_refresh as refresh
+
+    _, factory, _ = identity_probe_db
+    series_id, _, data = await seed(factory)
+    data.series.image_url = "https://static.metron.cloud/media/new.jpg"
+    data.series.description = "Committed metadata"
+    instance = refresh_registry(RefreshAdapter(data))
+    monkeypatch.setattr(refresh, "MetadataSourceRegistry", lambda *args, **kwargs: instance)
+
+    async def covers(_session):
+        return tmp_path
+
+    destination = tmp_path / str(series_id) / "series.jpg"
+    destination.parent.mkdir()
+    destination.write_bytes(b"existing cover")
+
+    async def download(_client, _url, pending):
+        if failure == "download":
+            raise PermissionError("private storage diagnostic")
+        pending.write_bytes(b"replacement cover")
+        if failure == "database":
+
+            async def fail_cache_read(*args, **kwargs):
+                raise OperationalError("cover lookup", {}, Exception("private storage diagnostic"))
+
+            monkeypatch.setattr(session, "scalar", fail_cache_read)
+        return True
+
+    original_replace = Path.replace
+
+    def reject_publish(path, target):
+        if target == destination:
+            raise PermissionError("private storage diagnostic")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(refresh, "resolve_covers_dir", covers)
+    monkeypatch.setattr(refresh.ProviderArtworkClient, "download_cover", download)
+    monkeypatch.setattr(Path, "replace", reject_publish)
+    with capture_logs() as logs:
+        async with factory() as session:
+            response = await routes.refresh_series(series_id, User(username="tester"), session)
+            assert response.description == "Committed metadata"
+            assert not session.in_transaction()
+    async with factory() as session:
+        assert (await load_metadata_baseline(session, Kind.SERIES, series_id)).revision == 2
+    assert destination.read_bytes() == b"existing cover"
+    assert list(tmp_path.rglob(".*series.jpg")) == []
+    assert any(item["event"] == "metadata_series_artwork_refresh_failed" for item in logs)
+    assert "private storage diagnostic" not in str(logs)
 
 
 async def test_core_and_catalog_use_independent_configured_priorities(identity_probe_db):
