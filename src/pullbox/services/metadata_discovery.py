@@ -235,8 +235,17 @@ class MetadataSourceRegistry:
         *,
         domain: MetadataDomain = MetadataDomain.CORE,
     ) -> list[MetadataSource]:
+        return self.ordered_sources(sources=query.sources, domain=domain)
+
+    def ordered_sources(
+        self,
+        *,
+        sources: Sequence[MetadataSource] | None = None,
+        domain: MetadataDomain = MetadataDomain.CORE,
+    ) -> list[MetadataSource]:
+        """Use the same configured authority for discovery and exact-ID refresh."""
         return sorted(
-            query.sources if query.sources is not None else self.runtime,
+            sources if sources is not None else self.runtime,
             key=lambda source: (
                 self.runtime[source].policy.domain_priorities.get(
                     domain, self.runtime[source].policy.priority
@@ -246,6 +255,12 @@ class MetadataSourceRegistry:
                 source.value,
             ),
         )
+
+    def source_availability(
+        self, source: MetadataSource, capability: SourceCapability
+    ) -> SourceStatus | None:
+        """Inspect configuration and capabilities without constructing a client."""
+        return self._unavailable(source, capability=capability)
 
     @staticmethod
     def _group_pages(pages: Sequence[tuple[SourcePage, SourceOutcome]]) -> SeriesDiscoveryRead:
