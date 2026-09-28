@@ -104,6 +104,7 @@ class PullboxSettings(BaseSettings):
 
     # ── ComicVine ──────────────────────────────────────────────────────
     comicvine_api_key: str = ""
+    metadata_gcd_api_v2_enabled: bool = False
     comicvine_rate_limit: int = 200  # Requests per hour
 
     # ── Import Debug ───────────────────────────────────────────────────
