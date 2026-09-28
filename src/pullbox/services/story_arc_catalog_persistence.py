@@ -32,6 +32,7 @@ from pullbox.models.issue import Issue, IssueStatus, IssueType
 from pullbox.models.library import LibraryRoot
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import IssueCatalogState, Series, SeriesStatus, SeriesType
+from pullbox.models.story_arc import StoryArc, StoryArcExternalIdentity
 from pullbox.services.library_root_management import validate_managed_library_root
 from pullbox.services.metadata_identity_attachment import (
     IdentityAttachmentConflictError,
@@ -202,6 +203,45 @@ async def _attach_member_identities(
         raise StoryArcCatalogError(
             "identity_conflict", "Canonical identity needs review before adding these members"
         ) from exc
+
+
+async def attach_arc_identity(
+    session: AsyncSession, arc: StoryArc, preview: StoryArcCatalogPreview
+) -> None:
+    """Record the validated preview without treating an old receipt as current proof."""
+    identity = ExternalIdentityRef(
+        IdentityNamespace.COMICVINE, MetadataEntityKind.STORY_ARC, preview.metadata.provider_id
+    )
+    request = IdentityEventRequest(
+        uuid5(UUID("e5975ab0-13f6-4e1f-b7af-c3a00ccab88b"), preview.fingerprint),
+        arc.id,
+        IdentityVerificationAction.VERIFY,
+        IdentityEventEvidence(
+            ExactIdentityEvidence(
+                identity, IdentityEvidenceKind.PROVIDER_RESULT, MetadataSource.COMICVINE_API
+            ),
+            preview.fingerprint,
+            source_identity=identity,
+        ),
+    )
+    try:
+        await attach_verified_identities(session, [request], require_current_ownership=True)
+    except (IdentityAttachmentConflictError, IdentityReviewRequiredError) as exc:
+        raise StoryArcCatalogError(
+            "identity_conflict", "Story arc identity needs review before updating its catalog"
+        ) from exc
+    owner = await session.scalar(
+        select(StoryArcExternalIdentity).where(
+            StoryArcExternalIdentity.story_arc_id == arc.id,
+            StoryArcExternalIdentity.source == "comicvine",
+            StoryArcExternalIdentity.namespace == "story_arc",
+        )
+    )
+    assert owner is not None
+    if preview.metadata.comicvine_url is not None:
+        owner.source_url = preview.metadata.comicvine_url
+    owner.evidence = {**owner.evidence, "snapshot_fingerprint": preview.fingerprint}
+    await session.refresh(arc, ["comicvine_id"])
 
 
 async def _new_series(session: AsyncSession, metadata: SeriesMetadata, root: LibraryRoot) -> Series:

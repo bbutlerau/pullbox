@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from itertools import groupby
 from typing import TYPE_CHECKING
 
-from sqlalchemy import false, func, insert, or_, select, tuple_, update
+from sqlalchemy import false, func, insert, or_, select, true, tuple_, update
 from sqlalchemy.exc import IntegrityError
 
 from pullbox.core.metadata_identity import IdentityNamespace, MetadataEntityKind
@@ -22,7 +22,7 @@ from pullbox.core.metadata_identity_state import (
     IdentityVerificationAction,
     IdentityVerificationState,
 )
-from pullbox.models import Base, Issue, Series
+from pullbox.models import Base, Issue, Series, StoryArc, StoryArcExternalIdentity
 from pullbox.models.metadata_identity import IssueExternalIdentity, SeriesExternalIdentity
 
 if TYPE_CHECKING:
@@ -34,6 +34,24 @@ if TYPE_CHECKING:
     from pullbox.core.metadata_identity_events import IdentityEventRequest
 
 _BATCH_SIZE = 200
+_TARGET_MODELS: dict[MetadataEntityKind, type[Series] | type[Issue] | type[StoryArc]] = {
+    MetadataEntityKind.SERIES: Series,
+    MetadataEntityKind.ISSUE: Issue,
+    MetadataEntityKind.STORY_ARC: StoryArc,
+}
+_OWNER_MODELS: dict[
+    MetadataEntityKind,
+    type[SeriesExternalIdentity] | type[IssueExternalIdentity] | type[StoryArcExternalIdentity],
+] = {
+    MetadataEntityKind.SERIES: SeriesExternalIdentity,
+    MetadataEntityKind.ISSUE: IssueExternalIdentity,
+    MetadataEntityKind.STORY_ARC: StoryArcExternalIdentity,
+}
+_LOCK_ORDER = {
+    MetadataEntityKind.STORY_ARC: 0,
+    MetadataEntityKind.SERIES: 1,
+    MetadataEntityKind.ISSUE: 2,
+}
 
 
 class IdentityAttachmentConflictError(ValueError):
@@ -68,7 +86,7 @@ async def attach_verified_identities(
         if (
             request.action is not IdentityVerificationAction.VERIFY
             or request.actor is not IdentityEventActor.AUTOMATION
-            or identity.entity_kind not in {MetadataEntityKind.SERIES, MetadataEntityKind.ISSUE}
+            or identity.entity_kind not in _TARGET_MODELS
         ):
             raise ValueError("This attachment path accepts validated automatic verification only")
         if (
@@ -123,7 +141,7 @@ async def attach_verified_identities(
 def _sort_key(request: IdentityEventRequest) -> tuple[int, int, str, str]:
     identity = request.evidence.claim.identity
     return (
-        0 if identity.entity_kind is MetadataEntityKind.SERIES else 1,
+        _LOCK_ORDER[identity.entity_kind],
         request.local_id,
         identity.namespace.value,
         identity.external_id,
@@ -132,6 +150,21 @@ def _sort_key(request: IdentityEventRequest) -> tuple[int, int, str, str]:
 
 async def _lock_parent_graph(session: AsyncSession, requests: list[IdentityEventRequest]) -> None:
     """Acquire every parent before any child, across the whole batch sequence."""
+    # Catalog refresh owns its arc before touching member series/issues.
+    arc_ids = sorted(
+        {
+            request.local_id
+            for request in requests
+            if request.evidence.claim.identity.entity_kind is MetadataEntityKind.STORY_ARC
+        }
+    )
+    for offset in range(0, len(arc_ids), _BATCH_SIZE):
+        await session.execute(
+            select(StoryArc.id)
+            .where(StoryArc.id.in_(arc_ids[offset : offset + _BATCH_SIZE]))
+            .order_by(StoryArc.id)
+            .with_for_update()
+        )
     series_ids = {
         request.local_id
         for request in requests
@@ -180,7 +213,7 @@ async def _lock_parent_graph(session: AsyncSession, requests: list[IdentityEvent
 async def _locked_targets(
     session: AsyncSession, kind: MetadataEntityKind, target_ids: list[int]
 ) -> dict[int, RowMapping]:
-    model = Series if kind is MetadataEntityKind.SERIES else Issue
+    model = _TARGET_MODELS[kind]
     table = Base.metadata.tables[model.__tablename__]
     columns = [table.c.id, table.c.comicvine_id]
     if kind is MetadataEntityKind.ISSUE:
@@ -210,6 +243,16 @@ async def _attach_batch(
     target_key = f"{kind.value}_id"
     active = Base.metadata.tables[f"{kind.value}_external_identities"]
     history = Base.metadata.tables[f"{kind.value}_identity_events"]
+    is_arc = kind is MetadataEntityKind.STORY_ARC
+    namespace_column = active.c.source if is_arc else active.c.identity_namespace
+    active_scope = (
+        (active.c.namespace == "story_arc") & active.c.source.in_(list(IdentityNamespace))
+        if is_arc
+        else true()
+    )
+    active_select = (
+        select(active, namespace_column.label("identity_namespace")) if is_arc else select(active)
+    )
     targets = await _locked_targets(
         session, kind, sorted({request.local_id for request in requests})
     )
@@ -255,10 +298,11 @@ async def _attach_batch(
     active_rows = (
         (
             await session.execute(
-                select(active).where(
+                active_select.where(
+                    active_scope,
                     or_(
                         active.c[target_key].in_([request.local_id for request in checked]),
-                        tuple_(active.c.identity_namespace, active.c.external_id).in_(
+                        tuple_(namespace_column, active.c.external_id).in_(
                             [
                                 (
                                     request.evidence.claim.identity.namespace,
@@ -267,7 +311,7 @@ async def _attach_batch(
                                 for request in checked
                             ]
                         ),
-                    )
+                    ),
                 )
             )
         )
@@ -374,7 +418,11 @@ async def _attach_batch(
             creates[target] = {
                 **values,
                 target_key: request.local_id,
-                "identity_namespace": namespace,
+                **(
+                    {"source": namespace.value, "namespace": "story_arc"}
+                    if is_arc
+                    else {"identity_namespace": namespace}
+                ),
                 "external_id": external_id,
             }
         else:
@@ -403,16 +451,12 @@ async def _attach_batch(
         await session.execute(insert(active), list(creates.values()))
     if changes:
         await session.execute(
-            update(
-                SeriesExternalIdentity
-                if kind is MetadataEntityKind.SERIES
-                else IssueExternalIdentity
-            ),
+            update(_OWNER_MODELS[kind]),
             list(changes.values()),
         )
     if legacy_changes:
         await session.execute(
-            update(Series if kind is MetadataEntityKind.SERIES else Issue),
+            update(_TARGET_MODELS[kind]),
             list(legacy_changes.values()),
         )
     rows = await session.execute(
@@ -431,7 +475,7 @@ async def _validate_legacy_owners(
     requests: list[IdentityEventRequest],
     targets: dict[int, RowMapping],
 ) -> None:
-    model = Series if kind is MetadataEntityKind.SERIES else Issue
+    model = _TARGET_MODELS[kind]
     legacy_claims = [
         (request.local_id, int(request.evidence.claim.identity.external_id))
         for request in requests

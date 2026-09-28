@@ -21,6 +21,7 @@ from pullbox.models.story_arc import (
     StoryArcSourceKind,
 )
 from pullbox.services.story_arc_catalog_persistence import (
+    attach_arc_identity,
     canonical_root,
     publisher_id,
     seed_members,
@@ -203,7 +204,6 @@ class StoryArcCatalogService:
                     raise StoryArcCatalogError(
                         "identity_conflict", "This provider story arc identity is already assigned"
                     )
-                issues = await seed_members(session, preview, root, order)
                 arc = await self.domain.create(
                     session,
                     name=preview.metadata.title,
@@ -214,23 +214,14 @@ class StoryArcCatalogService:
                     sync_enabled=policy.synchronize,
                     source_kind=StoryArcSourceKind.PROVIDER,
                 )
-                arc.comicvine_id = exact_provider_id(preview.metadata.provider_id)
                 arc.comicvine_url = preview.metadata.comicvine_url
                 arc.cover_url = preview.metadata.cover_url
                 arc.publisher_id = await publisher_id(session, preview.metadata.publisher)
                 arc.target_library_root_id = policy.target_library_root_id
                 arc.policy_schema_version = STORY_ARC_PLACEMENT_POLICY_SCHEMA_VERSION
                 arc.policy_snapshot = policy.snapshot
-                session.add(
-                    StoryArcExternalIdentity(
-                        story_arc_id=arc.id,
-                        source="comicvine",
-                        namespace="story_arc",
-                        external_id=preview.metadata.provider_id,
-                        source_url=preview.metadata.comicvine_url,
-                        evidence={"snapshot_fingerprint": preview.fingerprint},
-                    )
-                )
+                await attach_arc_identity(session, arc, preview)
+                issues = await seed_members(session, preview, root, order)
                 for position, provider_id in enumerate(order, start=1):
                     member = await self._member(
                         session, arc, preview, issues[provider_id], provider_id, position
@@ -333,6 +324,7 @@ class StoryArcCatalogService:
                     raise StoryArcCatalogError(
                         "revision_conflict", "Story arc changed; refresh the review"
                     )
+                await attach_arc_identity(session, arc, preview)
                 issues = await seed_members(
                     session, preview, root, preview.metadata.issue_provider_ids
                 )
