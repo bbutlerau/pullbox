@@ -9,8 +9,93 @@ function metadataSourceSettings(seed, csrf) {
     domains: {core: 'Core metadata', issues: 'Issue catalogs', artwork: 'Artwork', story_arcs: 'Story arcs'},
     labels, saving: false, testing: null, message: '', error: '', conflict: false,
     healthMessage: '', controllers: new Set(), alive: true, savedOrder: '', refreshing: false,
-    init() { this.accept(seed); },
-    destroy() { this.alive = false; this.controllers.forEach(controller => controller.abort()); },
+    metronBase: null, metronEnabled: false, metronToken: '', metronClear: false,
+    metronSaving: false, metronError: '', metronMessage: '', metronConflict: false,
+    healthRefreshPending: false,
+    init() { this.accept(seed); this.acceptMetron(seed.find(item => item.source === 'metron_api')); },
+    destroy() {
+      this.alive = false; this.metronToken = '';
+      this.controllers.forEach(controller => controller.abort());
+    },
+    get busy() { return this.saving || this.testing || this.refreshing || this.metronSaving; },
+    get metronDirty() {
+      return Boolean(this.metronBase && (this.metronEnabled !== this.metronBase.enabled ||
+        this.metronToken || this.metronClear));
+    },
+    acceptMetron(item) {
+      this.metronBase = item ? clone(item) : null;
+      this.metronEnabled = Boolean(item?.enabled);
+      this.metronToken = ''; this.metronClear = false;
+      this.metronError = ''; this.metronMessage = ''; this.metronConflict = false;
+    },
+    async saveMetron() {
+      if (this.busy || !this.metronDirty) return;
+      this.metronError = ''; this.metronMessage = '';
+      if (this.metronEnabled && this.metronClear) {
+        this.metronError = 'Disable Metron before removing its saved token.';
+        return;
+      }
+      if (this.metronEnabled && !this.metronToken && !this.metronBase.credential_configured) {
+        this.metronError = 'Enter a token before enabling Metron.';
+        return;
+      }
+      if (this.metronToken && (!/^[\x21-\x7e]+$/.test(this.metronToken) ||
+          this.metronToken.length > 4096 || this.metronToken.startsWith('enc:'))) {
+        this.metronError = 'Enter the API token from your Metron account, without spaces or line breaks.';
+        return;
+      }
+      this.metronSaving = true;
+      const base = clone(this.metronBase);
+      try {
+        const response = await this.request('/api/v1/metadata/sources/metron_api', {
+          method: 'PUT', body: JSON.stringify({
+            revision: base.revision, enabled: this.metronEnabled,
+            priority: base.priority, domain_priorities: base.domain_priorities, settings: base.settings,
+            ...(this.metronToken && !this.metronClear ? {credential: this.metronToken} : {}),
+            clear_credential: this.metronClear,
+          }),
+        });
+        if (!this.alive) return;
+        if (response.status === 409) {
+          this.metronConflict = true;
+          this.metronError = 'Metron settings changed in another session. Your draft is kept. Load saved Metron settings before trying again.';
+          return;
+        }
+        if (!response.ok) throw new Error('save');
+        const policy = response.data;
+        const current = this.sources.find(item => item.source === 'metron_api');
+        const descriptor = {...current, ...policy, availability: policy.configuration_status ||
+          (!policy.enabled ? 'disabled' : !policy.credential_configured ? 'unconfigured' : null)};
+        this.sources = this.sources.map(item => item.source === 'metron_api' ? descriptor : item);
+        // Only advance the priority revision when that draft saw the same policy.
+        this.savedSources = this.savedSources.map(item =>
+          item.source === 'metron_api' && item.revision === base.revision ? clone(descriptor) : item);
+        this.acceptMetron(policy);
+        this.healthMessage = '';
+        this.metronMessage = 'Metron settings saved. Connection checks use this saved configuration.';
+      } catch (_) {
+        if (this.alive) this.metronError = 'Could not save Metron settings. Your draft is kept; check the connection and retry.';
+      } finally { this.metronSaving = false; this.flushHealthRefresh(); }
+    },
+    async reloadMetron() {
+      if (this.busy) return;
+      this.metronSaving = true;
+      try {
+        const response = await this.request('/api/v1/metadata/sources');
+        if (!response.ok) throw new Error('load');
+        if (!this.alive) return;
+        this.sources = response.data;
+        this.acceptMetron(response.data.find(item => item.source === 'metron_api'));
+      } catch (_) {
+        if (this.alive) this.metronError = 'Could not load Metron settings. Your draft is kept; check the connection and retry.';
+      } finally { this.metronSaving = false; this.flushHealthRefresh(); }
+    },
+    flushHealthRefresh() {
+      if (this.alive && this.healthRefreshPending && !this.busy) {
+        this.healthRefreshPending = false;
+        this.refreshHealth();
+      }
+    },
     eligible(domain) {
       return this.order.filter(source => domain !== 'artwork' || !source.startsWith('gcd_'));
     },
@@ -40,7 +125,7 @@ function metadataSourceSettings(seed, csrf) {
       return this.signature() !== this.savedOrder;
     },
     move(domain, index, direction) {
-      if (this.saving) return;
+      if (this.busy) return;
       const order = domain === 'global' ? this.order : this.domainOrders[domain];
       const target = index + direction;
       if (!order || target < 0 || target >= order.length) return;
@@ -56,13 +141,13 @@ function metadataSourceSettings(seed, csrf) {
       }
     },
     toggleDomain(domain, enabled) {
-      if (this.saving) return;
+      if (this.busy) return;
       if (enabled) this.domainOrders[domain] = this.eligible(domain);
       else delete this.domainOrders[domain];
       this.message = '';
     },
     reset() {
-      if (this.saving) return;
+      if (this.busy) return;
       this.accept(this.savedSources);
       this.message = ''; this.error = ''; this.conflict = false;
     },
@@ -83,7 +168,7 @@ function metadataSourceSettings(seed, csrf) {
       }
     },
     async save() {
-      if (this.saving || this.testing || this.refreshing || !this.dirty) return;
+      if (this.busy || !this.dirty) return;
       this.saving = true; this.error = ''; this.message = ''; this.conflict = false;
       try {
         const response = await this.request('/api/v1/metadata/priorities', {
@@ -100,14 +185,18 @@ function metadataSourceSettings(seed, csrf) {
         if (!response.ok) throw new Error('save');
         const data = response.data;
         if (!this.alive) return;
+        const previous = this.savedSources.find(item => item.source === 'metron_api');
+        if (this.metronBase?.revision === previous?.revision) {
+          this.metronBase = clone(data.find(item => item.source === 'metron_api'));
+        }
         this.accept(data);
         this.message = 'Metadata priority saved.';
       } catch (_) {
         if (this.alive) this.error = 'Could not save metadata priority. Your draft is kept; check the connection and retry.';
-      } finally { this.saving = false; }
+      } finally { this.saving = false; this.flushHealthRefresh(); }
     },
     async reload() {
-      if (this.saving || this.testing) return;
+      if (this.busy) return;
       this.saving = true;
       try {
         const response = await this.request('/api/v1/metadata/sources');
@@ -117,7 +206,7 @@ function metadataSourceSettings(seed, csrf) {
         this.accept(data); this.error = ''; this.conflict = false; this.message = '';
       } catch (_) {
         if (this.alive) this.error = 'Could not load saved priority. Your draft is kept; check the connection and retry.';
-      } finally { this.saving = false; }
+      } finally { this.saving = false; this.flushHealthRefresh(); }
     },
     status(item) {
       if (!item.capabilities.length && item.availability !== 'feature_disabled') return 'Not available in this build';
@@ -133,7 +222,7 @@ function metadataSourceSettings(seed, csrf) {
     },
     canTest(item) { return item.enabled && item.capabilities.length > 0 && !item.availability; },
     async refreshHealth() {
-      if (this.refreshing) return;
+      if (this.busy) { this.healthRefreshPending = true; return; }
       this.refreshing = true;
       try {
         const response = await this.request('/api/v1/metadata/sources');
@@ -141,10 +230,10 @@ function metadataSourceSettings(seed, csrf) {
         if (this.alive) this.sources = response.data;
       } catch (_) {
         if (this.alive) this.healthMessage = 'Could not refresh source status. Reload Metadata settings to check the saved configuration.';
-      } finally { this.refreshing = false; }
+      } finally { this.refreshing = false; this.flushHealthRefresh(); }
     },
     async test(item) {
-      if (this.testing || this.saving || this.refreshing || !this.canTest(item)) return;
+      if (this.busy || !this.canTest(item)) return;
       this.testing = item.source;
       this.healthMessage = 'Checking ' + this.labels[item.source] + '...';
       try {
@@ -163,7 +252,7 @@ function metadataSourceSettings(seed, csrf) {
         }
       } catch (_) {
         if (this.alive) this.healthMessage = 'Could not check ' + this.labels[item.source] + '. Check the connection and retry.';
-      } finally { this.testing = null; }
+      } finally { this.testing = null; this.flushHealthRefresh(); }
     },
   };
 }

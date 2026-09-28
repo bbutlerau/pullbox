@@ -1,4 +1,4 @@
-{% from "components/settings_shell.html" import section_card, settings_footer, ui_icon %}
+{% from "components/settings_shell.html" import section_card, settings_footer, settings_row, ui_icon %}
 {% from "components/order_chevrons.html" import order_chevrons %}
 
 {% macro priority_list(domain) %}
@@ -8,7 +8,7 @@
       <span class="w-5 text-center text-sm text-pb-text-sec" x-text="index + 1"></span>
       {{ order_chevrons(
         up_action="move('" ~ domain ~ "', index, -1)", down_action="move('" ~ domain ~ "', index, 1)",
-        up_disabled="saving || index === 0", down_disabled="saving || index >= " ~ ('order' if domain == 'global' else 'domainOrders.' ~ domain) ~ ".length - 1",
+        up_disabled="busy || index === 0", down_disabled="busy || index >= " ~ ('order' if domain == 'global' else 'domainOrders.' ~ domain) ~ ".length - 1",
         up_label="'Move ' + labels[source] + ' up'", down_label="'Move ' + labels[source] + ' down'"
       ) }}
       <span class="min-w-0 text-sm font-medium text-pb-text" data-source-label x-text="labels[source]"></span>
@@ -29,7 +29,7 @@
         {% for domain, label in [('core', 'Core metadata'), ('issues', 'Issue catalogs'), ('artwork', 'Artwork'), ('story_arcs', 'Story arcs')] %}
         <div class="space-y-3">
           <label class="flex items-center gap-3 text-sm text-pb-text">
-            <input type="checkbox" class="checkbox-pb" :checked="Boolean(domainOrders.{{ domain }})" :disabled="saving"
+            <input type="checkbox" class="checkbox-pb" :checked="Boolean(domainOrders.{{ domain }})" :disabled="busy"
                    @change="toggleDomain('{{ domain }}', $event.target.checked)" aria-label="Use a separate order for {{ label }}">
             {{ label }}
           </label>
@@ -43,9 +43,9 @@
   </div>
   {% call settings_footer(align="end") %}
     <div class="settings-footer-actions ml-auto justify-end">
-      <button type="button" class="btn-ghost" x-show="conflict" x-cloak :disabled="saving || testing" @click="reload()">Load saved priority</button>
-      <button type="button" class="btn-ghost" x-show="dirty" x-cloak :disabled="saving" @click="reset()">Reset</button>
-      <button type="button" class="btn-primary" :disabled="saving || testing || refreshing || !dirty" :aria-busy="saving" @click="save()" x-text="saving ? 'Saving...' : 'Save metadata priority'">Save metadata priority</button>
+      <button type="button" class="btn-ghost" x-show="conflict" x-cloak :disabled="busy" @click="reload()">Load saved priority</button>
+      <button type="button" class="btn-ghost" x-show="dirty" x-cloak :disabled="busy" @click="reset()">Reset</button>
+      <button type="button" class="btn-primary" :disabled="busy || !dirty" :aria-busy="saving" @click="save()" x-text="saving ? 'Saving...' : 'Save metadata priority'">Save metadata priority</button>
     </div>
   {% endcall %}
 {% endcall %}
@@ -60,7 +60,7 @@
           <p class="text-sm font-medium text-pb-text" x-text="labels[item.source]"></p>
           <p class="text-sm text-pb-text-sec" x-text="status(item)"></p>
         </div>
-        <button type="button" class="btn-ghost" :disabled="saving || testing || refreshing || !canTest(item)"
+        <button type="button" class="btn-ghost" :disabled="busy || !canTest(item)"
                 :aria-label="'Test ' + labels[item.source]" :aria-busy="testing === item.source"
                 @click="test(item)" x-text="testing === item.source ? 'Checking...' : 'Test connection'">Test connection</button>
       </div>
@@ -69,6 +69,7 @@
   </div>
 {% endcall %}
 </div>
+{% include "partials/settings_metron.html" %}
 </div>
 
 <script>

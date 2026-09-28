@@ -31,6 +31,11 @@ async def test_metadata_settings_has_seeded_shared_order_and_preserves_existing_
     assert 'data-testid="metadata-source-priority"' in response.text
     assert "data-order-controls" in response.text
     assert 'data-testid="metadata-source-health"' in response.text
+    assert 'data-testid="metron-access"' in response.text
+    assert 'id="metron-token"' in response.text
+    assert 'for="metron-token"' in response.text
+    assert "Save Metron settings" in response.text
+    assert "Remove saved token" in response.text
     assert "Save metadata priority" in response.text
     assert "Advanced domain priorities" in response.text
     assert "ComicVine access" in response.text and "Local Comic Vine catalog" in response.text
@@ -59,3 +64,4 @@ async def test_metadata_settings_htmx_keeps_source_controls_and_never_probes_on_
     assert response.status_code == 200
     assert 'data-testid="metadata-source-priority"' in response.text
     assert 'data-testid="metadata-source-health"' in response.text
+    assert 'data-testid="metron-access"' in response.text
