@@ -60,6 +60,13 @@ from pullbox.models.library import (
     MatchConfidence,
 )
 from pullbox.models.matching_suggestion import MatchingSuggestion, SuggestionStatus
+from pullbox.models.metadata_identity import (
+    IssueExternalIdentity,
+    IssueIdentityEvent,
+    SeriesExternalIdentity,
+    SeriesIdentityEvent,
+    StoryArcIdentityEvent,
+)
 from pullbox.models.operation_progress import (
     OperationProgress,
     OperationProgressState,
@@ -169,6 +176,8 @@ __all__ = [
     "Issue",
     "IssueCatalogState",
     "IssueCreator",
+    "IssueExternalIdentity",
+    "IssueIdentityEvent",
     "IssueReaderState",
     "IssueStatus",
     "IssueStoryArc",
@@ -196,11 +205,14 @@ __all__ = [
     "SearchLog",
     "SearchType",
     "Series",
+    "SeriesExternalIdentity",
+    "SeriesIdentityEvent",
     "SeriesStatus",
     "SeriesStatusOverride",
     "SeriesType",
     "StoryArc",
     "StoryArcExternalIdentity",
+    "StoryArcIdentityEvent",
     "StoryArcLifecycle",
     "StoryArcPlacement",
     "StoryArcPlacementMode",

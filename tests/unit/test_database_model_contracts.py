@@ -30,6 +30,9 @@ TIMESTAMP_EXCEPTIONS = {
     "HealthCheckResult",  # health sample time is stored in checked_at
     "ImportJobLog",  # log event time is stored in logged_at
     "IssueCreator",  # association table
+    "IssueIdentityEvent",  # retained evidence has created_at only, never a mutable timestamp
+    "SeriesIdentityEvent",  # retained evidence has created_at only, never a mutable timestamp
+    "StoryArcIdentityEvent",  # retained evidence has created_at only, never a mutable timestamp
     "SystemConfig",  # key-value config tracks updated_at only
     "UtilityJob",  # utility schema stores lifecycle timestamps as TEXT
     "UtilityJobItem",  # utility schema stores item lifecycle timestamps as TEXT
