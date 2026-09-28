@@ -15,6 +15,7 @@ from pullbox.schemas.metadata_sources import (
     MetadataPage,
     ProviderIssueRead,
     ProviderSeriesRead,
+    ProviderStoryArcRead,
     SeriesDiscoveryQuery,
     SeriesDiscoveryRead,
     SourceCapability,
@@ -22,6 +23,9 @@ from pullbox.schemas.metadata_sources import (
     SourceOutcome,
     SourcePolicyRead,
     SourceStatus,
+    StoryArcDiscoveryQuery,
+    StoryArcDiscoveryRead,
+    StoryArcSourceOutcome,
 )
 
 if TYPE_CHECKING:
@@ -225,12 +229,17 @@ class MetadataSourceRegistry:
             except Exception:
                 logger.warning("metadata_source_close_failed", source=source.value)
 
-    def _ordered_sources(self, query: SeriesDiscoveryQuery) -> list[MetadataSource]:
+    def _ordered_sources(
+        self,
+        query: SeriesDiscoveryQuery | StoryArcDiscoveryQuery,
+        *,
+        domain: MetadataDomain = MetadataDomain.CORE,
+    ) -> list[MetadataSource]:
         return sorted(
             query.sources if query.sources is not None else self.runtime,
             key=lambda source: (
                 self.runtime[source].policy.domain_priorities.get(
-                    MetadataDomain.CORE, self.runtime[source].policy.priority
+                    domain, self.runtime[source].policy.priority
                 )
                 if source in self.runtime
                 else 1001,
@@ -406,3 +415,97 @@ class MetadataSourceRegistry:
         from pullbox.services.metadata_source_reads import read_issues
 
         return await read_issues(self, source, external_id, page=page, validator=validator)
+
+    async def story_arc(
+        self, source: MetadataSource, external_id: str, *, validator: str | None = None
+    ) -> MetadataFetch[ProviderStoryArcRead]:
+        from pullbox.services.metadata_source_reads import read_story_arc
+
+        return await read_story_arc(self, source, external_id, validator=validator)
+
+    async def story_arc_issues(
+        self,
+        source: MetadataSource,
+        external_id: str,
+        *,
+        page: int = 1,
+        validator: str | None = None,
+    ) -> MetadataFetch[MetadataPage[ProviderIssueRead]]:
+        from pullbox.services.metadata_source_reads import read_story_arc_issues
+
+        return await read_story_arc_issues(
+            self, source, external_id, page=page, validator=validator
+        )
+
+    async def discover_arcs(
+        self,
+        query: StoryArcDiscoveryQuery,
+        *,
+        satisfied_by: Callable[[MetadataPage[ProviderStoryArcRead]], bool] | None = None,
+    ) -> StoryArcDiscoveryRead:
+        from pullbox.services.metadata_source_reads import read_story_arcs
+
+        sources = self._ordered_sources(query, domain=MetadataDomain.STORY_ARCS)
+        deadline = asyncio.get_running_loop().time() + self.total_timeout
+
+        async def read(source: MetadataSource) -> MetadataFetch[MetadataPage[ProviderStoryArcRead]]:
+            return await read_story_arcs(
+                self, source, query.query, page=query.pages.get(source, 1), deadline=deadline
+            )
+
+        pages = []
+        if query.mode == "automatic":
+            satisfied = False
+            for source in sources:
+                if satisfied:
+                    result: MetadataFetch[MetadataPage[ProviderStoryArcRead]] = MetadataFetch(
+                        status=self._unavailable(
+                            source, capability=SourceCapability.STORY_ARC_SEARCH
+                        )
+                        or SourceStatus.NOT_QUERIED
+                    )
+                else:
+                    result = await read(source)
+                    satisfied = bool(
+                        result.data
+                        and result.data.results
+                        and satisfied_by
+                        and satisfied_by(result.data)
+                    )
+                pages.append(result)
+        else:
+            tasks = [asyncio.create_task(read(source)) for source in sources]
+            try:
+                pages = list(await asyncio.gather(*tasks))
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+        grouped = {}
+        outcomes = []
+        for source, result in zip(sources, pages, strict=True):
+            page = result.data
+            outcomes.append(
+                StoryArcSourceOutcome(
+                    source=source,
+                    status=SourceStatus.EMPTY
+                    if page is not None and not page.results
+                    else result.status,
+                    total=page.total if page is not None else None,
+                    next_page=page.next_page if page is not None else None,
+                    truncated=page.truncated if page is not None else False,
+                    retry_after_seconds=result.retry_after_seconds,
+                )
+            )
+            if page is not None:
+                for row in page.results:
+                    key = (row.identity_namespace, row.external_id)
+                    if key not in grouped:
+                        grouped[key] = row.model_copy(deep=True)
+                    elif (
+                        row.source != grouped[key].source
+                        and row.source not in grouped[key].also_from
+                    ):
+                        grouped[key].also_from.append(row.source)
+        return StoryArcDiscoveryRead(results=list(grouped.values()), sources=outcomes)

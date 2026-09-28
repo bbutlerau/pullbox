@@ -1,6 +1,7 @@
 """Metadata source configuration, discovery and explicit connection checks."""
 
 from datetime import UTC, datetime
+from typing import Literal
 
 import structlog
 from fastapi import APIRouter, HTTPException
@@ -23,7 +24,13 @@ from pullbox.schemas.metadata_sources import (
     SourcePolicyWrite,
     SourcePriorityWrite,
     SourceTestRead,
+    StoryArcDiscoveryQuery,
+    StoryArcDiscoveryRead,
+    StoryArcIssuePageQuery,
+    StoryArcPreviewQuery,
+    StoryArcPreviewRead,
 )
+from pullbox.services.metadata_arc_preview import preview_source_arc
 from pullbox.services.metadata_discovery import MetadataSourceRegistry, describe_source_policies
 from pullbox.services.metadata_series_preview import preview_series_folder, preview_source_series
 from pullbox.services.metadata_sources import (
@@ -47,11 +54,67 @@ async def _preview_root(session: DbSession, root_id: int) -> LibraryRoot:
 
 
 async def _require_source_revision(
-    session: DbSession, source: MetadataSource, revision: int
+    session: DbSession,
+    source: MetadataSource,
+    revision: int,
+    *,
+    subject: Literal["series", "story arc"] = "series",
 ) -> None:
     policies = await read_source_policies(session)
     if next(policy.revision for policy in policies if policy.source is source) != revision:
-        raise HTTPException(409, "Metadata source settings changed. Preview the series again.")
+        raise HTTPException(409, f"Metadata source settings changed. Preview the {subject} again.")
+
+
+@router.post("/story-arcs/search", response_model=StoryArcDiscoveryRead)
+async def search_story_arcs(
+    body: StoryArcDiscoveryQuery, session: DbSession, _user: AuthenticatedUser, settings: Settings
+) -> StoryArcDiscoveryRead:
+    runtime = await load_source_runtime(
+        session, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled
+    )
+    await session.rollback()
+    return await MetadataSourceRegistry(
+        runtime, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled
+    ).discover_arcs(body)
+
+
+@router.post("/story-arcs/preview", response_model=StoryArcPreviewRead)
+async def preview_story_arc(
+    body: StoryArcPreviewQuery, session: DbSession, _user: AuthenticatedUser, settings: Settings
+) -> StoryArcPreviewRead:
+    runtime = await load_source_runtime(
+        session, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled
+    )
+    await session.rollback()
+    result = await preview_source_arc(
+        MetadataSourceRegistry(runtime, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled),
+        body.source,
+        body.external_id,
+    )
+    await _require_source_revision(
+        session, body.source, result.source_revision, subject="story arc"
+    )
+    return result
+
+
+@router.post("/story-arcs/issues", response_model=MetadataFetch[MetadataPage[ProviderIssueRead]])
+async def story_arc_issues(
+    body: StoryArcIssuePageQuery, session: DbSession, _user: AuthenticatedUser, settings: Settings
+) -> MetadataFetch[MetadataPage[ProviderIssueRead]]:
+    runtime = await load_source_runtime(
+        session, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled
+    )
+    if (
+        next(item.policy.revision for item in runtime if item.policy.source is body.source)
+        != body.source_revision
+    ):
+        raise HTTPException(409, "Metadata source settings changed. Preview the story arc again.")
+    await session.rollback()
+    result = await MetadataSourceRegistry(
+        runtime, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled
+    ).story_arc_issues(body.source, body.external_id, page=body.page)
+    await _require_source_revision(session, body.source, body.source_revision, subject="story arc")
+    return result
 
 
 @router.post("/series/preview", response_model=SeriesPreviewRead)

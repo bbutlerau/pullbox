@@ -2,7 +2,7 @@
 
 import enum
 from datetime import date, datetime
-from typing import Annotated, Literal, Self
+from typing import Annotated, ClassVar, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
@@ -32,6 +32,7 @@ class SourceCapability(enum.StrEnum):
     COVER_REFERENCE = "cover_reference"
     STORY_ARC_SEARCH = "story_arc_search"
     STORY_ARC_DETAILS = "story_arc_details"
+    STORY_ARC_ISSUES = "story_arc_issues"
 
 
 class SourceStatus(enum.StrEnum):
@@ -182,6 +183,34 @@ class ProviderStoryArcRead(BaseModel):
     image_url: str | None = None
     cross_identities: list[ExternalIdentityRef] = Field(default_factory=list)
     source_updated_at: datetime | None = None
+    publisher: str | None = None
+    declared_issue_count: int | None = None
+    issue_external_ids: list[str] | None = None
+    membership_complete: bool = False
+    order_basis: Literal["response_order"] = "response_order"
+    warnings: list[str] = Field(default_factory=list)
+    also_from: list[MetadataSource] = Field(default_factory=list)
+
+
+class StoryArcDiscoveryQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    query: str = Field(min_length=1, max_length=200)
+    sources: list[MetadataSource] | None = Field(default=None, min_length=1, max_length=5)
+    mode: Literal["interactive", "automatic"] = "interactive"
+    pages: dict[MetadataSource, Annotated[int, Field(ge=1, le=100, strict=True)]] = Field(
+        default_factory=dict, max_length=5
+    )
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> Self:
+        self.query = self.query.strip()
+        if not self.query:
+            raise ValueError("Enter a story arc title")
+        if self.sources is not None and len(set(self.sources)) != len(self.sources):
+            raise ValueError("Choose each source only once")
+        if self.sources is not None and self.pages.keys() - set(self.sources):
+            raise ValueError("Pagination must refer to a selected source")
+        return self
 
 
 class MetadataPage[T](BaseModel):
@@ -202,13 +231,14 @@ class MetadataFetch[T](BaseModel):
 
 class SeriesPreviewQuery(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    entity_kind: ClassVar[MetadataEntityKind] = MetadataEntityKind.SERIES
     source: MetadataSource
     external_id: str = Field(min_length=1, max_length=255, strict=True)
 
     @model_validator(mode="after")
     def canonical_identity(self) -> Self:
         self.external_id = ExternalIdentityRef(
-            self.source.identity_namespace, MetadataEntityKind.SERIES, self.external_id
+            self.source.identity_namespace, self.entity_kind, self.external_id
         ).external_id
         if (
             self.source.identity_namespace is IdentityNamespace.COMICVINE
@@ -236,6 +266,23 @@ class SeriesPreviewRead(BaseModel):
     folder_preview: str | None = None
 
 
+class StoryArcPreviewQuery(SeriesPreviewQuery):
+    entity_kind: ClassVar[MetadataEntityKind] = MetadataEntityKind.STORY_ARC
+
+
+class StoryArcIssuePageQuery(StoryArcPreviewQuery):
+    page: int = Field(default=1, ge=1, le=50, strict=True)
+    source_revision: int = Field(ge=0, lt=2**63, strict=True)
+
+
+class StoryArcPreviewRead(BaseModel):
+    source: MetadataSource
+    external_id: str
+    source_revision: int
+    arc: MetadataFetch[ProviderStoryArcRead]
+    issues: MetadataFetch[MetadataPage[ProviderIssueRead]]
+
+
 class SourceOutcome(BaseModel):
     source: MetadataSource
     status: SourceStatus
@@ -249,6 +296,15 @@ class SourceOutcome(BaseModel):
 class SeriesDiscoveryRead(BaseModel):
     results: list[ProviderSeriesRead]
     sources: list[SourceOutcome]
+
+
+class StoryArcSourceOutcome(SourceOutcome):
+    next_page: int | None = None
+
+
+class StoryArcDiscoveryRead(BaseModel):
+    results: list[ProviderStoryArcRead]
+    sources: list[StoryArcSourceOutcome]
 
 
 class SourceDescriptor(SourcePolicyRead):

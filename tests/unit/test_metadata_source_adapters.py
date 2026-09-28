@@ -305,7 +305,8 @@ def test_registry_declares_only_working_capabilities_and_requires_api_credential
     sources = comicvine_sources()
     assert set(sources) == {Source.COMICVINE_LOCAL, Source.COMICVINE_API}
     assert SourceCapability.SERIES_SEARCH in sources[Source.COMICVINE_API].capabilities
-    assert SourceCapability.STORY_ARC_SEARCH not in sources[Source.COMICVINE_API].capabilities
+    assert SourceCapability.STORY_ARC_SEARCH in sources[Source.COMICVINE_API].capabilities
+    assert SourceCapability.STORY_ARC_SEARCH not in sources[Source.COMICVINE_LOCAL].capabilities
     with pytest.raises(MetadataSourceError) as raised:
         sources[Source.COMICVINE_API].factory(SourceRuntime(default_policy(Source.COMICVINE_API)))
     assert raised.value.status == SourceStatus.UNCONFIGURED

@@ -378,6 +378,8 @@ class MetronSource:
         if not isinstance(query, str) or not query.strip() or len(query) > 200:
             raise ValueError("Expected a bounded arc query")
         _page_number(page)
+        if page > 100:
+            raise ValueError("Story arc search is bounded to 100 source pages")
         params = {"name": query.strip(), "page": str(page)}
         response = await self._get("arc/", params)
         if response.status is not SourceStatus.OK:
@@ -387,6 +389,19 @@ class MetronSource:
             results = [normalize.story_arc(row) for row in rows]
             if len({row.external_id for row in results}) != len(results):
                 raise ValueError("Repeated source identity")
-            return _metadata_page(results, total, next_page)
+            result = _metadata_page(results, total, next_page)
+            if page == 100 and result.next_page is not None:
+                result.next_page, result.truncated = None, True
+            return result
         except (ValueError, TypeError):
             raise MetadataSourceError(SourceStatus.INCOMPATIBLE_RESPONSE) from None
+
+    async def story_arc_issues(
+        self, external_id: str, *, page: int = 1, validator: str | None = None
+    ) -> MetadataFetch[MetadataPage[ProviderIssueRead]]:
+        _page_number(page)
+        if page > 50:
+            raise ValueError("Story arc membership is bounded to 5000 issues")
+        return await self.issues(
+            external_id, kind=MetadataEntityKind.STORY_ARC, page=page, validator=validator
+        )

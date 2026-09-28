@@ -13,6 +13,7 @@ from pullbox.schemas.metadata_sources import (
     MetadataPage,
     ProviderIssueRead,
     ProviderSeriesRead,
+    ProviderStoryArcRead,
     SourceCapability,
     SourceStatus,
 )
@@ -49,6 +50,27 @@ class IssueListAdapter(Protocol):
     ) -> MetadataFetch[MetadataPage[ProviderIssueRead]]: ...
 
 
+@runtime_checkable
+class StoryArcDetailAdapter(Protocol):
+    async def story_arc(
+        self, external_id: str, *, validator: str | None = None
+    ) -> MetadataFetch[ProviderStoryArcRead]: ...
+
+
+@runtime_checkable
+class StoryArcIssueAdapter(Protocol):
+    async def story_arc_issues(
+        self, external_id: str, *, page: int = 1, validator: str | None = None
+    ) -> MetadataFetch[MetadataPage[ProviderIssueRead]]: ...
+
+
+@runtime_checkable
+class StoryArcSearchAdapter(Protocol):
+    async def story_arcs(
+        self, query: str, *, page: int = 1
+    ) -> MetadataPage[ProviderStoryArcRead]: ...
+
+
 def source_id(source: MetadataSource, kind: MetadataEntityKind, value: str) -> str:
     if not isinstance(value, str):
         raise ValueError("Expected a source identity string")
@@ -61,7 +83,9 @@ def page_number(page: int) -> None:
 
 
 def _identity(
-    row: ProviderSeriesRead | ProviderIssueRead, source: MetadataSource, kind: MetadataEntityKind
+    row: ProviderSeriesRead | ProviderIssueRead | ProviderStoryArcRead,
+    source: MetadataSource,
+    kind: MetadataEntityKind,
 ) -> None:
     if (
         row.source is not source
@@ -89,6 +113,8 @@ async def _read[T](
     operation: Callable[[MetadataSourceAdapter], Awaitable[MetadataFetch[T]]],
     validate: Callable[[T], None],
     validator: str | None,
+    *,
+    deadline: float | None = None,
 ) -> MetadataFetch[T]:
     if validator is not None and (
         not isinstance(validator, str)
@@ -101,7 +127,14 @@ async def _read[T](
         return MetadataFetch(status=unavailable)
     adapter = None
     try:
-        async with asyncio.timeout(registry.total_timeout), registry.read_slots:
+        deadline = (
+            deadline
+            if deadline is not None
+            else asyncio.get_running_loop().time() + registry.total_timeout
+        )
+        if asyncio.get_running_loop().time() >= deadline:
+            return MetadataFetch(status=SourceStatus.TIMEOUT)
+        async with asyncio.timeout_at(deadline), registry.read_slots:
             async with asyncio.timeout(registry.per_source_timeout):
                 adapter = registry.factories[source].factory(registry.runtime[source])
                 result = await operation(adapter)
@@ -211,17 +244,7 @@ async def read_issues(
         return await adapter.issues(identifier, page=page, validator=validator)
 
     def validate(result: MetadataPage[ProviderIssueRead]) -> None:
-        remaining = max(0, result.total - (page - 1) * PAGE_SIZE)
-        more = remaining > PAGE_SIZE
-        if (
-            not 0 <= result.total <= 1_000_000_000
-            or len(result.results) != min(remaining, PAGE_SIZE)
-            or result.next_page != (page + 1 if more and page < MAX_PAGE else None)
-            or result.truncated != (more and page == MAX_PAGE)
-            or result.order_is_reading_order
-            or len({row.external_id for row in result.results}) != len(result.results)
-        ):
-            raise ValueError("Source returned an incomplete issue page")
+        validate_metadata_page(result, page)
         for row in result.results:
             _issue(row, source)
             if row.series_external_id != identifier:
@@ -234,4 +257,129 @@ async def read_issues(
         operation,
         validate,
         validator,
+    )
+
+
+def validate_metadata_page[T: (ProviderIssueRead, ProviderStoryArcRead)](
+    result: MetadataPage[T], page: int, *, max_page: int = MAX_PAGE
+) -> None:
+    remaining = max(0, result.total - (page - 1) * PAGE_SIZE)
+    more = remaining > PAGE_SIZE
+    if (
+        not 0 <= result.total <= 1_000_000_000
+        or len(result.results) != min(remaining, PAGE_SIZE)
+        or result.next_page != (page + 1 if more and page < max_page else None)
+        or result.truncated != (more and page == max_page)
+        or result.order_is_reading_order
+        or len({row.external_id for row in result.results}) != len(result.results)
+    ):
+        raise ValueError("Source returned an incomplete metadata page")
+
+
+def _arc(row: ProviderStoryArcRead, source: MetadataSource) -> None:
+    _identity(row, source, MetadataEntityKind.STORY_ARC)
+    if not row.title.strip() or len(row.title) > 500:
+        raise ValueError("Source returned an invalid arc title")
+    ids = row.issue_external_ids
+    if row.declared_issue_count is not None and row.declared_issue_count < 0:
+        raise ValueError("Invalid declared arc membership count")
+    if ids is not None and (
+        len(ids) > 5000
+        or len(ids) != len(set(ids))
+        or any(source_id(source, MetadataEntityKind.ISSUE, value) != value for value in ids)
+    ):
+        raise ValueError("Invalid explicit arc membership")
+    if row.membership_complete and (
+        ids is None
+        or (row.declared_issue_count is not None and len(ids) != row.declared_issue_count)
+    ):
+        raise ValueError("Incomplete explicit arc membership")
+
+
+async def read_story_arc(
+    registry: MetadataSourceRegistry,
+    source: MetadataSource,
+    external_id: str,
+    *,
+    validator: str | None,
+) -> MetadataFetch[ProviderStoryArcRead]:
+    identifier = source_id(source, MetadataEntityKind.STORY_ARC, external_id)
+
+    async def operation(adapter: MetadataSourceAdapter) -> MetadataFetch[ProviderStoryArcRead]:
+        if not isinstance(adapter, StoryArcDetailAdapter):
+            raise MetadataSourceError(SourceStatus.UNSUPPORTED)
+        return await adapter.story_arc(identifier, validator=validator)
+
+    def validate(row: ProviderStoryArcRead) -> None:
+        _arc(row, source)
+        if row.external_id != identifier:
+            raise ValueError("Source returned a different story arc")
+
+    return await _read(
+        registry, source, SourceCapability.STORY_ARC_DETAILS, operation, validate, validator
+    )
+
+
+async def read_story_arc_issues(
+    registry: MetadataSourceRegistry,
+    source: MetadataSource,
+    external_id: str,
+    *,
+    page: int,
+    validator: str | None,
+) -> MetadataFetch[MetadataPage[ProviderIssueRead]]:
+    identifier = source_id(source, MetadataEntityKind.STORY_ARC, external_id)
+    page_number(page)
+    if page > 50:
+        raise ValueError("Story arc membership is bounded to 5000 issues")
+
+    async def operation(
+        adapter: MetadataSourceAdapter,
+    ) -> MetadataFetch[MetadataPage[ProviderIssueRead]]:
+        if not isinstance(adapter, StoryArcIssueAdapter):
+            raise MetadataSourceError(SourceStatus.UNSUPPORTED)
+        return await adapter.story_arc_issues(identifier, page=page, validator=validator)
+
+    def validate(result: MetadataPage[ProviderIssueRead]) -> None:
+        validate_metadata_page(result, page)
+        if result.total > 5000:
+            raise ValueError("Story arc membership exceeds the review limit")
+        for row in result.results:
+            _issue(row, source)
+
+    return await _read(
+        registry, source, SourceCapability.STORY_ARC_ISSUES, operation, validate, validator
+    )
+
+
+async def read_story_arcs(
+    registry: MetadataSourceRegistry,
+    source: MetadataSource,
+    query: str,
+    *,
+    page: int,
+    deadline: float,
+) -> MetadataFetch[MetadataPage[ProviderStoryArcRead]]:
+    async def operation(
+        adapter: MetadataSourceAdapter,
+    ) -> MetadataFetch[MetadataPage[ProviderStoryArcRead]]:
+        if not isinstance(adapter, StoryArcSearchAdapter):
+            raise MetadataSourceError(SourceStatus.UNSUPPORTED)
+        return MetadataFetch(
+            status=SourceStatus.OK, data=await adapter.story_arcs(query, page=page)
+        )
+
+    def validate(result: MetadataPage[ProviderStoryArcRead]) -> None:
+        validate_metadata_page(result, page, max_page=100)
+        for row in result.results:
+            _arc(row, source)
+
+    return await _read(
+        registry,
+        source,
+        SourceCapability.STORY_ARC_SEARCH,
+        operation,
+        validate,
+        None,
+        deadline=deadline,
     )

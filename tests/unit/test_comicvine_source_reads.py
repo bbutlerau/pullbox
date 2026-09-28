@@ -198,10 +198,12 @@ async def test_local_issue_page_pins_one_generation_and_bounds_rows(tmp_path, mo
 
 
 def test_comicvine_registers_only_implemented_read_capabilities():
-    for registration in comicvine_sources().values():
+    for source, registration in comicvine_sources().items():
         assert {
             SourceCapability.SERIES_DETAILS,
             SourceCapability.ISSUE_DETAILS,
             SourceCapability.ISSUE_LIST,
         } <= registration.capabilities
-        assert SourceCapability.STORY_ARC_SEARCH not in registration.capabilities
+        assert (SourceCapability.STORY_ARC_SEARCH in registration.capabilities) == (
+            source is Source.COMICVINE_API
+        )

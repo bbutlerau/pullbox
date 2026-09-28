@@ -16,6 +16,7 @@ from pullbox.schemas.metadata_sources import (
     MetadataPage,
     ProviderIssueRead,
     ProviderSeriesRead,
+    ProviderStoryArcRead,
     SeriesDiscoveryQuery,
     SourceCapability,
     SourceStatus,
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from pullbox.providers.base import SeriesSearchResult
+    from pullbox.providers.story_arcs import StoryArcMetadata, StoryArcSearchResult
     from pullbox.services.catalog.reader import CatalogReader
     from pullbox.services.metadata_sources import SourceRuntime
 
@@ -246,6 +248,78 @@ class ComicVineApiSource:
 
         return await _fetch(read)
 
+    @staticmethod
+    def _arc(row: StoryArcSearchResult | StoryArcMetadata) -> ProviderStoryArcRead:
+        identifier = _cv_id(row.provider_id, MetadataEntityKind.STORY_ARC)
+        return ProviderStoryArcRead(
+            source=MetadataSource.COMICVINE_API,
+            identity_namespace=MetadataSource.COMICVINE_API.identity_namespace,
+            external_id=identifier,
+            title=row.title,
+            description=row.description,
+            publisher=row.publisher,
+            declared_issue_count=row.declared_issue_count,
+            image_url=_image_url(row.cover_url),
+            resource_url=f"https://comicvine.gamespot.com/story-arc/4045-{identifier}/",
+        )
+
+    async def story_arcs(self, query: str, *, page: int = 1) -> MetadataPage[ProviderStoryArcRead]:
+        page_number(page)
+        if page > 100:
+            raise ValueError("Story arc search is bounded to 100 source pages")
+        try:
+            rows, total = await self.provider.search_story_arcs_page(
+                query, limit=100, offset=(page - 1) * 100
+            )
+            more = page * 100 < total
+            return MetadataPage(
+                results=[self._arc(row) for row in rows],
+                total=total,
+                next_page=page + 1 if more and page < 100 else None,
+                truncated=more and page == 100,
+            )
+        except ComicVineError as exc:
+            raise _api_error(exc) from None
+        except (ValueError, TypeError, AttributeError):
+            raise MetadataSourceError(SourceStatus.INCOMPATIBLE_RESPONSE) from None
+
+    async def story_arc(
+        self, external_id: str, *, validator: str | None = None
+    ) -> MetadataFetch[ProviderStoryArcRead]:
+        identifier = _cv_id(external_id, MetadataEntityKind.STORY_ARC)
+
+        async def read() -> ProviderStoryArcRead:
+            row = await self.provider.get_story_arc(identifier)
+            result = self._arc(row)
+            result.issue_external_ids = list(row.issue_provider_ids)
+            result.membership_complete = row.membership_complete
+            result.warnings = list(row.warnings)
+            return result
+
+        return await _fetch(read)
+
+    async def story_arc_issues(
+        self, external_id: str, *, page: int = 1, validator: str | None = None
+    ) -> MetadataFetch[MetadataPage[ProviderIssueRead]]:
+        identifier = _cv_id(external_id, MetadataEntityKind.STORY_ARC)
+        page_number(page)
+        if page > 50:
+            raise ValueError("Story arc membership is bounded to 5000 issues")
+
+        async def read() -> MetadataPage[ProviderIssueRead]:
+            arc = await self.provider.get_story_arc(identifier)
+            if arc.provider_id != identifier or not arc.membership_complete:
+                raise ValueError("Incomplete arc membership")
+            ids = arc.issue_provider_ids[(page - 1) * 100 : page * 100]
+            rows = await self.provider.get_story_arc_issues(ids) if ids else []
+            if len(rows) != len(ids) or [row.provider_id for row in rows] != list(ids):
+                raise ValueError("Different arc membership")
+            return normalize.issue_page(
+                MetadataSource.COMICVINE_API, rows, len(arc.issue_provider_ids), page
+            )
+
+        return await _fetch(read)
+
 
 class ComicVineLocalSource:
     def __init__(self, reader: CatalogReader) -> None:
@@ -347,7 +421,17 @@ def comicvine_sources() -> dict[MetadataSource, SourceRegistration]:
         SourceCapability.ISSUE_DETAILS,
     }
     return {
-        MetadataSource.COMICVINE_API: SourceRegistration(frozenset(capabilities), _api),
+        MetadataSource.COMICVINE_API: SourceRegistration(
+            frozenset(
+                capabilities
+                | {
+                    SourceCapability.STORY_ARC_SEARCH,
+                    SourceCapability.STORY_ARC_DETAILS,
+                    SourceCapability.STORY_ARC_ISSUES,
+                }
+            ),
+            _api,
+        ),
         MetadataSource.COMICVINE_LOCAL: SourceRegistration(
             frozenset(capabilities | {SourceCapability.OFFLINE}),
             lambda runtime: ComicVineLocalSource(get_catalog_reader()),
@@ -373,6 +457,7 @@ def metadata_sources() -> dict[MetadataSource, SourceRegistration]:
                     SourceCapability.ISSUE_DETAILS,
                     SourceCapability.STORY_ARC_SEARCH,
                     SourceCapability.STORY_ARC_DETAILS,
+                    SourceCapability.STORY_ARC_ISSUES,
                     SourceCapability.CROSS_IDENTITIES,
                     SourceCapability.CONDITIONAL_REFRESH,
                     SourceCapability.COVER_REFERENCE,
