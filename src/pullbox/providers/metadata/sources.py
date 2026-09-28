@@ -17,6 +17,7 @@ from pullbox.schemas.metadata_sources import (
     ProviderIssueRead,
     ProviderSeriesRead,
     ProviderStoryArcRead,
+    RecentIssueWindow,
     SeriesDiscoveryQuery,
     SourceCapability,
     SourceStatus,
@@ -25,10 +26,16 @@ from pullbox.services.catalog.contract import CatalogError
 from pullbox.services.catalog.reader import get_catalog_reader
 from pullbox.services.catalog.storage import disk_work
 from pullbox.services.metadata_discovery import MetadataSourceError, SourcePage, SourceRegistration
-from pullbox.services.metadata_source_reads import page_number, source_id
+from pullbox.services.metadata_source_reads import (
+    issue_checkpoint,
+    page_number,
+    source_id,
+    validate_recent_issue_window,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from datetime import datetime
 
     from pullbox.providers.base import SeriesSearchResult
     from pullbox.providers.story_arcs import StoryArcMetadata, StoryArcSearchResult
@@ -173,6 +180,27 @@ async def _fetch[T](operation: Callable[[], Awaitable[T | None]]) -> MetadataFet
 class ComicVineApiSource:
     def __init__(self, provider: ComicVineProvider) -> None:
         self.provider = provider
+
+    async def recent_issues(
+        self, external_id: str, *, since: datetime
+    ) -> MetadataFetch[RecentIssueWindow]:
+        identifier = _cv_id(external_id, MetadataEntityKind.SERIES)
+        checkpoint = issue_checkpoint(since)
+
+        async def read() -> RecentIssueWindow:
+            rows, total = await self.provider.get_issues_page(identifier, newest_first=True)
+            result = RecentIssueWindow(
+                results=[normalize.issue(MetadataSource.COMICVINE_API, row) for row in rows],
+                matched_total=total,
+                scope="recent_publication",
+                truncated=total > 100,
+            )
+            validate_recent_issue_window(
+                result, MetadataSource.COMICVINE_API, identifier, checkpoint
+            )
+            return result
+
+        return await _fetch(read)
 
     async def search(self, query: SeriesDiscoveryQuery, offset: int) -> SourcePage:
         try:
@@ -325,6 +353,29 @@ class ComicVineLocalSource:
     def __init__(self, reader: CatalogReader) -> None:
         self.reader = reader
 
+    async def recent_issues(
+        self, external_id: str, *, since: datetime
+    ) -> MetadataFetch[RecentIssueWindow]:
+        identifier = _cv_id(external_id, MetadataEntityKind.SERIES)
+        checkpoint = issue_checkpoint(since)
+
+        async def read() -> RecentIssueWindow:
+            await self._available()
+            rows, total, cutoff = await self.reader.recent_issues(int(identifier))
+            result = RecentIssueWindow(
+                results=[normalize.issue(MetadataSource.COMICVINE_LOCAL, row) for row in rows],
+                matched_total=total,
+                scope="recent_publication",
+                truncated=total > 100,
+                source_updated_at=cutoff,
+            )
+            validate_recent_issue_window(
+                result, MetadataSource.COMICVINE_LOCAL, identifier, checkpoint
+            )
+            return result
+
+        return await _fetch(lambda: _catalog_read(read))
+
     async def _available(self) -> None:
         if not await disk_work(lambda: self.reader.available):
             raise MetadataSourceError(SourceStatus.UNCONFIGURED)
@@ -418,6 +469,7 @@ def comicvine_sources() -> dict[MetadataSource, SourceRegistration]:
         SourceCapability.SERIES_SEARCH,
         SourceCapability.SERIES_DETAILS,
         SourceCapability.ISSUE_LIST,
+        SourceCapability.RECENT_ISSUES,
         SourceCapability.ISSUE_DETAILS,
     }
     return {
@@ -454,6 +506,7 @@ def metadata_sources() -> dict[MetadataSource, SourceRegistration]:
                     SourceCapability.SERIES_SEARCH,
                     SourceCapability.SERIES_DETAILS,
                     SourceCapability.ISSUE_LIST,
+                    SourceCapability.RECENT_ISSUES,
                     SourceCapability.ISSUE_DETAILS,
                     SourceCapability.STORY_ARC_SEARCH,
                     SourceCapability.STORY_ARC_DETAILS,

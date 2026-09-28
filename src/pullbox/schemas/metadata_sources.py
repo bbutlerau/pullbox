@@ -25,6 +25,7 @@ class SourceCapability(enum.StrEnum):
     SERIES_SEARCH = "series_search"
     SERIES_DETAILS = "series_details"
     ISSUE_LIST = "issue_list"
+    RECENT_ISSUES = "recent_issues"
     ISSUE_DETAILS = "issue_details"
     CROSS_IDENTITIES = "cross_identities"
     CONDITIONAL_REFRESH = "conditional_refresh"
@@ -227,6 +228,24 @@ class MetadataFetch[T](BaseModel):
     data: T | None = None
     validator: str | None = None
     retry_after_seconds: int | None = None
+
+
+class RecentIssueWindow(BaseModel):
+    """One bounded slice, never evidence of complete series membership."""
+
+    model_config = ConfigDict(extra="forbid")
+    results: list[ProviderIssueRead] = Field(max_length=100)
+    matched_total: int = Field(
+        ge=0,
+        le=1_000_000_000,
+        strict=True,
+        description="Count matching this query, not proof of complete series membership.",
+    )
+    scope: Literal["recent_publication", "modified_since"]
+    since: datetime | None = None
+    truncated: bool = Field(strict=True)
+    full_catalog: Literal[False] = False
+    source_updated_at: datetime | None = None
 
 
 class SeriesPreviewQuery(BaseModel):

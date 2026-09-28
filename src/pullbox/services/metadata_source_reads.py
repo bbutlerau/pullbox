@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import structlog
@@ -14,6 +15,7 @@ from pullbox.schemas.metadata_sources import (
     ProviderIssueRead,
     ProviderSeriesRead,
     ProviderStoryArcRead,
+    RecentIssueWindow,
     SourceCapability,
     SourceStatus,
 )
@@ -51,6 +53,13 @@ class IssueListAdapter(Protocol):
 
 
 @runtime_checkable
+class RecentIssueAdapter(Protocol):
+    async def recent_issues(
+        self, external_id: str, *, since: datetime
+    ) -> MetadataFetch[RecentIssueWindow]: ...
+
+
+@runtime_checkable
 class StoryArcDetailAdapter(Protocol):
     async def story_arc(
         self, external_id: str, *, validator: str | None = None
@@ -80,6 +89,12 @@ def source_id(source: MetadataSource, kind: MetadataEntityKind, value: str) -> s
 def page_number(page: int) -> None:
     if type(page) is not int or not 1 <= page <= MAX_PAGE:
         raise ValueError("Metadata page must be between one and ten thousand")
+
+
+def issue_checkpoint(since: datetime) -> datetime:
+    if not isinstance(since, datetime) or since.utcoffset() is None:
+        raise ValueError("Issue checkpoint must include a timezone")
+    return since.astimezone(UTC)
 
 
 def _identity(
@@ -269,6 +284,59 @@ async def read_issue(
         cache_identity=(identifier, 1),
         model=MetadataFetch[ProviderIssueRead],
     )
+
+
+def validate_recent_issue_window(
+    result: RecentIssueWindow, source: MetadataSource, identifier: str, since: datetime
+) -> None:
+    # Revalidate even constructed/copied DTOs at the adapter trust boundary.
+    checked = RecentIssueWindow.model_validate(result.model_dump())
+    if (
+        len(checked.results) != min(100, checked.matched_total)
+        or checked.truncated != (checked.matched_total > 100)
+        or len({row.external_id for row in checked.results}) != len(checked.results)
+    ):
+        raise ValueError("Incomplete recent issue window")
+    if checked.scope == "modified_since":
+        if checked.since is None or issue_checkpoint(checked.since) != since:
+            raise ValueError("Different issue checkpoint")
+    elif checked.since is not None:
+        raise ValueError("Publication slice cannot claim a modification checkpoint")
+    local = source in {MetadataSource.COMICVINE_LOCAL, MetadataSource.GCD_LOCAL}
+    if local:
+        if checked.source_updated_at is None:
+            raise ValueError("Missing catalog generation")
+        issue_checkpoint(checked.source_updated_at)
+    for row in checked.results:
+        _issue(row, source)
+        if row.series_external_id != identifier:
+            raise ValueError("Issue belongs to a different series")
+        if checked.scope == "modified_since" and (
+            row.source_updated_at is None or issue_checkpoint(row.source_updated_at) <= since
+        ):
+            raise ValueError("Issue is outside the requested modification window")
+        if local and row.source_updated_at != checked.source_updated_at:
+            raise ValueError("Catalog generation changed during the read")
+
+
+async def read_recent_issues(
+    registry: MetadataSourceRegistry, source: MetadataSource, external_id: str, *, since: datetime
+) -> MetadataFetch[RecentIssueWindow]:
+    identifier = source_id(source, MetadataEntityKind.SERIES, external_id)
+    checkpoint = issue_checkpoint(since)
+
+    async def operation(
+        adapter: MetadataSourceAdapter, _validator: str | None
+    ) -> MetadataFetch[RecentIssueWindow]:
+        if not isinstance(adapter, RecentIssueAdapter):
+            raise MetadataSourceError(SourceStatus.UNSUPPORTED)
+        return await adapter.recent_issues(identifier, since=checkpoint)
+
+    def validate(result: RecentIssueWindow) -> None:
+        validate_recent_issue_window(result, source, identifier, checkpoint)
+
+    # A checkpoint-specific slice must not reuse a full-catalog page cache entry.
+    return await _read(registry, source, SourceCapability.RECENT_ISSUES, operation, validate, None)
 
 
 async def read_issues(

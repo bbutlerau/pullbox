@@ -936,13 +936,15 @@ class ComicVineProvider:
         return _issue_metadata_from_item(item, fallback_provider_id=provider_id)
 
     async def get_issues_page(
-        self, series_provider_id: str, *, page: int = 1
+        self, series_provider_id: str, *, page: int = 1, newest_first: bool = False
     ) -> tuple[list[IssueMetadata], int]:
         """Read one complete page with explicit parent identity, without auto-pagination."""
         if re.fullmatch(r"[1-9][0-9]{0,18}", series_provider_id) is None:
             raise ValueError("ComicVine provider IDs must be positive integers")
         if type(page) is not int or not 1 <= page <= 10000:
             raise ValueError("Invalid ComicVine page")
+        if type(newest_first) is not bool or (newest_first and page != 1):
+            raise ValueError("Recent ComicVine reads are limited to one page")
         offset = (page - 1) * 100
         data = await self._request(
             "/issues/",
@@ -951,7 +953,7 @@ class ComicVineProvider:
                 "field_list": (
                     "id,volume,issue_number,name,cover_date,store_date,image,site_detail_url"
                 ),
-                "sort": "id:asc",
+                "sort": "store_date:desc" if newest_first else "id:asc",
                 "limit": 100,
                 "offset": offset,
             },

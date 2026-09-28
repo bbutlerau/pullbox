@@ -14,7 +14,7 @@ from urllib.parse import parse_qsl, urlsplit
 import httpx
 
 from pullbox import __version__
-from pullbox.core.metadata_identity import MetadataEntityKind
+from pullbox.core.metadata_identity import MetadataEntityKind, MetadataSource
 from pullbox.core.provider_cooldown import ProviderCooldown, provider_cooldown, retry_after_seconds
 from pullbox.providers.metadata import metron_normalization as normalize
 from pullbox.schemas.metadata_sources import (
@@ -23,12 +23,15 @@ from pullbox.schemas.metadata_sources import (
     ProviderIssueRead,
     ProviderSeriesRead,
     ProviderStoryArcRead,
+    RecentIssueWindow,
     SourceStatus,
 )
 from pullbox.services.metadata_discovery import MetadataSourceError, SourcePage
+from pullbox.services.metadata_source_reads import issue_checkpoint, validate_recent_issue_window
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from datetime import datetime
 
     from pydantic import SecretStr
 
@@ -316,6 +319,29 @@ class MetronSource:
             if row.external_id != identifier:
                 raise ValueError("Different detail identity")
             return MetadataFetch(status=SourceStatus.OK, data=row, validator=response.validator)
+        except (ValueError, TypeError):
+            raise MetadataSourceError(SourceStatus.INCOMPATIBLE_RESPONSE) from None
+
+    async def recent_issues(
+        self, external_id: str, *, since: datetime
+    ) -> MetadataFetch[RecentIssueWindow]:
+        identifier = normalize.external_id(external_id)
+        checkpoint = issue_checkpoint(since)
+        params = {"series_id": identifier, "modified_gt": checkpoint.isoformat(), "page": "1"}
+        response = await self._get("issue/", params)
+        if response.status is not SourceStatus.OK:
+            return MetadataFetch(status=response.status)
+        try:
+            rows, total, next_page = _envelope(response.payload, "issue/", params)
+            result = RecentIssueWindow(
+                results=[normalize.issue(row) for row in rows],
+                matched_total=total,
+                scope="modified_since",
+                since=checkpoint,
+                truncated=next_page is not None,
+            )
+            validate_recent_issue_window(result, MetadataSource.METRON_API, identifier, checkpoint)
+            return MetadataFetch(status=SourceStatus.OK, data=result)
         except (ValueError, TypeError):
             raise MetadataSourceError(SourceStatus.INCOMPATIBLE_RESPONSE) from None
 

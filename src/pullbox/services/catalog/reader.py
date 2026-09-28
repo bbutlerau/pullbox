@@ -212,6 +212,29 @@ class CatalogReader:
             source_cutoff_at=cutoff,
         )
 
+    async def recent_issues(self, series_id: int) -> tuple[list[IssueMetadata], int, datetime]:
+        """Newest publication slice and total, pinned to one immutable generation."""
+        if type(series_id) is not int or not 0 < series_id < 2**63:
+            raise ValueError("Invalid catalog series identity")
+        rows, cutoff = await disk_work(
+            self._query,
+            f"WITH page AS (SELECT {ISSUE_COLUMNS} FROM issues WHERE series_id=? "
+            "ORDER BY store_date DESC,id DESC LIMIT 100), "
+            "tally AS (SELECT COUNT(*) AS total FROM issues WHERE series_id=?) "
+            "SELECT page.*,tally.total FROM tally LEFT JOIN page ON 1=1 "
+            "ORDER BY page.store_date DESC,page.id DESC",
+            (series_id, series_id),
+        )
+        return (
+            [
+                self._issue_metadata(row, cutoff, preserve_number_text=True)
+                for row in rows
+                if row[0] is not None
+            ],
+            int(rows[0][-1]),
+            cutoff,
+        )
+
     async def issue_page(self, series_id: int, *, page: int = 1) -> tuple[list[IssueMetadata], int]:
         """Count and read a bounded page in one query on one immutable generation."""
         if type(page) is not int or not 1 <= page <= 10000:

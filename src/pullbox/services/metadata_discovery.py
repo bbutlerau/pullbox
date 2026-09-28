@@ -16,6 +16,7 @@ from pullbox.schemas.metadata_sources import (
     ProviderIssueRead,
     ProviderSeriesRead,
     ProviderStoryArcRead,
+    RecentIssueWindow,
     SeriesDiscoveryQuery,
     SeriesDiscoveryRead,
     SourceCapability,
@@ -30,6 +31,7 @@ from pullbox.schemas.metadata_sources import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
+    from datetime import datetime
 
     from pullbox.services.metadata_read_cache import MetadataReadCache
     from pullbox.services.metadata_sources import SourceRuntime
@@ -435,6 +437,13 @@ class MetadataSourceRegistry:
         from pullbox.services.metadata_source_reads import read_issues
 
         return await read_issues(self, source, external_id, page=page, validator=validator)
+
+    async def recent_issues(
+        self, source: MetadataSource, external_id: str, *, since: datetime
+    ) -> MetadataFetch[RecentIssueWindow]:
+        from pullbox.services.metadata_source_reads import read_recent_issues
+
+        return await read_recent_issues(self, source, external_id, since=since)
 
     async def story_arc(
         self, source: MetadataSource, external_id: str, *, validator: str | None = None

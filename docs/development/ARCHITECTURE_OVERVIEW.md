@@ -326,6 +326,16 @@ authentication and the existing session CSRF protection. Source namespace,
 entity identity, issue parent, page completeness and continuation are checked
 before returning data. Preview is read-only and is not an adoption proof.
 
+The separate `recent_issues` capability returns at most 100 issues and never
+claims complete membership. ComicVine local/API return newest-publication slices;
+Metron returns issues modified after an explicit UTC checkpoint. Query totals
+and truncation describe only that slice. A truncated modification window needs
+a full/bounded reconciliation before advancing its checkpoint. Empty local
+results still carry their immutable catalog generation. These reads do not use
+the full-page response cache, follow continuation links or attach identities.
+Daily issue-sweep integration remains pending; existing cadence/full-sync rules
+must be retained when that caller adopts this contract.
+
 `services/metadata_series_adoption.py` separates a complete server-side catalog
 fetch from transactional adoption. Traversal rejects partial pages, repeated
 identities, changed counts and mixed local catalog generations. The writer locks
