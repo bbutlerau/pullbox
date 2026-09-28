@@ -417,6 +417,26 @@ async def test_arc_normalization_pages_large_legacy_libraries(identity_probe_db)
         assert (await connection.execute(select(old).order_by(old.c.id))).all() == before
 
 
+async def test_arc_migration_reflects_only_its_three_owned_tables(identity_probe_db):
+    engine, _, _ = identity_probe_db
+    async with engine.begin() as connection:
+
+        def reflected_names(conn):
+            tables = _migration(conn)._tables()
+            assert {table.name for table in tables} == {
+                "story_arcs",
+                _NAME,
+                "story_arc_identity_events",
+            }
+            return {table.name for table in tables[0].metadata.tables.values()}
+
+        assert await connection.run_sync(reflected_names) == {
+            "story_arcs",
+            _NAME,
+            "story_arc_identity_events",
+        }
+
+
 @pytest.mark.parametrize("change", ["state", "history", "revision", "scoped_lifecycle"])
 async def test_arc_downgrade_refuses_to_discard_later_decisions(identity_probe_db, change):
     engine, factory, _ = identity_probe_db

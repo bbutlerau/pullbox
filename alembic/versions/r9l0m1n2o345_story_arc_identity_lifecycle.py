@@ -56,7 +56,7 @@ def _digest(value: str) -> str:
 def _tables() -> tuple[sa.Table, sa.Table, sa.Table]:
     metadata = sa.MetaData()
     return tuple(
-        sa.Table(name, metadata, autoload_with=op.get_bind())
+        sa.Table(name, metadata, autoload_with=op.get_bind(), resolve_fks=False)
         for name in (
             "story_arcs",
             _NAME,
