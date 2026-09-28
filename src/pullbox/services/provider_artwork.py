@@ -137,6 +137,12 @@ class ProviderArtworkClient:
             async with asyncio.timeout(20):
                 async with self._client.stream("GET", url) as response:
                     response.raise_for_status()
+                    # Refuse HTTP decompression before a decoded chunk can exceed our cap.
+                    if (
+                        response.headers.get("content-encoding", "identity").strip().lower()
+                        != "identity"
+                    ):
+                        raise ValueError("Unsupported artwork content encoding")
                     if response.headers.get("content-type", "").split(";", 1)[
                         0
                     ].strip().lower() not in {

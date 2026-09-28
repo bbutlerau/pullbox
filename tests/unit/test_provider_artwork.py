@@ -200,6 +200,37 @@ async def test_unbounded_stream_stops_at_byte_budget(tmp_path, monkeypatch):
     assert read == [0, 1] and not list(tmp_path.iterdir())
 
 
+@pytest.mark.parametrize("encoding", ["gzip", "br", "deflate", "identity, gzip", "unknown"])
+async def test_encoded_artwork_is_rejected_before_reading_response(tmp_path, encoding):
+    read = []
+    closed = []
+
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            read.append(True)
+            yield b"unexpected encoded response"
+
+        async def aclose(self):
+            closed.append(True)
+
+    def handle(request):
+        assert request.headers["accept-encoding"] == "identity"
+        return httpx.Response(
+            200,
+            stream=Stream(),
+            headers={"content-type": "image/jpeg", "content-encoding": encoding},
+        )
+
+    destination = tmp_path / "cover.jpg"
+    destination.write_bytes(b"existing")
+    async with ProviderArtworkClient(transport=httpx.MockTransport(handle)) as client:
+        assert not await client.download_cover("https://metron.cloud/media/a.jpg", destination)
+    assert read == [], "Reject encoding before HTTP decoding can expand an unbounded chunk"
+    assert closed == [True]
+    assert destination.read_bytes() == b"existing"
+    assert list(tmp_path.iterdir()) == [destination]
+
+
 async def test_cancel_during_staging_joins_writer_without_publishing(tmp_path, monkeypatch):
     import threading
 
