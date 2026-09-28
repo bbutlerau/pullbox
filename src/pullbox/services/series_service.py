@@ -42,6 +42,7 @@ from pullbox.services.cover_cache_service import (
     purge_series_cover_cache,
 )
 from pullbox.services.library_root_management import validate_managed_library_root
+from pullbox.services.metadata_writer_identity import ImportIdentityOrigin
 from pullbox.services.series_delete_targets import (
     SeriesDeleteContext as SeriesDeleteContext,
 )
@@ -269,7 +270,13 @@ class SeriesService:
             cached_meta = await cached_lookup(self._metadata, cv_id)
             if cached_meta is not None:
                 series_meta = cached_meta
-        series = await self._metadata.upsert_series_metadata(session, cv_id, series_meta)
+        identity_origin = ImportIdentityOrigin(import_series.id)
+        series = await self._metadata.upsert_series_metadata(
+            session,
+            cv_id,
+            series_meta,
+            identity_origin=identity_origin,
+        )
         series.monitored = search_on_add
         series.issue_catalog_state = IssueCatalogState.HYDRATING
         series.issue_catalog_error = None
@@ -322,7 +329,12 @@ class SeriesService:
                 import_series.diagnostics = diagnostics
 
         if issue_summaries:
-            await self._metadata.upsert_issue_summaries(session, series, issue_summaries)
+            await self._metadata.upsert_issue_summaries(
+                session,
+                series,
+                issue_summaries,
+                identity_origin=identity_origin,
+            )
         await session.flush()
         return series
 

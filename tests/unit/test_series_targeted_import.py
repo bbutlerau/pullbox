@@ -26,6 +26,7 @@ from pullbox.models.series import IssueCatalogState, Series, SeriesStatus, Serie
 from pullbox.providers.base import IssueSummary, SeriesMetadata
 from pullbox.services import cover_cache_service
 from pullbox.services import series_service as series_service_module
+from pullbox.services.metadata_writer_identity import ImportIdentityOrigin
 from pullbox.services.series_service import SeriesService
 
 if TYPE_CHECKING:
@@ -36,7 +37,10 @@ async def _fake_upsert_series(
     session: AsyncSession,
     cv_id: int,
     meta: SeriesMetadata,
+    *,
+    identity_origin: ImportIdentityOrigin | None = None,
 ) -> Series:
+    assert identity_origin is None or isinstance(identity_origin, ImportIdentityOrigin)
     publisher: Publisher | None = None
     if meta.publisher:
         publisher = await session.scalar(select(Publisher).where(Publisher.name == meta.publisher))
@@ -103,7 +107,9 @@ async def _fake_upsert_issue_summaries(
     summaries: list[IssueSummary],
     *,
     infer_series_type_from_summaries: bool = False,
+    identity_origin: ImportIdentityOrigin | None = None,
 ) -> list[Issue]:
+    assert identity_origin is None or isinstance(identity_origin, ImportIdentityOrigin)
     del infer_series_type_from_summaries
     created: list[Issue] = []
     for summary in summaries:

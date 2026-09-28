@@ -15,8 +15,9 @@ from typing import TYPE_CHECKING
 import structlog
 from sqlalchemy import delete, select
 
-from pullbox.core.exceptions import NotFoundError, ProviderError
+from pullbox.core.exceptions import NotFoundError, ProviderError, ValidationError
 from pullbox.core.issue_numbers import format_issue_number, normalize_issue_number_text
+from pullbox.core.metadata_identity import MetadataEntityKind
 from pullbox.core.name_matcher import NameMatcher
 from pullbox.core.naming import (
     classify_series_type,
@@ -38,6 +39,12 @@ from pullbox.providers.base import SeriesMetadata
 from pullbox.providers.metadata.comicvine import ComicVineError
 from pullbox.services.catalog.reader import CatalogIssueSummary, CatalogSeriesMetadata
 from pullbox.services.cover_cache_service import purge_series_cover_cache
+from pullbox.services.metadata_writer_identity import (
+    attach_issue_summary_identities,
+    attach_series_metadata_identity,
+    comicvine_identity,
+    metadata_write_scope,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,6 +52,7 @@ if TYPE_CHECKING:
     from pullbox.providers.base import IssueMetadata, IssueSummary, SeriesSearchResult
     from pullbox.providers.metadata.comicvine import ComicVineProvider
     from pullbox.services.catalog.reader import CatalogReader
+    from pullbox.services.metadata_writer_identity import ImportIdentityOrigin
 
 logger = structlog.get_logger(__name__)
 
@@ -181,12 +189,27 @@ class MetadataService:
         session: AsyncSession,
         comicvine_id: int,
         meta: SeriesMetadata,
+        *,
+        identity_origin: ImportIdentityOrigin | None = None,
     ) -> Series:
         """Create or update a local Series row from prefetched provider metadata.
 
         This split lets long-running workflows fetch provider data before they
         enter a write-heavy section, keeping SQLite write locks short.
         """
+        identity = comicvine_identity(MetadataEntityKind.SERIES, meta.provider_id)
+        if identity.external_id != str(comicvine_id):
+            raise ValidationError("Series metadata does not match the requested ComicVine ID.")
+        async with metadata_write_scope(session):
+            return await self._upsert_series_metadata(session, comicvine_id, meta, identity_origin)
+
+    async def _upsert_series_metadata(
+        self,
+        session: AsyncSession,
+        comicvine_id: int,
+        meta: SeriesMetadata,
+        identity_origin: ImportIdentityOrigin | None,
+    ) -> Series:
         log = logger.bind(comicvine_id=comicvine_id)
 
         source = "pullbox_catalog" if isinstance(meta, CatalogSeriesMetadata) else "comicvine"
@@ -199,7 +222,9 @@ class MetadataService:
             publisher_id = await self._ensure_publisher(session, meta.publisher)
 
         existing = (
-            await session.execute(select(Series).where(Series.comicvine_id == comicvine_id))
+            await session.execute(
+                select(Series).where(Series.comicvine_id == comicvine_id).with_for_update()
+            )
         ).scalar_one_or_none()
 
         if (
@@ -208,6 +233,7 @@ class MetadataService:
             and existing.metadata_source == "comicvine"
         ):
             # Basic catalog hydration must never replace a completed full refresh.
+            await attach_series_metadata_identity(session, existing, meta, identity_origin)
             return existing
         if existing:
             existing.title = meta.title
@@ -250,6 +276,7 @@ class MetadataService:
             )
             session.add(series)
             await session.flush()
+            await attach_series_metadata_identity(session, series, meta, identity_origin)
             await purge_series_cover_cache(
                 session,
                 series.id,
@@ -258,6 +285,8 @@ class MetadataService:
             series.cover_path = None
             log.debug("metadata_series_created", series_id=series.id)
 
+        if existing:
+            await attach_series_metadata_identity(session, series, meta, identity_origin)
         await self.classify_and_link_series(session, series)
         return series
 
@@ -755,21 +784,50 @@ class MetadataService:
         summaries: list[IssueSummary],
         *,
         infer_series_type_from_summaries: bool = False,
+        identity_origin: ImportIdentityOrigin | None = None,
     ) -> list[Issue]:
         """Create or update local Issue rows from prefetched provider summaries."""
+        for summary in summaries:
+            comicvine_identity(MetadataEntityKind.ISSUE, summary.provider_id)
+        async with metadata_write_scope(session):
+            return await self._upsert_issue_summaries(
+                session,
+                series,
+                summaries,
+                infer_series_type_from_summaries=infer_series_type_from_summaries,
+                identity_origin=identity_origin,
+            )
+
+    async def _upsert_issue_summaries(
+        self,
+        session: AsyncSession,
+        series: Series,
+        summaries: list[IssueSummary],
+        *,
+        infer_series_type_from_summaries: bool,
+        identity_origin: ImportIdentityOrigin | None,
+    ) -> list[Issue]:
         series_id = series.id
         if series_id is None:
             raise NotFoundError("Series", "unpersisted")
+        # Match the identity writer's parent-before-child lock order before
+        # ORM autoflush can update any existing issue rows.
+        await session.execute(select(Series.id).where(Series.id == series_id).with_for_update())
         log = logger.bind(series_id=series_id)
 
         created = []
+        identity_members: list[tuple[Issue, IssueSummary]] = []
         provider_issue_ids = [int(summary.provider_id) for summary in summaries]
         existing_result = await session.execute(select(Issue).where(Issue.series_id == series_id))
         existing_issues = list(existing_result.scalars().all())
-        provider_result = await session.execute(
-            select(Issue).where(Issue.comicvine_id.in_(provider_issue_ids))
-        )
-        existing_provider_issues = list(provider_result.scalars().all())
+        existing_provider_issues: list[Issue] = []
+        for offset in range(0, len(provider_issue_ids), 200):
+            provider_result = await session.execute(
+                select(Issue).where(
+                    Issue.comicvine_id.in_(provider_issue_ids[offset : offset + 200])
+                )
+            )
+            existing_provider_issues.extend(provider_result.scalars().all())
         existing_by_text = {issue.effective_issue_number_text: issue for issue in existing_issues}
         legacy_by_number = {
             issue.issue_number: issue
@@ -813,6 +871,7 @@ class MetadataService:
                 # A basic snapshot cannot establish that live fields are stale.
                 # Keep its identity and fields, and do not infer parent type here.
                 summary_evidence_types.append(IssueType.ISSUE)
+                identity_members.append((existing_by_provider, summary))
                 continue
             if existing_by_provider is not None and existing_by_provider is not existing:
                 if existing is None:
@@ -865,7 +924,7 @@ class MetadataService:
                         existing_by_text.pop(old_issue_number_text, None)
                     existing_by_text[exact_issue_number_text] = existing
                 if assign_provider_issue_id:
-                    existing.comicvine_id = provider_issue_id
+                    identity_members.append((existing, summary))
                 if summary.title:
                     existing.title = summary.title
                 if summary.release_date:
@@ -884,7 +943,7 @@ class MetadataService:
             else:
                 issue = Issue(
                     series_id=series_id,
-                    comicvine_id=provider_issue_id if assign_provider_issue_id else None,
+                    comicvine_id=None,
                     issue_number=summary.issue_number,
                     issue_number_text=exact_issue_number_text,
                     title=summary.title,
@@ -898,8 +957,10 @@ class MetadataService:
                 existing_by_text[exact_issue_number_text] = issue
                 if assign_provider_issue_id:
                     existing_by_provider_id[provider_issue_id] = issue
+                    identity_members.append((issue, summary))
 
         await session.flush()
+        await attach_issue_summary_identities(session, series, identity_members, identity_origin)
 
         # Only a complete catalog where every summary has explicit non-standard
         # evidence may infer the series type. Recent/targeted subsets and a mix
