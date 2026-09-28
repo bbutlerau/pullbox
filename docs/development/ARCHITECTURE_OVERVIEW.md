@@ -333,8 +333,8 @@ and truncation describe only that slice. A truncated modification window needs
 a full/bounded reconciliation before advancing its checkpoint. Empty local
 results still carry their immutable catalog generation. These reads do not use
 the full-page response cache, follow continuation links or attach identities.
-Daily issue-sweep integration remains pending; existing cadence/full-sync rules
-must be retained when that caller adopts this contract.
+The daily issue sweep uses these windows with source-specific checkpoints and
+retains the normal continuing/ended-series cadence and full-refresh deadline.
 
 Complete source-aware Add and refresh now persist source-bound catalog
 checkpoints with the same atomic library write. The checkpoint retains the
@@ -342,9 +342,8 @@ source-policy and verified-identity revisions, exact parent and local generation
 Only proven live catalog reads establish the request-start boundary. Cached
 bundles of unknown age and Add of an existing series do not advance progress.
 Refresh revalidates captured checkpoints along with metadata and policies, so
-an in-flight refresh cannot overwrite newer sync progress. Incremental consumers
-must still handle overlap, generation changes and truncated modification windows;
-this checkpoint storage does not itself implement daily source-aware sync.
+an in-flight refresh cannot overwrite newer sync progress. Incremental advancement
+preserves the full-sync date and commits with the corresponding issue writes.
 
 `services/metadata_issue_catalog.py` applies either complete membership or an
 issue-only batch to the caller's locked, revalidated read set. Full refresh uses
@@ -353,8 +352,10 @@ timestamp. Both modes preserve issue ownership, local edits, private reading sta
 and registered artifacts while sharing native identity, crosswalk observation and
 canonical-baseline writes. The writer returns exact created issue IDs. Scheduled
 refresh uses that receipt, not an ID range that could include another operation's
-new issues, when deciding whether to search after commit. Daily source-window
-orchestration and atomic incremental checkpoint advancement remain pending.
+new issues, when deciding whether to search after commit. Daily synchronization
+uses the same writer, overlaps modification cursors by two minutes, and falls back
+to full reconciliation for truncated modification windows, changed local catalog
+generations, or publication slices that cannot account for known membership.
 
 `services/metadata_series_adoption.py` separates a complete server-side catalog
 fetch from transactional adoption. Traversal rejects partial pages, repeated
@@ -680,8 +681,8 @@ initial upper bound in `SystemConfig`. Each batch handles at most 25 series and
 checks a two-minute budget between series; an individual series has a separate
 15-minute timeout. Pending batches resume through hidden continuations, including
 after restart. Provider throttling pauses the sweep at its saved position instead
-of repeatedly failing every remaining series. Series metadata writes are committed
-before subsequent cover or issue-provider waits.
+of repeatedly failing every remaining series. Provider reads happen before the
+atomic library/progress write; optional cover work follows its commit.
 The scheduled metadata refresh selects verified identities backed by executable,
 configured sources, including native Metron and local ComicVine without an API
 key. It uses the same revision-checked writer as manual refresh but fills gaps
@@ -689,9 +690,11 @@ only, preserving existing descriptive values and user overrides. Its metadata
 write and sweep checkpoint commit together before search scheduling or optional
 cover-cache work. Structured source failures preserve durable retry deadlines;
 disabling the last eligible source clears the continuation.
-The separate daily issue sweep still uses the legacy ComicVine recent/full
-catalog path; removing its ComicVine key stops that sweep and clears its
-continuation. Source-aware recent-catalog integration remains required.
+The daily issue sweep uses the same configured-source eligibility, with partial
+windows where a valid source checkpoint permits them. Native and local sources
+do not require a ComicVine API key. Failed sources retain their checkpoints;
+if fallback also fails, earlier retryable outcomes retain the sweep's retry
+deadline. Independent per-provider retry progress remains future work.
 Post-restore aftercare keeps its recovery marker while continuation batches remain
 active; it observes completion without retaining a database transaction between checks.
 Cancellation leaves the marker and sweep checkpoint available for the next startup.

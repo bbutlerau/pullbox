@@ -118,6 +118,58 @@ async def save_full_catalog_checkpoint(
     Never call with a publication slice or truncated modification window. The
     boundary is the live request start, not the time the final page was saved.
     """
+    return await _save_catalog_checkpoint(
+        session,
+        series_id,
+        source=source,
+        source_revision=source_revision,
+        identity_revision=identity_revision,
+        external_id=external_id,
+        started_at=started_at,
+        source_updated_at=source_updated_at,
+        expected_revision=expected_revision,
+    )
+
+
+async def advance_catalog_checkpoint(
+    session: AsyncSession,
+    previous: CatalogCheckpoint,
+    *,
+    started_at: datetime,
+    source_updated_at: datetime | None = None,
+) -> CatalogCheckpoint:
+    """Advance a fully applied bounded window without resetting its full-sync date.
+
+    The caller must fall back to full reconciliation for truncated modification
+    windows or changed local generations, and commit its issue writes atomically.
+    """
+    return await _save_catalog_checkpoint(
+        session,
+        previous.series_id,
+        source=previous.source,
+        source_revision=previous.source_revision,
+        identity_revision=previous.identity_revision,
+        external_id=previous.external_id,
+        started_at=started_at,
+        source_updated_at=source_updated_at,
+        expected_revision=previous.revision,
+        previous=previous,
+    )
+
+
+async def _save_catalog_checkpoint(
+    session: AsyncSession,
+    series_id: int,
+    *,
+    source: MetadataSource,
+    source_revision: int,
+    identity_revision: int,
+    external_id: str,
+    started_at: datetime,
+    source_updated_at: datetime | None,
+    expected_revision: int,
+    previous: CatalogCheckpoint | None = None,
+) -> CatalogCheckpoint:
     if (
         not isinstance(source, MetadataSource)
         or type(source_revision) is not int
@@ -188,6 +240,14 @@ async def save_full_catalog_checkpoint(
                 raise CatalogCheckpointConflictError(
                     "An older catalog cannot replace newer progress."
                 )
+            if previous is not None and (
+                row is None
+                or _snapshot(row) != previous
+                or generation != previous.source_updated_at
+            ):
+                raise CatalogCheckpointConflictError(
+                    "Catalog progress or generation changed. Read the full catalog again."
+                )
             if row is None:
                 row = SeriesCatalogCheckpoint(series_id=series_id, source=source.value)
                 session.add(row)
@@ -195,7 +255,8 @@ async def save_full_catalog_checkpoint(
             row.identity_id, row.identity_revision = claim.id, claim.revision
             row.external_id = external_id
             row.revision = expected_revision + 1
-            row.checked_at = row.full_synced_at = started_at
+            row.checked_at = started_at
+            row.full_synced_at = previous.full_synced_at if previous else started_at
             row.source_updated_at = generation
             await session.flush()
             return _snapshot(row)
