@@ -29,11 +29,22 @@ from pullbox.models.base import UTCDateTime
 from pullbox.models.story_arc import StoryArcExternalIdentity
 
 if TYPE_CHECKING:
+    from sqlalchemy.engine import Connection
     from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 type IdentityProbeDatabase = tuple[
     AsyncEngine, async_sessionmaker[AsyncSession], IdentitySchemaProbe
 ]
+
+
+def drop_canonical_arc_index(connection: "Connection") -> None:
+    """Recreate pre-migration ownership rules only in disposable legacy fixtures."""
+    index = next(
+        index
+        for index in StoryArcExternalIdentity.__table__.indexes
+        if index.name == "uq_story_arc_canonical_provider"
+    )
+    index.drop(connection)
 
 
 @dataclass(frozen=True)

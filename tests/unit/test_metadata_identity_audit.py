@@ -19,6 +19,7 @@ from pullbox.services.metadata_identity_audit import (
     audit_legacy_identities,
 )
 from pullbox.services.metadata_identity_inventory import LegacyIdentityStorage
+from tests.fixtures.metadata_identity_persistence import drop_canonical_arc_index
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -95,6 +96,7 @@ async def test_agreement_is_not_collision_and_provider_namespaces_stay_independe
 async def test_equivalent_duplicate_relations_need_explicit_consolidation_not_an_owner_winner(
     db_session: AsyncSession,
 ) -> None:
+    await (await db_session.connection()).run_sync(drop_canonical_arc_index)
     [arc] = await _arcs(db_session, [42])
     relations = [_relation(arc, "42"), _relation(arc, "00042")]
     db_session.add_all(relations)
@@ -194,6 +196,7 @@ async def test_evidence_budget_keeps_prior_findings_but_does_not_count_partial_p
 async def test_invalid_evidence_uses_the_same_retained_memory_budget(
     db_session: AsyncSession,
 ) -> None:
+    await (await db_session.connection()).run_sync(drop_canonical_arc_index)
     arcs = await _arcs(db_session, [0, None, None])
     db_session.add_all([_relation(arcs[1], "bad-1"), _relation(arcs[1], "bad-2")])
     await db_session.commit()
@@ -210,6 +213,7 @@ async def test_invalid_evidence_uses_the_same_retained_memory_budget(
 async def test_relation_overflow_is_explicit_incomplete_and_keeps_prior_findings(
     db_session: AsyncSession,
 ) -> None:
+    await (await db_session.connection()).run_sync(drop_canonical_arc_index)
     arcs = await _arcs(db_session, [0, None])
     db_session.add_all([_relation(arcs[1], str(index + 1)) for index in range(2001)])
     await db_session.commit()

@@ -1873,7 +1873,8 @@ class TestMigrationChain:
     def test_root_removal_protects_dependencies_without_losing_other_fk_actions(self, alembic_cfg):
         cfg, sync_url = alembic_cfg
         script = ScriptDirectory.from_config(cfg)
-        assert script.get_heads() == ["q8k9l0m1n234"]
+        assert script.get_heads() == ["r9l0m1n2o345"]
+        assert script.get_revision("r9l0m1n2o345").down_revision == "q8k9l0m1n234"
         assert script.get_revision("q8k9l0m1n234").down_revision == "p7j8k9l0m123"
         assert script.get_revision("p7j8k9l0m123").down_revision == "o6i7j8k9l012"
         assert script.get_revision("o6i7j8k9l012").down_revision == "n5h6i7j8k901"

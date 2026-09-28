@@ -14,6 +14,7 @@ from pullbox.services.metadata_identity_audit import (
     IdentityAuditStopReason,
     audit_legacy_identities,
 )
+from tests.fixtures.metadata_identity_persistence import drop_canonical_arc_index
 
 if TYPE_CHECKING:
     from tests.fixtures.metadata_identity_persistence import IdentityProbeDatabase
@@ -68,10 +69,11 @@ async def test_duplicate_normalized_legacy_rows_are_reported_not_deleted(
     identity_probe_db: IdentityProbeDatabase,
 ) -> None:
     engine, factory, probe = identity_probe_db
-    # Reproduce pre-migration rows: the proposed partial index is not in the app schema.
+    # Reproduce pre-migration rows without either canonical-ownership index.
     assert probe.arc_index is not None
     async with engine.begin() as connection:
         await connection.run_sync(probe.arc_index.drop)
+        await connection.run_sync(drop_canonical_arc_index)
     async with factory.begin() as session:
         arc = StoryArc(name="Duplicate legacy rows", comicvine_id=42)
         session.add(arc)

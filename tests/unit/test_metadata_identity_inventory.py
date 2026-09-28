@@ -16,6 +16,7 @@ from pullbox.services.metadata_identity_inventory import (
     LegacyIdentityStorage,
     read_legacy_identity_page,
 )
+from tests.fixtures.metadata_identity_persistence import drop_canonical_arc_index
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -242,6 +243,7 @@ async def test_arc_inventory_is_bounded_bulk_read_and_only_loads_the_requested_p
 
 
 async def test_arc_inventory_refuses_silent_relation_truncation(db_session: AsyncSession) -> None:
+    await (await db_session.connection()).run_sync(drop_canonical_arc_index)
     [arc] = await _targets(db_session, MetadataEntityKind.STORY_ARC, [None])
     db_session.add_all(
         [
