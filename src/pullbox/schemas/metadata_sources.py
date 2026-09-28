@@ -1,12 +1,12 @@
 """Versioned source policy and provider-aware discovery responses."""
 
 import enum
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
-from pullbox.core.metadata_identity import IdentityNamespace, MetadataSource
+from pullbox.core.metadata_identity import ExternalIdentityRef, IdentityNamespace, MetadataSource
 
 
 class MetadataDomain(enum.StrEnum):
@@ -44,6 +44,8 @@ class SourceStatus(enum.StrEnum):
     INCOMPATIBLE_RESPONSE = "incompatible_response"
     UNSUPPORTED = "unsupported"
     NOT_QUERIED = "not_queried"
+    NOT_FOUND = "not_found"
+    NOT_MODIFIED = "not_modified"
 
 
 class SourceSettings(BaseModel):
@@ -136,6 +138,59 @@ class ProviderSeriesRead(BaseModel):
     resource_url: str | None = None
     image_url: str | None = None
     also_from: list[MetadataSource] = Field(default_factory=list)
+    cross_identities: list[ExternalIdentityRef] = Field(default_factory=list)
+    source_updated_at: datetime | None = None
+    sort_title: str | None = None
+    year_end: int | None = None
+    volume: str | None = None
+    series_type: str | None = None
+    status: str | None = None
+    language: str | None = None
+
+
+class ProviderIssueRead(BaseModel):
+    source: MetadataSource
+    identity_namespace: IdentityNamespace
+    external_id: str
+    series_external_id: str
+    issue_number_text: str
+    issue_number_key: str | None = None
+    title: str | None = None
+    description: str | None = None
+    cover_date: date | None = None
+    store_date: date | None = None
+    page_count: int | None = None
+    resource_url: str | None = None
+    image_url: str | None = None
+    cross_identities: list[ExternalIdentityRef] = Field(default_factory=list)
+    source_updated_at: datetime | None = None
+
+
+class ProviderStoryArcRead(BaseModel):
+    source: MetadataSource
+    identity_namespace: IdentityNamespace
+    external_id: str
+    title: str
+    description: str | None = None
+    resource_url: str | None = None
+    image_url: str | None = None
+    cross_identities: list[ExternalIdentityRef] = Field(default_factory=list)
+    source_updated_at: datetime | None = None
+
+
+class MetadataPage[T](BaseModel):
+    results: list[T]
+    total: int
+    next_page: int | None = None
+    truncated: bool = False
+    # Provider publication order is not a reviewed story-arc reading order.
+    order_is_reading_order: bool = False
+
+
+class MetadataFetch[T](BaseModel):
+    status: SourceStatus
+    data: T | None = None
+    validator: str | None = None
 
 
 class SourceOutcome(BaseModel):

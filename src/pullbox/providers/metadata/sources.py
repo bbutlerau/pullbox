@@ -1,4 +1,4 @@
-"""Executable ComicVine adapters; keep legacy import/cache consumers unchanged."""
+"""Executable source registrations; keep legacy import/cache consumers unchanged."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 from pullbox.config import get_settings
 from pullbox.core.metadata_identity import ExternalIdentityRef, MetadataEntityKind, MetadataSource
 from pullbox.providers.metadata.comicvine import ComicVineError, ComicVineProvider
+from pullbox.providers.metadata.metron import MetronSource
 from pullbox.schemas.metadata_sources import (
     ProviderSeriesRead,
     SeriesDiscoveryQuery,
@@ -233,5 +234,33 @@ def comicvine_sources() -> dict[MetadataSource, SourceRegistration]:
         MetadataSource.COMICVINE_LOCAL: SourceRegistration(
             frozenset({SourceCapability.SERIES_SEARCH, SourceCapability.OFFLINE}),
             lambda runtime: ComicVineLocalSource(get_catalog_reader()),
+        ),
+    }
+
+
+def _metron(runtime: SourceRuntime) -> MetronSource:
+    if runtime.credential is None:
+        raise MetadataSourceError(SourceStatus.UNCONFIGURED)
+    return MetronSource(runtime.credential)
+
+
+def metadata_sources() -> dict[MetadataSource, SourceRegistration]:
+    return {
+        **comicvine_sources(),
+        MetadataSource.METRON_API: SourceRegistration(
+            frozenset(
+                {
+                    SourceCapability.SERIES_SEARCH,
+                    SourceCapability.SERIES_DETAILS,
+                    SourceCapability.ISSUE_LIST,
+                    SourceCapability.ISSUE_DETAILS,
+                    SourceCapability.STORY_ARC_SEARCH,
+                    SourceCapability.STORY_ARC_DETAILS,
+                    SourceCapability.CROSS_IDENTITIES,
+                    SourceCapability.CONDITIONAL_REFRESH,
+                    SourceCapability.COVER_REFERENCE,
+                }
+            ),
+            _metron,
         ),
     }

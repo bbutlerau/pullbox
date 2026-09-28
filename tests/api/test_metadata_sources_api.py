@@ -213,3 +213,72 @@ async def test_existing_key_save_invalidates_source_revision_and_old_health(
         assert not await record_source_health(
             session, MetadataSource.COMICVINE_API, revision, outcome, now
         )
+
+
+async def test_metron_configuration_health_and_discovery_use_real_adapter(
+    authenticated_client, monkeypatch, sec_db, tmp_path
+):
+    import httpx
+
+    from pullbox.core.provider_cooldown import ProviderCooldown
+    from pullbox.providers.metadata import sources
+    from tests.unit.test_metron_source import envelope, series_row
+
+    token = "synthetic-api-metron-token"
+    requests = []
+    fail = False
+
+    def handle(request):
+        requests.append(request)
+        assert request.headers["authorization"] == f"Bearer {token}"
+        if fail:
+            return httpx.Response(401, text=token)
+        return httpx.Response(200, json=envelope([series_row()]))
+
+    adapter = sources.MetronSource
+    monkeypatch.setattr(
+        sources,
+        "MetronSource",
+        lambda credential: adapter(
+            credential,
+            transport=httpx.MockTransport(handle),
+            cooldown=ProviderCooldown(),
+            minimum_interval=0,
+        ),
+    )
+    reader = installed_reader(tmp_path)
+    monkeypatch.setattr(sources, "get_catalog_reader", lambda: reader)
+    url = "/api/v1/metadata/sources/metron_api"
+    saved = await authenticated_client.put(
+        url, json=policy(credential=token), headers=csrf(authenticated_client)
+    )
+    assert saved.status_code == 200 and saved.json()["credential_configured"]
+    health = await authenticated_client.post(url + "/test", headers=csrf(authenticated_client))
+    assert health.status_code == 200 and health.json()["outcome"]["status"] == "ok"
+    async with sec_db() as session:
+        row = await session.scalar(
+            select(MetadataSourceConfig).where(MetadataSourceConfig.source == "metron_api")
+        )
+        assert row.last_status == "ok" and row.last_success_at
+    result = await authenticated_client.post(
+        "/api/v1/metadata/search",
+        json={"query": "Fixture", "sources": ["metron_api"]},
+        headers=csrf(authenticated_client),
+    )
+    assert result.status_code == 200
+    assert result.json()["results"][0]["external_id"] == "1"
+    assert result.json()["results"][0]["cross_identities"][0]["external_id"] == "9001"
+    assert len(requests) == 2
+    fail = True
+    partial = await authenticated_client.post(
+        "/api/v1/metadata/search",
+        json={"query": "Dark Knight", "sources": ["comicvine_local", "metron_api"]},
+        headers=csrf(authenticated_client),
+    )
+    assert partial.status_code == 200
+    assert partial.json()["results"][0]["source"] == "comicvine_local"
+    assert {row["source"]: row["status"] for row in partial.json()["sources"]} == {
+        "comicvine_local": "ok",
+        "metron_api": "authentication_failed",
+    }
+    assert token not in saved.text + health.text + result.text + partial.text

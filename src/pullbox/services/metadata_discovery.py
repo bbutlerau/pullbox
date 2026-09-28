@@ -33,9 +33,9 @@ def describe_source_policies(
     policies: Sequence[SourcePolicyRead], *, gcd_api_enabled: bool
 ) -> list[SourceDescriptor]:
     """Expose capability/configuration snapshots without constructing clients."""
-    from pullbox.providers.metadata.sources import comicvine_sources
+    from pullbox.providers.metadata.sources import metadata_sources
 
-    registrations = comicvine_sources()
+    registrations = metadata_sources()
     result = []
     for policy in policies:
         registration = registrations.get(policy.source)
@@ -46,7 +46,10 @@ def describe_source_policies(
             availability = availability or SourceStatus.DISABLED
         elif registration is None:
             availability = SourceStatus.NOT_IMPLEMENTED
-        elif policy.source is MetadataSource.COMICVINE_API and not policy.credential_configured:
+        elif (
+            policy.source in {MetadataSource.COMICVINE_API, MetadataSource.METRON_API}
+            and not policy.credential_configured
+        ):
             availability = SourceStatus.UNCONFIGURED
         result.append(
             SourceDescriptor(
@@ -98,9 +101,9 @@ class MetadataSourceRegistry:
         concurrency: int = 3,
     ) -> None:
         if factories is None:
-            from pullbox.providers.metadata.sources import comicvine_sources
+            from pullbox.providers.metadata.sources import metadata_sources
 
-            factories = comicvine_sources()
+            factories = metadata_sources()
         self.runtime = {item.policy.source: item for item in runtime}
         self.factories = factories
         self.gcd_api_enabled = gcd_api_enabled
