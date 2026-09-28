@@ -79,6 +79,11 @@ class MetadataSourceAdapter(Protocol):
     async def close(self) -> None: ...
 
 
+@dataclass
+class _SourceHandle:
+    adapter: MetadataSourceAdapter | None = None
+
+
 class MetadataSourceError(Exception):
     def __init__(self, status: SourceStatus, retry_after_seconds: int | None = None) -> None:
         self.status = status
@@ -150,18 +155,22 @@ class MetadataSourceRegistry:
         query: SeriesDiscoveryQuery | None,
         semaphore: asyncio.Semaphore,
         deadline: float,
+        handle: _SourceHandle | None = None,
     ) -> tuple[SourcePage, SourceOutcome]:
         unavailable = self._unavailable(source, search=query is not None)
         if unavailable is not None:
             return SourcePage([]), SourceOutcome(source=source, status=unavailable)
         if asyncio.get_running_loop().time() >= deadline:
             return SourcePage([]), SourceOutcome(source=source, status=SourceStatus.TIMEOUT)
-        adapter = None
+        owns_handle = handle is None
+        handle = handle or _SourceHandle()
         page = SourcePage([])
         try:
             async with asyncio.timeout_at(deadline), semaphore:
                 async with asyncio.timeout(self.per_source_timeout):
-                    adapter = self.factories[source].factory(self.runtime[source])
+                    if handle.adapter is None:
+                        handle.adapter = self.factories[source].factory(self.runtime[source])
+                    adapter = handle.adapter
                     if query is None:
                         await adapter.check()
                     else:
@@ -203,22 +212,21 @@ class MetadataSourceRegistry:
             outcome = SourceOutcome(source=source, status=SourceStatus.UNAVAILABLE)
             page = SourcePage([])
         finally:
-            if adapter is not None:
-                try:
-                    async with asyncio.timeout(2):
-                        await adapter.close()
-                except Exception:
-                    logger.warning("metadata_source_close_failed", source=source.value)
+            if owns_handle:
+                await self._close_source(source, handle)
         return page, outcome
 
-    async def discover(
-        self,
-        query: SeriesDiscoveryQuery,
-        *,
-        satisfied_by: Callable[[SourcePage], bool] | None = None,
-    ) -> SeriesDiscoveryRead:
-        """Cascade only stops when the caller proves its requirements are met."""
-        sources = sorted(
+    @staticmethod
+    async def _close_source(source: MetadataSource, handle: _SourceHandle) -> None:
+        if handle.adapter is not None:
+            try:
+                async with asyncio.timeout(2):
+                    await handle.adapter.close()
+            except Exception:
+                logger.warning("metadata_source_close_failed", source=source.value)
+
+    def _ordered_sources(self, query: SeriesDiscoveryQuery) -> list[MetadataSource]:
+        return sorted(
             query.sources if query.sources is not None else self.runtime,
             key=lambda source: (
                 self.runtime[source].policy.domain_priorities.get(
@@ -229,6 +237,31 @@ class MetadataSourceRegistry:
                 source.value,
             ),
         )
+
+    @staticmethod
+    def _group_pages(pages: Sequence[tuple[SourcePage, SourceOutcome]]) -> SeriesDiscoveryRead:
+        grouped = {}
+        for page, _ in pages:
+            for item in page.results:
+                key = (item.identity_namespace, item.external_id)
+                if key not in grouped:
+                    grouped[key] = item.model_copy(deep=True)
+                elif (
+                    item.source != grouped[key].source and item.source not in grouped[key].also_from
+                ):
+                    grouped[key].also_from.append(item.source)
+        return SeriesDiscoveryRead(
+            results=list(grouped.values()), sources=[outcome for _, outcome in pages]
+        )
+
+    async def discover(
+        self,
+        query: SeriesDiscoveryQuery,
+        *,
+        satisfied_by: Callable[[SourcePage], bool] | None = None,
+    ) -> SeriesDiscoveryRead:
+        """Cascade only stops when the caller proves its requirements are met."""
+        sources = self._ordered_sources(query)
         semaphore = asyncio.Semaphore(self.concurrency)
         deadline = asyncio.get_running_loop().time() + self.total_timeout
         pages = []
@@ -256,19 +289,7 @@ class MetadataSourceRegistry:
                     if not task.done():
                         task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
-        grouped = {}
-        for page, _ in pages:
-            for item in page.results:
-                key = (item.identity_namespace, item.external_id)
-                if key not in grouped:
-                    grouped[key] = item.model_copy(deep=True)
-                elif (
-                    item.source != grouped[key].source and item.source not in grouped[key].also_from
-                ):
-                    grouped[key].also_from.append(item.source)
-        return SeriesDiscoveryRead(
-            results=list(grouped.values()), sources=[outcome for _, outcome in pages]
-        )
+        return self._group_pages(pages)
 
     async def check(self, source: MetadataSource) -> SourceOutcome:
         _, outcome = await self._run(
@@ -278,6 +299,87 @@ class MetadataSourceRegistry:
             asyncio.get_running_loop().time() + self.total_timeout,
         )
         return outcome
+
+    async def discover_all(
+        self, query: SeriesDiscoveryQuery, *, max_results_per_source: int = 1000
+    ) -> SeriesDiscoveryRead:
+        """Collect a bounded candidate set for interactive sorting and pagination."""
+        if query.mode != "interactive" or query.offsets:
+            raise ValueError("Full candidate collection starts at the first interactive page")
+        if (
+            type(max_results_per_source) is not int
+            or not query.limit_per_source <= max_results_per_source <= 1000
+            or max_results_per_source % query.limit_per_source
+        ):
+            raise ValueError("Candidate limits must be complete source pages, at most 1000 rows")
+        semaphore = asyncio.Semaphore(self.concurrency)
+        deadline = asyncio.get_running_loop().time() + self.total_timeout
+
+        async def collect(source: MetadataSource) -> tuple[SourcePage, SourceOutcome]:
+            handle = _SourceHandle()
+            try:
+                return await self._collect_source(
+                    source, query, semaphore, deadline, max_results_per_source, handle
+                )
+            finally:
+                await self._close_source(source, handle)
+
+        tasks = [asyncio.create_task(collect(source)) for source in self._ordered_sources(query)]
+        try:
+            pages = await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        # Group only after collecting each source: a preferred source's later
+        # page must still win over the same identity on another source's first.
+        return self._group_pages(pages)
+
+    async def _collect_source(
+        self,
+        source: MetadataSource,
+        query: SeriesDiscoveryQuery,
+        semaphore: asyncio.Semaphore,
+        deadline: float,
+        max_results: int,
+        handle: _SourceHandle,
+    ) -> tuple[SourcePage, SourceOutcome]:
+        rows: list[ProviderSeriesRead] = []
+        offset = rejected = 0
+        total = None
+        while True:
+            request = query.model_copy(
+                update={"sources": [source], "offsets": {source: offset}, "search_mode": "full"}
+            )
+            page, outcome = await self._run(source, request, semaphore, deadline, handle)
+            rows.extend(page.results)
+            total = page.total if page.total is not None else total
+            rejected += page.rejected_results
+            outcome.total, outcome.rejected_results = total, rejected
+            readable_page = outcome.status in {SourceStatus.OK, SourceStatus.EMPTY} or (
+                outcome.status is SourceStatus.INCOMPATIBLE_RESPONSE and page.rejected_results > 0
+            )
+            if not readable_page:
+                if offset:
+                    outcome.next_offset, outcome.truncated = offset, True
+                break
+            if rejected:
+                outcome.status = SourceStatus.INCOMPATIBLE_RESPONSE
+            elif rows:
+                outcome.status = SourceStatus.OK
+            cursor = page.next_offset
+            if cursor is None:
+                break
+            if type(cursor) is not int or cursor != offset + query.limit_per_source:
+                outcome.status = SourceStatus.INCOMPATIBLE_RESPONSE
+                outcome.next_offset, outcome.truncated = None, True
+                break
+            if cursor >= max_results or page.truncated:
+                outcome.truncated = True
+                break
+            offset = cursor
+        return SourcePage(rows), outcome
 
     async def series(
         self, source: MetadataSource, external_id: str, *, validator: str | None = None

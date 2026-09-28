@@ -10,8 +10,12 @@ from pydantic import SecretStr
 from pullbox.core.metadata_identity import MetadataEntityKind, MetadataSource
 from pullbox.core.provider_cooldown import ProviderCooldown
 from pullbox.providers.metadata.metron import MetronSource
-from pullbox.schemas.metadata_sources import SeriesDiscoveryQuery, SourceStatus
-from pullbox.services.metadata_discovery import MetadataSourceError, MetadataSourceRegistry
+from pullbox.schemas.metadata_sources import SeriesDiscoveryQuery, SourceCapability, SourceStatus
+from pullbox.services.metadata_discovery import (
+    MetadataSourceError,
+    MetadataSourceRegistry,
+    SourceRegistration,
+)
 from pullbox.services.metadata_sources import SourceRuntime, default_policy
 
 TOKEN = "synthetic-metron-token-not-a-credential"
@@ -122,6 +126,47 @@ async def test_search_slices_fixed_hundred_row_pages_without_losing_rows():
         assert result.total == 130 and result.next_offset == 120 and seen == [1, 2]
     finally:
         await client.close()
+
+
+async def test_full_collection_walks_actual_metron_pages_without_repeating_network_pages():
+    seen, clients = [], []
+
+    def handle(request):
+        page = int(request.url.params["page"])
+        seen.append(page)
+        rows = [series_row(i) for i in range(1, 131)][(page - 1) * 100 : page * 100]
+        return httpx.Response(
+            200,
+            json=envelope(
+                rows,
+                count=130,
+                next_url="https://metron.cloud/api/series/?name=Fixture&page=2"
+                if page == 1
+                else None,
+            ),
+        )
+
+    def build(_):
+        client = source(handle)
+        clients.append(client)
+        return client
+
+    slug = MetadataSource.METRON_API
+    policy = default_policy(slug).model_copy(update={"enabled": True})
+    registry = MetadataSourceRegistry(
+        [SourceRuntime(policy)],
+        factories={slug: SourceRegistration(frozenset([SourceCapability.SERIES_SEARCH]), build)},
+    )
+    result = await registry.discover_all(
+        SeriesDiscoveryQuery(query="Fixture", limit_per_source=100)
+    )
+    assert [int(item.external_id) for item in result.results] == list(range(1, 131))
+    assert seen == [1, 2]
+    assert len(clients) == 1
+    assert result.sources[0].total == 130
+    assert result.sources[0].status is SourceStatus.OK
+    assert result.sources[0].next_offset is None and not result.sources[0].truncated
+    assert all(client.client.is_closed for client in clients)
 
 
 @pytest.mark.parametrize("bad", [True, 0, -1, "4050-12", 1.5])

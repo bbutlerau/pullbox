@@ -73,6 +73,122 @@ async def test_api_adapter_uses_real_page_and_normalizes_identity_not_urls():
     assert adapter.provider._client.is_closed
 
 
+async def test_full_api_search_keeps_volumes_filter_and_offset_semantics():
+    calls = []
+
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "status_code": 1,
+                "number_of_total_results": 31,
+                "results": [{"id": 42, "name": "The Punisher", "start_year": "2004"}],
+            },
+        )
+
+    adapter = await api_adapter(handle)
+    try:
+        result = await adapter.search(
+            SeriesDiscoveryQuery(
+                query="The Punisher", year=2004, limit_per_source=10, search_mode="full"
+            ),
+            20,
+        )
+        assert calls[0].url.path == "/api/volumes/"
+        assert calls[0].url.params["filter"] == "name:The,name:Punisher"
+        assert calls[0].url.params["sort"] == "date_last_updated:desc"
+        assert calls[0].url.params["limit"] == "10"
+        assert calls[0].url.params["offset"] == "20"
+        assert "page" not in calls[0].url.params
+        assert "query" not in calls[0].url.params
+        assert result.total == 31 and result.next_offset == 30
+        assert result.results[0].external_id == "42"
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"status_code": 1, "results": []},
+        {"status_code": 1, "results": [], "number_of_total_results": True},
+        {"status_code": 1, "results": [{"id": 42, "name": "Good"}], "number_of_total_results": 0},
+    ],
+)
+async def test_full_search_rejects_invalid_success_envelopes(payload):
+    adapter = await api_adapter(lambda request: httpx.Response(200, json=payload))
+    try:
+        with pytest.raises(MetadataSourceError) as raised:
+            await adapter.search(SeriesDiscoveryQuery(query="test", search_mode="full"), 0)
+        assert raised.value.status is SourceStatus.INCOMPATIBLE_RESPONSE
+    finally:
+        await adapter.close()
+
+
+async def test_full_search_preserves_good_siblings_and_reports_rejected_identities():
+    adapter = await api_adapter(
+        lambda request: httpx.Response(
+            200,
+            json={
+                "status_code": 1,
+                "number_of_total_results": 2,
+                "results": [{"id": 0, "name": "Bad"}, {"id": 42, "name": "Good"}],
+            },
+        )
+    )
+    try:
+        result = await adapter.search(SeriesDiscoveryQuery(query="test", search_mode="full"), 0)
+        assert [item.external_id for item in result.results] == ["42"]
+        assert result.rejected_results == 1
+    finally:
+        await adapter.close()
+
+
+async def test_full_collection_walks_actual_volume_pages_and_closes_each_transport():
+    calls = []
+
+    def handle(request):
+        offset = int(request.url.params["offset"])
+        calls.append((request.url.path, offset))
+        return httpx.Response(
+            200,
+            json={
+                "status_code": 1,
+                "number_of_total_results": 103,
+                "results": [
+                    {"id": identifier, "name": f"Fixture {identifier}"}
+                    for identifier in range(offset + 1, min(offset + 101, 104))
+                ],
+            },
+        )
+
+    adapters = [await api_adapter(handle)]
+    available = iter(adapters)
+    source = Source.COMICVINE_API
+    registry = MetadataSourceRegistry(
+        [SourceRuntime(default_policy(source))],
+        factories={
+            source: SourceRegistration(
+                frozenset([SourceCapability.SERIES_SEARCH]), lambda _: next(available)
+            )
+        },
+    )
+    try:
+        result = await registry.discover_all(
+            SeriesDiscoveryQuery(query="Fixture", limit_per_source=100)
+        )
+        assert [int(item.external_id) for item in result.results] == list(range(1, 104))
+        assert calls == [("/api/volumes/", 0), ("/api/volumes/", 100)]
+        assert result.sources[0].total == 103
+        assert result.sources[0].status is SourceStatus.OK
+        assert result.sources[0].next_offset is None and not result.sources[0].truncated
+        assert all(adapter.provider._client.is_closed for adapter in adapters)
+    finally:
+        for adapter in adapters:
+            await adapter.close()
+
+
 @pytest.mark.parametrize(
     "code,status", [(100, SourceStatus.AUTHENTICATION_FAILED), (107, SourceStatus.RATE_LIMITED)]
 )

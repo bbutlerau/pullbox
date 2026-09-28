@@ -169,14 +169,19 @@ class ComicVineApiSource:
 
     async def search(self, query: SeriesDiscoveryQuery, offset: int) -> SourcePage:
         try:
-            rows, total = await self.provider.search_series_page(
-                query.query,
-                query.year,
-                limit=query.limit_per_source,
-                offset=offset,
-                suppress_errors=False,
-                strict_response=True,
-            )
+            if query.search_mode == "full":
+                rows, total = await self.provider.search_series_candidates_page(
+                    query.query, limit=query.limit_per_source, offset=offset
+                )
+            else:
+                rows, total = await self.provider.search_series_page(
+                    query.query,
+                    query.year,
+                    limit=query.limit_per_source,
+                    offset=offset,
+                    suppress_errors=False,
+                    strict_response=True,
+                )
             if total < len(rows) or len(rows) > query.limit_per_source:
                 raise ValueError("Inconsistent source page")
             return _page(

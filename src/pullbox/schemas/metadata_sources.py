@@ -112,6 +112,7 @@ class SeriesDiscoveryQuery(BaseModel):
     year: int | None = Field(default=None, ge=1, le=9999)
     sources: list[MetadataSource] | None = Field(default=None, min_length=1, max_length=5)
     mode: Literal["interactive", "automatic"] = "interactive"
+    search_mode: Literal["preview", "full"] = "preview"
     limit_per_source: int = Field(default=20, ge=1, le=100)
     offsets: dict[MetadataSource, Annotated[int, Field(ge=0, le=10000, strict=True)]] = Field(
         default_factory=dict, max_length=5

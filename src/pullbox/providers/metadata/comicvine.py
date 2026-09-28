@@ -669,6 +669,47 @@ class ComicVineProvider:
         log.debug("comicvine_search_results", count=len(results), total_results=total_results)
         return results, total_results
 
+    async def search_series_candidates_page(
+        self,
+        query: str,
+        *,
+        limit: int = _GLOBAL_SERIES_SEARCH_BATCH_SIZE,
+        offset: int = 0,
+        strict_response: bool = True,
+    ) -> tuple[list[SeriesSearchResult], int]:
+        """Read one volume-filter page without hiding failures as empty matches."""
+        if type(limit) is not int or not 1 <= limit <= _GLOBAL_SERIES_SEARCH_BATCH_SIZE:
+            raise ValueError("Invalid ComicVine candidate page size")
+        if type(offset) is not int or offset < 0 or (strict_response and offset > 10000):
+            raise ValueError("Invalid ComicVine candidate offset")
+        filter_value = _comicvine_name_filter(query)
+        if not filter_value:
+            return [], 0
+        data = await self._request(
+            "/volumes/",
+            {
+                "filter": filter_value,
+                "field_list": (
+                    "id,name,start_year,publisher,count_of_issues,image,"
+                    "description,deck,site_detail_url"
+                ),
+                "sort": "date_last_updated:desc",
+                "limit": limit,
+                "offset": offset,
+            },
+        )
+        if strict_response and (
+            not isinstance(data.get("results"), list)
+            or type(data.get("number_of_total_results")) is not int
+            or data["number_of_total_results"] < 0
+        ):
+            raise ValueError("Invalid ComicVine candidate response")
+        items = list(data.get("results", []))
+        total = _safe_int(data.get("number_of_total_results")) or 0
+        if strict_response and (len(items) > limit or (items and total < offset + len(items))):
+            raise ValueError("Inconsistent ComicVine candidate page")
+        return [_series_search_result_from_item(item) for item in items], total
+
     async def search_series_globally(
         self,
         query: str,
@@ -717,7 +758,6 @@ class ComicVineProvider:
             inflight = asyncio.create_task(
                 self._fetch_global_series_search(
                     normalized_query,
-                    filter_value,
                     normalized_max,
                     normalized_batch,
                     cache_key,
@@ -744,7 +784,6 @@ class ComicVineProvider:
     async def _fetch_global_series_search(
         self,
         normalized_query: str,
-        filter_value: str,
         normalized_max: int,
         normalized_batch: int,
         cache_key: tuple[str, int, int],
@@ -759,15 +798,6 @@ class ComicVineProvider:
         )
         log.debug("comicvine_global_series_search")
 
-        params_base: dict[str, Any] = {
-            "filter": filter_value,
-            "field_list": (
-                "id,name,start_year,publisher,count_of_issues,image,"
-                "description,deck,site_detail_url"
-            ),
-            "sort": "date_last_updated:desc",
-        }
-
         results: list[SeriesSearchResult] = []
         seen_ids: set[str] = set()
         total_results = 0
@@ -775,13 +805,10 @@ class ComicVineProvider:
 
         while offset < normalized_max:
             limit = min(normalized_batch, normalized_max - offset)
-            params = {
-                **params_base,
-                "limit": limit,
-                "offset": offset,
-            }
             try:
-                data = await self._request("/volumes/", params)
+                items, page_total = await self.search_series_candidates_page(
+                    normalized_query, limit=limit, offset=offset, strict_response=False
+                )
             except ComicVineError:
                 log.exception("comicvine_global_series_search_failed")
                 if suppress_errors:
@@ -789,14 +816,11 @@ class ComicVineProvider:
                 raise
 
             if offset == 0:
-                total_results = _safe_int(data.get("number_of_total_results")) or 0
-
-            items = list(data.get("results", []))
+                total_results = page_total
             if not items:
                 break
 
-            for item in items:
-                result = _series_search_result_from_item(item)
+            for result in items:
                 if result.provider_id in seen_ids:
                     continue
                 seen_ids.add(result.provider_id)
