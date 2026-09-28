@@ -23,6 +23,7 @@ from pullbox.schemas.metadata_sources import (
     MetadataDomain,
     ProviderSeriesRead,
     SourceCapability,
+    SourceOutcome,
     SourceStatus,
 )
 from pullbox.services.cover_resolver import resolve_covers_dir
@@ -60,6 +61,17 @@ logger = structlog.get_logger(__name__)
 class SeriesRefreshError(ValueError):
     """The refresh requires a new read or an explicit identity decision."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        outcomes: tuple[SourceOutcome, ...] = (),
+        retry_after_seconds: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.outcomes = outcomes
+        self.retry_after_seconds = retry_after_seconds
+
 
 @asynccontextmanager
 async def source_series_refresh_transaction(
@@ -78,15 +90,21 @@ async def source_series_refresh_transaction(
         await session.rollback()
         raise
     if cover_url:
-        try:
-            await _refresh_artwork(session, series_id, cover_url, covers)
-        except (OSError, SQLAlchemyError) as exc:
-            # Metadata is already committed; an optional cache write is retryable.
-            logger.warning(
-                "metadata_series_artwork_refresh_failed",
-                series_id=series_id,
-                error_type=type(exc).__name__,
-            )
+        await refresh_series_artwork(session, series_id, cover_url, covers)
+
+
+async def refresh_series_artwork(
+    session: AsyncSession, series_id: int, url: str, covers: Path
+) -> None:
+    """Best-effort optional cache work after the caller commits metadata."""
+    try:
+        await _refresh_artwork(session, series_id, url, covers)
+    except (OSError, SQLAlchemyError) as exc:
+        logger.warning(
+            "metadata_series_artwork_refresh_failed",
+            series_id=series_id,
+            error_type=type(exc).__name__,
+        )
 
 
 async def _refresh_artwork(session: AsyncSession, series_id: int, url: str, covers: Path) -> None:
@@ -171,7 +189,7 @@ async def refresh_series_from_sources(
                 if isinstance(item, ProviderSeriesRead)
             }
             failed = {
-                item.source
+                item.source: item
                 for item in fetched.outcomes
                 if item.status not in {SourceStatus.OK, SourceStatus.NOT_QUERIED}
             }
@@ -229,7 +247,8 @@ async def refresh_series_from_sources(
         ) from exc
     except TimeoutError as exc:
         raise SeriesRefreshError(
-            "Metadata refresh timed out. No library metadata was changed; retry later."
+            "Metadata refresh timed out. No library metadata was changed; retry later.",
+            retry_after_seconds=300,
         ) from exc
 
 
@@ -237,7 +256,7 @@ async def _catalog(
     registry: MetadataSourceRegistry,
     state: SeriesRefreshState,
     profiles: dict[MetadataSource, ProviderSeriesRead],
-    failed: set[MetadataSource],
+    failed: dict[MetadataSource, SourceOutcome],
 ) -> SourceSeriesBundle:
     known = {item.namespace: item.external_id for item in state.series.identities}
     sources = sorted(
@@ -275,8 +294,13 @@ async def _catalog(
             logger.info(
                 "metadata_series_catalog_unavailable", source=source.value, status=exc.status.value
             )
+            failed[source] = SourceOutcome(
+                source=source, status=exc.status, retry_after_seconds=exc.retry_after_seconds
+            )
     raise SeriesRefreshError(
-        "No configured source could supply a complete issue catalog. Check source status and retry."
+        "No configured source could supply a complete issue catalog. "
+        "Check source status and retry.",
+        outcomes=tuple(failed.values()),
     )
 
 

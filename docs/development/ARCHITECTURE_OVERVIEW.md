@@ -650,7 +650,16 @@ checks a two-minute budget between series; an individual series has a separate
 after restart. Provider throttling pauses the sweep at its saved position instead
 of repeatedly failing every remaining series. Series metadata writes are committed
 before subsequent cover or issue-provider waits.
-Removing the ComicVine key stops the active sweep and clears its continuation.
+The scheduled metadata refresh selects verified identities backed by executable,
+configured sources, including native Metron and local ComicVine without an API
+key. It uses the same revision-checked writer as manual refresh but fills gaps
+only, preserving existing descriptive values and user overrides. Its metadata
+write and sweep checkpoint commit together before search scheduling or optional
+cover-cache work. Structured source failures preserve durable retry deadlines;
+disabling the last eligible source clears the continuation.
+The separate daily issue sweep still uses the legacy ComicVine recent/full
+catalog path; removing its ComicVine key stops that sweep and clears its
+continuation. Source-aware recent-catalog integration remains required.
 Post-restore aftercare keeps its recovery marker while continuation batches remain
 active; it observes completion without retaining a database transaction between checks.
 Cancellation leaves the marker and sweep checkpoint available for the next startup.

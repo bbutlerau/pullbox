@@ -34,6 +34,13 @@ from pullbox.database import get_session_factory
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.series import IssueCatalogState, Series, SeriesStatus
 from pullbox.providers.metadata.comicvine import ComicVineError, ComicVineProvider
+from pullbox.schemas.metadata_sources import SourceStatus
+from pullbox.services.metadata_scheduled_refresh import (
+    ScheduledSeriesRefresh,
+    refresh_scheduled_series,
+    scheduled_series_eligibility,
+)
+from pullbox.services.metadata_series_refresh import SeriesRefreshError, refresh_series_artwork
 from pullbox.services.metadata_service import MetadataService
 from pullbox.tasks.metadata_sweep_state import load_sweep, save_sweep, schedule_sweep, start_sweep
 
@@ -262,6 +269,30 @@ def _provider_pause_seconds(exc: Exception) -> float | None:
         return 60
     if isinstance(exc, TimeoutError):
         return 300
+    if isinstance(exc, SeriesRefreshError):
+        if exc.retry_after_seconds is not None:
+            return float(max(60, exc.retry_after_seconds))
+        delays = [
+            max(
+                60,
+                outcome.retry_after_seconds
+                or (
+                    3600
+                    if outcome.status
+                    in {SourceStatus.RATE_LIMITED, SourceStatus.AUTHENTICATION_FAILED}
+                    else 300
+                ),
+            )
+            for outcome in exc.outcomes
+            if outcome.status
+            in {
+                SourceStatus.RATE_LIMITED,
+                SourceStatus.AUTHENTICATION_FAILED,
+                SourceStatus.TIMEOUT,
+                SourceStatus.UNAVAILABLE,
+            }
+        ]
+        return float(min(delays)) if delays else None
     details = exc.details or {} if isinstance(exc, ProviderError) else {}
     status = exc.status_code if isinstance(exc, ComicVineError) else details.get("status_code")
     retryable = exc.retryable if isinstance(exc, ComicVineError) else details.get("retryable")
@@ -281,8 +312,9 @@ async def _run_metadata_sweep(task_id: str) -> TaskExecutionResult:
     series_to_search: list[int] = []
     started = time.monotonic()
     async with factory() as session:
-        api_key = await get_comicvine_api_key(session)
-        if not api_key:
+        source_refresh = task_id == "refresh_metadata"
+        api_key = None if source_refresh else await get_comicvine_api_key(session)
+        if not source_refresh and not api_key:
             state = await load_sweep(session, task_id)
             if state.active:
                 state.active = False
@@ -298,15 +330,17 @@ async def _run_metadata_sweep(task_id: str) -> TaskExecutionResult:
             )
             return TaskExecutionResult(status="completed")
 
-        state = await start_sweep(session, task_id)
-        schedule_sweep(task_id, state)
-        if state.retry_at > datetime.now(UTC).timestamp():
-            schedule_sweep(task_id, state)
-            return TaskExecutionResult(status="waiting")
-
+        eligible = (
+            await scheduled_series_eligibility(
+                session, gcd_api_enabled=get_settings().metadata_gcd_api_v2_enabled
+            )
+            if source_refresh
+            else Series.comicvine_id.isnot(None)
+        )
+        state = await start_sweep(session, task_id, eligible=eligible)
         refresh_days = _metadata_refresh_days(settings)
         predicates = [
-            Series.comicvine_id.isnot(None),
+            eligible,
             Series.id > state.cursor,
             Series.id <= state.upper_bound,
         ]
@@ -314,6 +348,7 @@ async def _run_metadata_sweep(task_id: str) -> TaskExecutionResult:
             predicates.extend(
                 [
                     Series.monitored.is_(True),
+                    Series.issue_catalog_state != IssueCatalogState.HYDRATING,
                     or_(
                         Series.metadata_last_refreshed.is_(None),
                         Series.metadata_last_refreshed
@@ -339,6 +374,10 @@ async def _run_metadata_sweep(task_id: str) -> TaskExecutionResult:
             schedule_sweep(task_id, state)
             return TaskExecutionResult(status="completed")
 
+        schedule_sweep(task_id, state)
+        if state.retry_at > datetime.now(UTC).timestamp():
+            return TaskExecutionResult(status="waiting")
+
         counts = {
             int(series_id): int(count)
             for series_id, count in (
@@ -349,7 +388,9 @@ async def _run_metadata_sweep(task_id: str) -> TaskExecutionResult:
                 )
             ).all()
         }
-        metadata_svc = await _create_metadata_service(api_key, settings, session)
+        metadata_svc = (
+            await _create_metadata_service(api_key, settings, session) if api_key else None
+        )
         await session.commit()
         processed = failed = new_issues = 0
         paused = False
@@ -367,14 +408,13 @@ async def _run_metadata_sweep(task_id: str) -> TaskExecutionResult:
                 try:
                     previous_cursor = state.cursor
                     search_after_commit = False
+                    refreshed: ScheduledSeriesRefresh | None = None
                     async with asyncio.timeout(_METADATA_SERIES_SECONDS):
                         if task_id == "refresh_metadata":
-                            await metadata_svc.refresh_series(
-                                session,
-                                series_id,
-                                commit_before_provider_wait=True,
-                            )
+                            refreshed = await refresh_scheduled_series(session, series_id)
+                            search_after_commit = refreshed.search_wanted
                         else:
+                            assert metadata_svc is not None
                             created, _mode, _sc, _mc = await _sync_one_series(
                                 metadata_svc,
                                 session,
@@ -395,10 +435,11 @@ async def _run_metadata_sweep(task_id: str) -> TaskExecutionResult:
                     state.retry_at = 0
                     await save_sweep(session, task_id, state)
                     await session.commit()
-                    if search_after_commit:
+                    if search_after_commit and not source_refresh:
                         series_to_search.append(series_id)
                     processed += 1
                 except Exception as exc:
+                    refreshed = None
                     await session.rollback()
                     state.cursor = previous_cursor
                     # Rollback expires ORM objects; use the stable ID, not their fields.
@@ -423,7 +464,28 @@ async def _run_metadata_sweep(task_id: str) -> TaskExecutionResult:
                     state.cursor = series_id
                     await save_sweep(session, task_id, state)
                     await session.commit()
-                    logger.exception(f"{task_id}_series_failed", series_id=series_id)
+                    if isinstance(exc, SeriesRefreshError):
+                        logger.warning(
+                            f"{task_id}_series_failed",
+                            series_id=series_id,
+                            reason=str(exc),
+                            source_statuses={
+                                item.source.value: item.status.value for item in exc.outcomes
+                            },
+                        )
+                    else:
+                        logger.exception(f"{task_id}_series_failed", series_id=series_id)
+
+                # Artwork is optional and cannot roll back the committed cursor
+                # or postpone searches for newly committed wanted issues.
+                if refreshed is not None:
+                    new_issues += refreshed.added
+                    if refreshed.search_wanted:
+                        _schedule_new_issue_search(series_id)
+                    if refreshed.cover_url:
+                        await refresh_series_artwork(
+                            session, series_id, refreshed.cover_url, refreshed.covers
+                        )
 
             state.active = paused or processed < len(ids)
             await save_sweep(session, task_id, state)
@@ -434,16 +496,8 @@ async def _run_metadata_sweep(task_id: str) -> TaskExecutionResult:
                 await close()
 
     if series_to_search:
-        from pullbox.tasks.search_task import search_series_issues
-
         for sid in series_to_search:
-            get_scheduler()._scheduler.add_job(
-                search_series_issues,
-                trigger="date",
-                args=[sid],
-                id=f"search_new_{sid}_{int(time.time())}",
-                misfire_grace_time=300,
-            )
+            _schedule_new_issue_search(sid)
     schedule_sweep(task_id, state)
     logger.info(
         f"{task_id}_batch_complete",
@@ -455,6 +509,18 @@ async def _run_metadata_sweep(task_id: str) -> TaskExecutionResult:
         waiting=state.active,
     )
     return TaskExecutionResult(status="waiting" if state.active else "completed")
+
+
+def _schedule_new_issue_search(series_id: int) -> None:
+    from pullbox.tasks.search_task import search_series_issues
+
+    get_scheduler()._scheduler.add_job(
+        search_series_issues,
+        trigger="date",
+        args=[series_id],
+        id=f"search_new_{series_id}_{int(time.time())}",
+        misfire_grace_time=300,
+    )
 
 
 async def sync_new_issues() -> TaskExecutionResult:

@@ -16,6 +16,7 @@ from pullbox.models.series import Series
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.sql.elements import ColumnElement
 
 TASK_IDS = ("sync_new_issues", "refresh_metadata")
 
@@ -48,12 +49,13 @@ async def load_sweep(session: AsyncSession, task_id: str) -> MetadataSweep:
     return MetadataSweep()
 
 
-async def start_sweep(session: AsyncSession, task_id: str) -> MetadataSweep:
+async def start_sweep(
+    session: AsyncSession, task_id: str, *, eligible: ColumnElement[bool] | None = None
+) -> MetadataSweep:
     state = await load_sweep(session, task_id)
     if not state.active:
-        upper = await session.scalar(
-            select(func.max(Series.id)).where(Series.comicvine_id.isnot(None))
-        )
+        predicate = eligible if eligible is not None else Series.comicvine_id.isnot(None)
+        upper = await session.scalar(select(func.max(Series.id)).where(predicate))
         state = MetadataSweep(upper_bound=upper or 0, active=True)
         await save_sweep(session, task_id, state)
     await session.commit()

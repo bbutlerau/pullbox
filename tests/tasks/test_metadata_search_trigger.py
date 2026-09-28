@@ -17,6 +17,7 @@ import contextlib
 import os
 import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -26,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from pullbox.models import Base
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.series import IssueCatalogState, Series, SeriesStatus, SeriesType
+from pullbox.services.metadata_scheduled_refresh import ScheduledSeriesRefresh
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -288,6 +290,11 @@ def _sync_patches(
     scheduler: MagicMock,
 ) -> Generator[MagicMock, None, None]:
     """Context manager that patches all sync_new_issues dependencies."""
+
+    async def refresh(session, series_id):
+        await metadata_svc.refresh_series(session, series_id)
+        return ScheduledSeriesRefresh(0, False, None, Path("/unused-test-covers"))
+
     with (
         patch(f"{_MOD}.get_settings") as mock_settings,
         patch(f"{_MOD}.get_session_factory", return_value=db_factory),
@@ -301,6 +308,11 @@ def _sync_patches(
             return_value=metadata_svc,
         ),
         patch(f"{_MOD}.get_scheduler", return_value=scheduler),
+        patch(
+            f"{_MOD}.scheduled_series_eligibility",
+            AsyncMock(return_value=Series.comicvine_id.isnot(None)),
+        ),
+        patch(f"{_MOD}.refresh_scheduled_series", side_effect=refresh),
         patch("pullbox.tasks.metadata_sweep_state.get_scheduler", return_value=scheduler),
     ):
         mock_settings.return_value = MagicMock()
