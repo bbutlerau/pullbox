@@ -17,6 +17,7 @@ def preview(source="metron_api", identifier="42", **updates):
         "source": source,
         "external_id": identifier,
         "source_revision": 7,
+        "folder_preview": "Test publisher/Verified series [2024]",
         "series": {
             "status": "ok",
             "data": {
@@ -69,11 +70,19 @@ def test_preview_then_add_sends_only_source_identity_revision_and_root(
     expect(button).to_be_disabled()
     expect(page.get_by_test_id("add-series-preview-status")).to_contain_text("Loading preview")
     assert len(held) == 1
-    assert held[0].request.post_data_json == {"source": source, "external_id": "42"}
+    root_id = page.evaluate("Alpine.$data(document.getElementById('add-series-app')).libraryRootId")
+    assert held[0].request.post_data_json == {
+        "source": source,
+        "external_id": "42",
+        "library_root_id": int(root_id),
+    }
     assert held[0].request.headers.get("x-csrf-token")
     held[0].fulfill(json=preview(source))
     expect(page.get_by_test_id("add-series-dialog")).to_contain_text("Verified series (2024)")
     expect(button).to_be_enabled()
+    expect(page.get_by_test_id("add-series-folder-preview")).to_have_text(
+        "Test publisher/Verified series [2024]"
+    )
     button.click()
     expect(page.get_by_test_id("add-series-dialog")).not_to_be_visible()
     assert adds == [
@@ -134,7 +143,7 @@ def test_closed_preview_cannot_overwrite_new_selection(authed_page, seeded_serve
     )
 
 
-@pytest.mark.parametrize("failure", ["http", "identity", "revision", "issues"])
+@pytest.mark.parametrize("failure", ["http", "identity", "revision", "issues", "folder"])
 def test_invalid_preview_cannot_enable_add(authed_page, seeded_server, failure):
     page = authed_page
     result = preview()
@@ -144,6 +153,8 @@ def test_invalid_preview_cannot_enable_add(authed_page, seeded_server, failure):
         result["source_revision"] = -1
     elif failure == "issues":
         result["issues"] = {"status": "ok", "data": None}
+    elif failure == "folder":
+        result["folder_preview"] = None
     page.route(
         "**/api/v1/metadata/series/preview",
         lambda route: route.fulfill(
@@ -210,6 +221,7 @@ def test_real_local_search_preview_add_and_existing_owner(
     dialog = page.get_by_test_id("add-series-dialog")
     button = dialog.get_by_role("button", name="Add series", exact=True)
     expect(button).to_be_enabled()
+    folder = page.get_by_test_id("add-series-folder-preview").inner_text()
     with page.expect_response(
         lambda response: (
             response.url.endswith("/api/v1/series") and response.request.method == "POST"
@@ -221,6 +233,7 @@ def test_real_local_search_preview_add_and_existing_owner(
     record = response.json()
     assert record["comicvine_id"] == 10 and record["title"] == "Batman"
     assert Path(record["path"]).is_dir()
+    assert Path(record["path"]).name == folder
     expect(dialog).not_to_be_visible()
     expect(page.get_by_test_id("add-series-existing-title-link")).to_have_attribute(
         "href", f"/series/{record['id']}"
@@ -229,7 +242,9 @@ def test_real_local_search_preview_add_and_existing_owner(
 
 
 @pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 1280), ("light", 320)])
-def test_preview_dialog_keyboard_reflow_and_accessibility(authed_page, seeded_server, theme, width):
+def test_preview_dialog_keyboard_reflow_and_accessibility(
+    authed_page, seeded_server, browser_name, theme, width
+):
     page = authed_page
     page.set_viewport_size({"width": width, "height": 900})
     page.emulate_media(reduced_motion="reduce")
@@ -239,12 +254,15 @@ def test_preview_dialog_keyboard_reflow_and_accessibility(authed_page, seeded_se
     page.goto(f"{seeded_server}/series/add")
     page.evaluate("theme => applyTheme(theme)", theme)
     trigger = page.get_by_test_id("add-series-search-input")
+    expect(trigger).to_be_visible()
     trigger.focus()
+    expect(trigger).to_be_focused()
     open_result(page)
     dialog = page.get_by_test_id("add-series-dialog")
     expect(dialog.get_by_role("button", name="Add series", exact=True)).to_be_enabled()
     assert page.evaluate("window.injected") is None
     assert dialog.evaluate("el => el.scrollWidth <= el.clientWidth + 1")
+    expect(dialog).to_be_focused()
     page.keyboard.press("Shift+Tab")
     expect(dialog.get_by_role("button", name="Add series", exact=True)).to_be_focused()
     page.keyboard.press("Tab")
@@ -252,7 +270,10 @@ def test_preview_dialog_keyboard_reflow_and_accessibility(authed_page, seeded_se
     assert_no_axe_violations(
         page, name=f"source-add-{theme}-{width}", include=["[data-testid='add-series-dialog']"]
     )
-    dialog.screenshot(path=f"test-results/source-add-{theme}-{width}.png", animations="disabled")
+    dialog.screenshot(
+        path=f"output/playwright/source-add-{browser_name}-{theme}-{width}.png",
+        animations="disabled",
+    )
     page.keyboard.press("Escape")
     expect(dialog).not_to_be_visible()
     expect(trigger).to_be_focused()

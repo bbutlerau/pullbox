@@ -338,7 +338,6 @@ async def test_preview_uses_selected_root_naming_without_creating_folders(
                 library_root_id=root_id,
                 source=LibraryRootPolicySource.MANUAL,
                 series_path_template="{Publisher}/{Series} [{ComicVineId}]",
-                series_folder_template="{Series} [{ComicVineId}]",
                 comic_file_template="{Series} {Issue}",
                 annual_file_template="{Series} Annual {Issue}",
                 non_standard_file_template="{Series} {Issue}",
@@ -355,6 +354,60 @@ async def test_preview_uses_selected_root_naming_without_creating_folders(
     assert result.status_code == 200
     assert result.json()["folder_preview"] == "DC/Batman [10]"
     assert list(root_path.iterdir()) == []
+
+
+async def test_preview_rechecks_root_after_provider_work_without_holding_transaction(
+    authenticated_client, sec_db, monkeypatch, tmp_path
+):
+    from pullbox.api.v1 import metadata_sources as routes
+    from pullbox.models.library import LibraryRoot
+    from pullbox.schemas.metadata_sources import MetadataFetch, SeriesPreviewRead, SourceStatus
+
+    async with sec_db.begin() as session:
+        root = LibraryRoot(name="Changing root", path=str(tmp_path))
+        session.add(root)
+        await session.flush()
+        root_id = root.id
+    held = []
+    original = routes.load_source_runtime
+
+    async def load(session, **kwargs):
+        held.append(session)
+        return await original(session, **kwargs)
+
+    async def preview(registry, source, external_id):
+        assert held and not held[0].in_transaction()
+        async with sec_db.begin() as session:
+            root = await session.get(LibraryRoot, root_id)
+            root.enabled = False
+        return SeriesPreviewRead(
+            source=source,
+            external_id=external_id,
+            source_revision=0,
+            series=MetadataFetch(status=SourceStatus.NOT_FOUND),
+            issues=MetadataFetch(status=SourceStatus.NOT_QUERIED),
+        )
+
+    monkeypatch.setattr(routes, "load_source_runtime", load)
+    monkeypatch.setattr(routes, "preview_source_series", preview)
+    result = await authenticated_client.post(
+        "/api/v1/metadata/series/preview",
+        json={"source": "comicvine_local", "external_id": "10", "library_root_id": root_id},
+        headers=csrf(authenticated_client),
+    )
+    assert held, "Validate the root before starting the provider request"
+    assert result.status_code == 409
+    assert "managed library root" in result.text
+
+
+@pytest.mark.parametrize("root_id", [0, -1, True, "1", 1.5, 2**63])
+async def test_preview_rejects_invalid_root_identifiers(authenticated_client, root_id):
+    response = await authenticated_client.post(
+        "/api/v1/metadata/series/preview",
+        json={"source": "comicvine_local", "external_id": "10", "library_root_id": root_id},
+        headers=csrf(authenticated_client),
+    )
+    assert response.status_code == 422
 
 
 @pytest.mark.parametrize("kind", ["missing", "disabled", "reference_only"])

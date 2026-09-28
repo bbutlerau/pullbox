@@ -21,6 +21,7 @@ from pullbox.schemas.metadata_sources import SourceCapability
 from pullbox.services.metadata_discovery import MetadataSourceRegistry, SourceRegistration
 from pullbox.services.metadata_series_add import source_series_add_transaction
 from pullbox.services.metadata_series_adoption import fetch_source_series_bundle
+from pullbox.services.metadata_series_preview import preview_series_folder
 from tests.integration.metadata_identity.test_series_adoption import bundle
 from tests.unit.test_metadata_discovery import runtime
 from tests.unit.test_metron_source import envelope, issue_row, series_row, source
@@ -71,6 +72,32 @@ def titled_bundle(title="Source series", *, publisher="Fixture Press", **updates
             }
         ),
     )
+
+
+@pytest.mark.parametrize("source", [Source.COMICVINE_LOCAL, Source.METRON_API, Source.GCD_LOCAL])
+@pytest.mark.parametrize("issue_count", [None, 12])
+async def test_preview_renders_shared_naming_without_adopting_profile(
+    add_setup, source, issue_count
+):
+    from pullbox.models.publisher import Publisher
+
+    factory, root_id, root_path, _bus, events = add_setup
+    profile = titled_bundle().series.model_copy(
+        update={
+            "source": source,
+            "identity_namespace": source.identity_namespace,
+            "issue_count": issue_count,
+        }
+    )
+    async with factory() as session:
+        root = await session.get(LibraryRoot, root_id)
+        assert await preview_series_folder(session, profile, root) == (
+            "Fixture Press/Source series (2024)"
+        )
+        assert not session.new and not session.dirty
+        for model in (Series, Issue, Publisher, SeriesIdentityEvent):
+            assert await session.scalar(select(func.count()).select_from(model)) == 0
+    assert list(root_path.iterdir()) == [] and not events
 
 
 async def test_http_registry_to_committed_series_and_event_without_comicvine(add_setup):

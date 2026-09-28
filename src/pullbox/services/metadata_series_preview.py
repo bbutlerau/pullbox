@@ -2,10 +2,49 @@
 
 import asyncio
 
-from pullbox.core.metadata_identity import MetadataEntityKind, MetadataSource
-from pullbox.schemas.metadata_sources import MetadataFetch, SeriesPreviewRead, SourceStatus
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from pullbox.core.library_naming import build_series_relative_path
+from pullbox.core.library_policy import load_effective_library_ingest_policy
+from pullbox.core.metadata_identity import IdentityNamespace, MetadataEntityKind, MetadataSource
+from pullbox.core.naming import classify_series_type
+from pullbox.models.library import LibraryRoot
+from pullbox.models.publisher import Publisher
+from pullbox.models.series import Series, SeriesType
+from pullbox.schemas.metadata_sources import (
+    MetadataFetch,
+    ProviderSeriesRead,
+    SeriesPreviewRead,
+    SourceStatus,
+)
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
 from pullbox.services.metadata_source_reads import source_id
+
+
+async def preview_series_folder(
+    session: AsyncSession, profile: ProviderSeriesRead, root: LibraryRoot
+) -> str:
+    """Render a naming suggestion without adopting metadata or touching the filesystem."""
+    policy = await load_effective_library_ingest_policy(session, root)
+    series = Series(
+        title=profile.title,
+        year_start=profile.year_start,
+        publisher=Publisher(name=profile.publisher) if profile.publisher else None,
+        comicvine_id=int(profile.external_id)
+        if profile.identity_namespace is IdentityNamespace.COMICVINE
+        else None,
+        series_type=SeriesType(profile.series_type)
+        if profile.series_type is not None and profile.series_type in SeriesType
+        else SeriesType(
+            classify_series_type(
+                profile.title,
+                description=profile.description,
+                issue_count=profile.issue_count or 0,
+                year_start=profile.year_start,
+            )
+        ),
+    )
+    return build_series_relative_path(series, policy).as_posix()
 
 
 async def preview_source_series(

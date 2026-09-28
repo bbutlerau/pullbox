@@ -217,6 +217,10 @@ class SeriesPreviewQuery(BaseModel):
         return self
 
 
+class SeriesAddPreviewQuery(SeriesPreviewQuery):
+    library_root_id: int | None = Field(default=None, gt=0, lt=2**63, strict=True)
+
+
 class SeriesIssuePageQuery(SeriesPreviewQuery):
     page: int = Field(default=1, ge=1, le=10000, strict=True)
     source_revision: int = Field(ge=0, lt=2**63, strict=True)
@@ -228,6 +232,7 @@ class SeriesPreviewRead(BaseModel):
     source_revision: int
     series: MetadataFetch[ProviderSeriesRead]
     issues: MetadataFetch[MetadataPage[ProviderIssueRead]]
+    folder_preview: str | None = None
 
 
 class SourceOutcome(BaseModel):

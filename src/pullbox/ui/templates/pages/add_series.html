@@ -155,7 +155,7 @@
         <div x-show="previewLoading" data-testid="add-series-preview-status" role="status" aria-live="polite" class="flex items-center gap-2 text-sm text-pb-text-sec">
           <svg class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
-            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 0 4 12h4z"/>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
           </svg>
           <span>Loading preview...</span>
         </div>
@@ -288,7 +288,9 @@ function addSeries() {
       this.previewController?.abort();
       this.previewLoading = false;
       this.previewReady = false;
-      if (this.trigger?.isConnected) this.trigger.focus({ preventScroll: true });
+      const trigger = this.trigger?.isConnected && this.trigger !== document.body
+        ? this.trigger : document.querySelector('[data-testid="add-series-search-input"]');
+      trigger?.focus({ preventScroll: true });
     },
 
     trapFocus(event) {
@@ -330,10 +332,14 @@ function addSeries() {
       this.sourceRevision = null;
       this.addError = '';
       try {
+        const rootId = Number(this.libraryRootId);
+        if (!Number.isSafeInteger(rootId) || rootId < 1) {
+          throw new Error('Choose an enabled managed library root in Media Management, then retry.');
+        }
         const response = await fetch('/api/v1/metadata/series/preview', {
           method: 'POST', signal: controller.signal,
           headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': readCsrfTokenFromBody() },
-          body: JSON.stringify({ source, external_id: externalId }),
+          body: JSON.stringify({ source, external_id: externalId, library_root_id: rootId }),
         });
         const data = await response.json();
         if (sequence !== this.previewSequence || this.disposed || !this.showModal) return;
@@ -345,18 +351,19 @@ function addSeries() {
             !profile.title || !Number.isSafeInteger(data.source_revision) || data.source_revision < 0) {
           throw new Error('The preview identity changed. Search again before adding this series.');
         }
-        if (this.selectedTitle !== profile.title || this.selectedYear !== profile.year_start) {
-          this.selectedFolderPreview = '';
-        }
         this.selectedTitle = profile.title;
         this.selectedPublisher = profile.publisher || '';
         this.selectedYear = profile.year_start || null;
         this.selectedIssueCount = profile.issue_count ?? null;
-        this.updateFolderPreview();
         if (data.issues?.status !== 'ok' || !data.issues.data ||
             !Number.isSafeInteger(data.issues.data.total) || data.issues.data.total < 0) {
           throw new Error(this.previewFailure(data.issues?.status, data.issues?.retry_after_seconds));
         }
+        if (typeof data.folder_preview !== 'string' || !data.folder_preview.trim()) {
+          throw new Error('The folder preview could not be verified. Retry the preview.');
+        }
+        this.selectedFolderPreview = data.folder_preview;
+        this.updateFolderPreview();
         this.selectedIssueCount = data.issues.data.total;
         this.sourceRevision = data.source_revision;
         this.previewReady = true;
@@ -461,7 +468,11 @@ function selectResult(payload, sourceEl = null) {
   component.addError = '';
   component.showModal = true;
   component.updateFolderPreview();
-  component.$nextTick(() => component.$refs.dialog.focus({ preventScroll: true }));
+  component.$nextTick(() => requestAnimationFrame(() => {
+    if (component.showModal && !component.disposed) {
+      component.$refs.dialog.focus({ preventScroll: true });
+    }
+  }));
   component.loadPreview();
 }
 </script>

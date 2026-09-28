@@ -6,15 +6,17 @@ import structlog
 from fastapi import APIRouter, HTTPException
 
 from pullbox.api.deps import AuthenticatedUser, DbSession, InteractiveOperatorUser, Settings
+from pullbox.core.exceptions import ConfigurationError
 from pullbox.core.metadata_identity import MetadataSource
+from pullbox.models.library import LibraryRoot
 from pullbox.schemas.metadata_sources import (
     MetadataFetch,
     MetadataPage,
     ProviderIssueRead,
+    SeriesAddPreviewQuery,
     SeriesDiscoveryQuery,
     SeriesDiscoveryRead,
     SeriesIssuePageQuery,
-    SeriesPreviewQuery,
     SeriesPreviewRead,
     SourceDescriptor,
     SourcePolicyRead,
@@ -23,7 +25,7 @@ from pullbox.schemas.metadata_sources import (
     SourceTestRead,
 )
 from pullbox.services.metadata_discovery import MetadataSourceRegistry, describe_source_policies
-from pullbox.services.metadata_series_preview import preview_source_series
+from pullbox.services.metadata_series_preview import preview_series_folder, preview_source_series
 from pullbox.services.metadata_sources import (
     SourceConfigurationConflictError,
     load_source_runtime,
@@ -37,6 +39,13 @@ router = APIRouter(prefix="/metadata", tags=["metadata"])
 logger = structlog.get_logger(__name__)
 
 
+async def _preview_root(session: DbSession, root_id: int) -> LibraryRoot:
+    root = await session.get(LibraryRoot, root_id, populate_existing=True)
+    if root is None or not root.enabled or not root.allow_managed_writes:
+        raise HTTPException(409, "Choose an enabled managed library root, then retry the preview.")
+    return root
+
+
 async def _require_source_revision(
     session: DbSession, source: MetadataSource, revision: int
 ) -> None:
@@ -47,8 +56,10 @@ async def _require_source_revision(
 
 @router.post("/series/preview", response_model=SeriesPreviewRead)
 async def preview_series(
-    body: SeriesPreviewQuery, session: DbSession, _user: AuthenticatedUser, settings: Settings
+    body: SeriesAddPreviewQuery, session: DbSession, _user: AuthenticatedUser, settings: Settings
 ) -> SeriesPreviewRead:
+    if body.library_root_id is not None:
+        await _preview_root(session, body.library_root_id)
     runtime = await load_source_runtime(
         session, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled
     )
@@ -59,6 +70,17 @@ async def preview_series(
         body.external_id,
     )
     await _require_source_revision(session, body.source, result.source_revision)
+    if body.library_root_id is not None:
+        root = await _preview_root(session, body.library_root_id)
+        if result.series.data is not None:
+            try:
+                result.folder_preview = await preview_series_folder(
+                    session, result.series.data, root
+                )
+            except (ConfigurationError, ValueError) as exc:
+                raise HTTPException(
+                    409, "Check this library root's naming settings, then retry the preview."
+                ) from exc
     return result
 
 
