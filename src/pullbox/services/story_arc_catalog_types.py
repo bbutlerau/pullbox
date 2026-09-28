@@ -7,6 +7,12 @@ import json
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
 
+from pullbox.core.metadata_identity import (
+    ExternalIdentityRef,
+    IdentityNamespace,
+    MetadataEntityKind,
+    MetadataSource,
+)
 from pullbox.services.story_arc_service import StoryArcValidationError
 
 if TYPE_CHECKING:
@@ -31,6 +37,8 @@ class StoryArcCatalogPreview:
     issues: tuple[IssueMetadata, ...]
     series: tuple[SeriesMetadata, ...]
     fingerprint: str
+    source: MetadataSource = MetadataSource.COMICVINE_API
+    source_revision: int | None = None
 
     @property
     def membership_complete(self) -> bool:
@@ -59,8 +67,8 @@ class StoryArcCatalogRefreshResult:
 def catalog_snapshot(preview: StoryArcCatalogPreview) -> dict[str, object]:
     """Only provider-public data is stored; no credentials or local file paths."""
     metadata = preview.metadata
-    return {
-        "provider": "comicvine",
+    snapshot: dict[str, object] = {
+        "provider": preview.source.identity_namespace.value,
         "provider_id": metadata.provider_id,
         "title": metadata.title,
         "description": metadata.description,
@@ -75,6 +83,9 @@ def catalog_snapshot(preview: StoryArcCatalogPreview) -> dict[str, object]:
         "issues": [asdict(issue) for issue in preview.issues],
         "series": [asdict(series) for series in preview.series],
     }
+    if preview.source is not MetadataSource.COMICVINE_API or preview.source_revision is not None:
+        snapshot.update(source=preview.source.value, source_revision=preview.source_revision)
+    return snapshot
 
 
 def snapshot_fingerprint(preview: StoryArcCatalogPreview) -> str:
@@ -90,3 +101,20 @@ def exact_provider_id(value: str) -> int:
     if number < 1 or str(number) != value or number > 2**63 - 1:
         raise StoryArcCatalogError("invalid_identity", "Provider identity must be a positive ID")
     return number
+
+
+def catalog_provider_id(value: str, source: MetadataSource) -> str:
+    """Keep native IDs as text; only compatibility CV IDs have an integer bound."""
+    try:
+        identity = ExternalIdentityRef(
+            source.identity_namespace, MetadataEntityKind.STORY_ARC, value
+        )
+        if identity.external_id != value:
+            raise ValueError
+        if identity.namespace is IdentityNamespace.COMICVINE:
+            exact_provider_id(value)
+    except ValueError as exc:
+        raise StoryArcCatalogError(
+            "invalid_identity", "Provider identity must be a canonical positive ID"
+        ) from exc
+    return value

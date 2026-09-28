@@ -38,6 +38,7 @@ from pullbox.services.metadata_identity_attachment import (
     IdentityAttachmentConflictError,
     attach_verified_identities,
 )
+from pullbox.services.story_arc_catalog_identity import catalog_owners
 from pullbox.services.story_arc_catalog_types import StoryArcCatalogError, exact_provider_id
 
 if TYPE_CHECKING:
@@ -92,28 +93,35 @@ async def seed_members(
     series_metadata = {series.provider_id: series for series in preview.series}
     result: dict[str, Issue] = {}
     parents: dict[str, Series] = {}
+    parent_owners = await catalog_owners(
+        session,
+        MetadataEntityKind.SERIES,
+        [metadata_by_id[key].series_provider_id for key in provider_ids],
+        preview.source,
+    )
+    issue_owners = await catalog_owners(
+        session, MetadataEntityKind.ISSUE, provider_ids, preview.source
+    )
     for provider_id in provider_ids:
         metadata = metadata_by_id[provider_id]
         parent_key = metadata.series_provider_id
         parent = parents.get(parent_key)
         if parent is None:
-            parent = await session.scalar(
-                select(Series).where(Series.comicvine_id == exact_provider_id(parent_key))
-            )
+            owner_id = parent_owners.get(parent_key)
+            parent = await session.get(Series, owner_id) if owner_id is not None else None
             if parent is None:
                 parent_metadata = series_metadata.get(parent_key)
                 if parent_metadata is None:
                     raise StoryArcCatalogError(
                         "parent_metadata_missing", "Canonical parent changed; refresh the preview"
                     )
-                parent = await _new_series(session, parent_metadata, root)
+                parent = await _new_series(session, parent_metadata, root, preview.source)
             parents[parent_key] = parent
         number, exact_number = parse_issue_number_text(
             metadata.issue_number_text or metadata.issue_number
         )
-        issue = await session.scalar(
-            select(Issue).where(Issue.comicvine_id == exact_provider_id(provider_id))
-        )
+        owner_id = issue_owners.get(provider_id)
+        issue = await session.get(Issue, owner_id) if owner_id is not None else None
         if issue is not None:
             if issue.series_id != parent.id or issue.effective_issue_number_text != exact_number:
                 raise StoryArcCatalogError(
@@ -136,7 +144,9 @@ async def seed_members(
                 detected_type = canonical_issue_type_for_series_type(parent.series_type)
             issue = Issue(
                 series_id=parent.id,
-                comicvine_id=exact_provider_id(provider_id),
+                comicvine_id=exact_provider_id(provider_id)
+                if preview.source.identity_namespace is IdentityNamespace.COMICVINE
+                else None,
                 issue_number=number,
                 issue_number_text=exact_number,
                 title=metadata.title,
@@ -144,9 +154,13 @@ async def seed_members(
                 release_date=_date(metadata.release_date),
                 store_date=_date(metadata.store_date),
                 cover_url=metadata.cover_url,
-                comicvine_url=metadata.comicvine_url,
+                comicvine_url=metadata.comicvine_url
+                if preview.source.identity_namespace is IdentityNamespace.COMICVINE
+                else None,
                 page_count=metadata.page_count,
-                metadata_source="comicvine",
+                metadata_source="comicvine"
+                if preview.source is MetadataSource.COMICVINE_API
+                else preview.source.value,
                 issue_type=detected_type,
                 status=IssueStatus.SKIPPED,
                 manual_skip=False,
@@ -170,10 +184,10 @@ async def _attach_member_identities(
     requests = []
     for kind, rows in ((MetadataEntityKind.SERIES, parents), (MetadataEntityKind.ISSUE, issues)):
         for provider_id, row in rows.items():
-            identity = ExternalIdentityRef(IdentityNamespace.COMICVINE, kind, provider_id)
+            identity = ExternalIdentityRef(preview.source.identity_namespace, kind, provider_id)
             parent = (
                 ExternalIdentityRef(
-                    IdentityNamespace.COMICVINE,
+                    preview.source.identity_namespace,
                     MetadataEntityKind.SERIES,
                     parent_ids[row.series_id],
                 )
@@ -189,7 +203,7 @@ async def _attach_member_identities(
                         ExactIdentityEvidence(
                             identity,
                             IdentityEvidenceKind.PROVIDER_RESULT,
-                            MetadataSource.COMICVINE_API,
+                            preview.source,
                         ),
                         preview.fingerprint,
                         source_identity=identity,
@@ -210,16 +224,16 @@ async def attach_arc_identity(
 ) -> None:
     """Record the validated preview without treating an old receipt as current proof."""
     identity = ExternalIdentityRef(
-        IdentityNamespace.COMICVINE, MetadataEntityKind.STORY_ARC, preview.metadata.provider_id
+        preview.source.identity_namespace,
+        MetadataEntityKind.STORY_ARC,
+        preview.metadata.provider_id,
     )
     request = IdentityEventRequest(
         uuid5(UUID("e5975ab0-13f6-4e1f-b7af-c3a00ccab88b"), preview.fingerprint),
         arc.id,
         IdentityVerificationAction.VERIFY,
         IdentityEventEvidence(
-            ExactIdentityEvidence(
-                identity, IdentityEvidenceKind.PROVIDER_RESULT, MetadataSource.COMICVINE_API
-            ),
+            ExactIdentityEvidence(identity, IdentityEvidenceKind.PROVIDER_RESULT, preview.source),
             preview.fingerprint,
             source_identity=identity,
         ),
@@ -233,30 +247,41 @@ async def attach_arc_identity(
     owner = await session.scalar(
         select(StoryArcExternalIdentity).where(
             StoryArcExternalIdentity.story_arc_id == arc.id,
-            StoryArcExternalIdentity.source == "comicvine",
+            StoryArcExternalIdentity.source == preview.source.identity_namespace.value,
             StoryArcExternalIdentity.namespace == "story_arc",
         )
     )
     assert owner is not None
-    if preview.metadata.comicvine_url is not None:
+    if (
+        preview.source.identity_namespace is IdentityNamespace.COMICVINE
+        and preview.metadata.comicvine_url is not None
+    ):
         owner.source_url = preview.metadata.comicvine_url
     owner.evidence = {**owner.evidence, "snapshot_fingerprint": preview.fingerprint}
     await session.refresh(arc, ["comicvine_id"])
 
 
-async def _new_series(session: AsyncSession, metadata: SeriesMetadata, root: LibraryRoot) -> Series:
+async def _new_series(
+    session: AsyncSession, metadata: SeriesMetadata, root: LibraryRoot, source: MetadataSource
+) -> Series:
     series = Series(
-        comicvine_id=exact_provider_id(metadata.provider_id),
+        comicvine_id=exact_provider_id(metadata.provider_id)
+        if source.identity_namespace is IdentityNamespace.COMICVINE
+        else None,
         title=metadata.title,
         sort_title=metadata.sort_title or metadata.title,
         year_start=metadata.year_start,
         year_end=metadata.year_end,
         description=metadata.description,
         cover_url=metadata.cover_url,
-        comicvine_url=metadata.comicvine_url,
+        comicvine_url=metadata.comicvine_url
+        if source.identity_namespace is IdentityNamespace.COMICVINE
+        else None,
         issue_count=metadata.issue_count or 0,
         status=SeriesStatus.ENDED if metadata.status == "ended" else SeriesStatus.CONTINUING,
-        metadata_source="comicvine_partial",
+        metadata_source="comicvine_partial"
+        if source is MetadataSource.COMICVINE_API
+        else f"{source.value}_partial",
         monitored=False,
         issue_catalog_state=IssueCatalogState.PARTIAL,
         series_type=SeriesType(
@@ -275,7 +300,12 @@ async def _new_series(session: AsyncSession, metadata: SeriesMetadata, root: Lib
     policy = await load_effective_library_ingest_policy(session, root)
     path = Path(root.path) / build_series_relative_path(series, policy)
     if await _path_claimed(session, path):
-        path = path.with_name(f"{path.name} [cv-{metadata.provider_id}]")
+        label = (
+            "cv"
+            if source.identity_namespace is IdentityNamespace.COMICVINE
+            else source.identity_namespace.value
+        )
+        path = path.with_name(f"{path.name} [{label}-{metadata.provider_id}]")
         if await _path_claimed(session, path):
             raise StoryArcCatalogError(
                 "canonical_path_collision", "Canonical series path is already in use"
