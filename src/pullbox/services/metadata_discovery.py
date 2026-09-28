@@ -28,6 +28,7 @@ from pullbox.schemas.metadata_sources import (
     StoryArcDiscoveryRead,
     StoryArcSourceOutcome,
 )
+from pullbox.services.metadata_account_admission import AccountAttempt, account_request
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -173,15 +174,36 @@ class MetadataSourceRegistry:
             return SourcePage([]), SourceOutcome(source=source, status=unavailable)
         if asyncio.get_running_loop().time() >= deadline:
             return SourcePage([]), SourceOutcome(source=source, status=SourceStatus.TIMEOUT)
+        try:
+            async with account_request(
+                self.runtime[source], slots=semaphore, deadline=deadline
+            ) as attempt:
+                if attempt.blocked is not None:
+                    return SourcePage([]), attempt.blocked
+                page, outcome = await self._run_admitted(source, query, deadline, handle, attempt)
+                attempt.outcome = outcome
+                return page, outcome
+        except TimeoutError:
+            return SourcePage([]), SourceOutcome(source=source, status=SourceStatus.TIMEOUT)
+
+    async def _run_admitted(
+        self,
+        source: MetadataSource,
+        query: SeriesDiscoveryQuery | None,
+        deadline: float,
+        handle: _SourceHandle | None,
+        attempt: AccountAttempt,
+    ) -> tuple[SourcePage, SourceOutcome]:
         owns_handle = handle is None
         handle = handle or _SourceHandle()
         page = SourcePage([])
         try:
-            async with asyncio.timeout_at(deadline), semaphore:
+            async with asyncio.timeout_at(deadline):
                 async with asyncio.timeout(self.per_source_timeout):
                     if handle.adapter is None:
                         handle.adapter = self.factories[source].factory(self.runtime[source])
                     adapter = handle.adapter
+                    attempt.started = True
                     if query is None:
                         await adapter.check()
                     else:

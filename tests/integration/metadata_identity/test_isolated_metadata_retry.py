@@ -11,6 +11,7 @@ from pullbox.core.encryption import encrypt_secret
 from pullbox.core.metadata_identity import MetadataSource as Source
 from pullbox.models import Base, MetadataSeriesRetry, Series
 from pullbox.models.metadata_source import MetadataSourceConfig
+from pullbox.models.metadata_source_account import MetadataSourceAccount
 from pullbox.models.series import IssueCatalogState
 from pullbox.schemas.metadata_sources import SourceOutcome, SourceStatus
 from pullbox.services.metadata_discovery import MetadataSourceError
@@ -38,6 +39,11 @@ async def isolated(daily):  # noqa: F811 - imported pytest fixture
 async def expire_retry(factory, task_id):
     async with factory.begin() as session:
         await session.execute(
+            update(MetadataSourceAccount)
+            .where(MetadataSourceAccount.retry_at.isnot(None))
+            .values(retry_at=datetime.now(UTC) - timedelta(seconds=1))
+        )
+        await session.execute(
             update(MetadataSeriesRetry)
             .where(
                 MetadataSeriesRetry.task_id == task_id,
@@ -54,9 +60,17 @@ async def expire_retry(factory, task_id):
 async def test_retryable_series_does_not_block_the_next_series(isolated, monkeypatch, task_id):
     factory, _, scheduler = isolated
     first, first_data = await add_series(factory)
-    second, second_data = await add_series(factory, identifier=43)
+    async with factory.begin() as session:
+        await session.execute(
+            update(MetadataSourceConfig)
+            .where(MetadataSourceConfig.source == Source.COMICVINE_LOCAL.value)
+            .values(enabled=True)
+        )
+    second, second_data = await add_series(factory, identifier=43, source=Source.COMICVINE_LOCAL)
     adapter = DailyAdapter(first_data)
-    offer(adapter, second_data)
+    local = DailyAdapter(second_data)
+    local.source = Source.COMICVINE_LOCAL
+    offer(local, second_data)
     original = adapter.series
 
     async def fetch(identifier, **kwargs):
@@ -68,7 +82,11 @@ async def test_retryable_series_does_not_block_the_next_series(isolated, monkeyp
     adapter.series = fetch
     from pullbox.providers.metadata import sources
 
-    monkeypatch.setattr(sources, "metadata_sources", lambda: registry(adapter).factories)
+    monkeypatch.setattr(
+        sources,
+        "metadata_sources",
+        lambda: {**registry(adapter).factories, **registry(local).factories},
+    )
     result = await getattr(metadata_task, task_id)()
     async with factory() as session:
         assert (await session.get(Series, second)).issue_count == 2, (
@@ -326,3 +344,28 @@ async def test_hydrating_retry_does_not_hide_ready_work_behind_page_limit(isolat
             )
     async with factory() as session:
         assert await retry_candidates(session, "refresh_metadata", [], limit=1) == [second]
+
+
+@pytest.mark.parametrize("failure", [SourceStatus.RATE_LIMITED, SourceStatus.AUTHENTICATION_FAILED])
+async def test_account_failure_is_shared_across_series_and_both_scheduled_tasks(isolated, failure):
+    factory, adapter, _ = isolated
+    first, _ = await add_series(factory)
+    second, _ = await add_series(factory, identifier=43)
+
+    async def failed(identifier, **kwargs):
+        adapter.calls.append(("failed", identifier))
+        raise MetadataSourceError(failure, retry_after_seconds=720)
+
+    adapter.series = failed
+    await metadata_task.sync_new_issues()
+    await factory.kw["bind"].dispose()
+    await metadata_task.refresh_metadata()
+    assert adapter.calls == [("failed", "42")], "The second task and series share account admission"
+    async with factory() as session:
+        retries = list(await session.scalars(select(MetadataSeriesRetry)))
+        assert {(row.task_id, row.series_id) for row in retries} == {
+            (task_id, series_id)
+            for task_id in ("sync_new_issues", "refresh_metadata")
+            for series_id in (first, second)
+        }
+        assert {row.status for row in retries} == {failure.value}

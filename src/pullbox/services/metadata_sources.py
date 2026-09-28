@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -31,6 +31,8 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from pullbox.services.metadata_account_admission import MetadataAccountAdmission
+
 
 class SourceConfigurationConflictError(ValueError):
     """Source policy was edited after the displayed revision."""
@@ -41,6 +43,9 @@ class SourceRuntime:
     policy: SourcePolicyRead
     credential: SecretStr | None = None
     unavailable: SourceStatus | None = None
+    account_admission: MetadataAccountAdmission | None = field(
+        default=None, repr=False, compare=False
+    )
 
 
 def default_policy(source: MetadataSource) -> SourcePolicyRead:
@@ -198,6 +203,9 @@ async def load_source_runtime(
     session: AsyncSession, *, gcd_api_enabled: bool
 ) -> list[SourceRuntime]:
     """Load configuration only. Disabled and flagged sources never decrypt secrets."""
+    from pullbox.services.metadata_account_admission import source_account_admission
+
+    admission = source_account_admission(session, gcd_api_enabled=gcd_api_enabled)
     policies = await read_source_policies(session)
     rows = {row.source: row for row in await session.scalars(select(MetadataSourceConfig))}
     result = []
@@ -222,7 +230,7 @@ async def load_source_runtime(
                     credential = SecretStr(token) if token else None
             except ValueError:
                 status = SourceStatus.INVALID_CONFIG
-        result.append(SourceRuntime(policy, credential, status))
+        result.append(SourceRuntime(policy, credential, status, admission))
     return result
 
 

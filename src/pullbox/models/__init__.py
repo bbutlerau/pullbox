@@ -75,6 +75,7 @@ from pullbox.models.metadata_identity import (
 )
 from pullbox.models.metadata_series_retry import MetadataSeriesRetry
 from pullbox.models.metadata_source import MetadataSourceConfig
+from pullbox.models.metadata_source_account import MetadataSourceAccount
 from pullbox.models.operation_progress import (
     OperationProgress,
     OperationProgressState,
@@ -203,6 +204,7 @@ __all__ = [
     "MatchingSuggestion",
     "MetadataProviderCacheEntry",
     "MetadataSeriesRetry",
+    "MetadataSourceAccount",
     "MetadataSourceConfig",
     "OperationProgress",
     "OperationProgressState",

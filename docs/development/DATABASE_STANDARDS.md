@@ -406,6 +406,24 @@ Health checks perform no provider I/O inside a database transaction. Their short
 result write applies only to the tested revision and cannot replace a newer probe.
 Cached health is diagnostic, not proof that a source is safe or available now.
 
+### Metadata Account Admission
+
+`metadata_source_accounts` keeps at most one current credential-scope record per
+remote source, separate from series retries, response caches and library metadata.
+It stores a one-way account scope key, bounded status, UTC retry/probe deadlines
+and a positive revision, not credentials or remote error payloads. Source policy
+ordering changes cannot bypass a known account failure. Local catalogs have no
+account row. Downgrade removes transport admission state only.
+
+The account guard is a transport lifecycle boundary with engine-bound sessions
+of its own, like the source response cache. It never commits the calling library
+session. Admission commits before provider I/O; outcomes use conditional updates
+against the captured credential scope and revision. An expired cooldown admits
+one 45-second recovery probe, acquired after local request capacity is available.
+Cancellation releases the probe while retaining the prior failure; a crashed
+process recovers through lease expiry. Reads fail closed if admission storage
+cannot be checked, instead of repeatedly submitting known-failing requests.
+
 ### Canonical Metadata Baselines
 
 Series, issue and Story Arc metadata baselines use separate real foreign keys,

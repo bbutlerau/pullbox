@@ -17,8 +17,10 @@ from pullbox.schemas.metadata_sources import (
     ProviderStoryArcRead,
     RecentIssueWindow,
     SourceCapability,
+    SourceOutcome,
     SourceStatus,
 )
+from pullbox.services.metadata_account_admission import AccountAttempt, account_request
 from pullbox.services.metadata_discovery import MetadataSourceError
 
 if TYPE_CHECKING:
@@ -183,13 +185,44 @@ async def _read[T](
         if result.data is not None:
             validate(result.data)
         return result
+    try:
+        async with account_request(
+            runtime, slots=registry.read_slots, deadline=deadline
+        ) as attempt:
+            if attempt.blocked is not None:
+                return MetadataFetch(
+                    status=attempt.blocked.status,
+                    retry_after_seconds=attempt.blocked.retry_after_seconds,
+                )
+            result = await _read_admitted(
+                registry, source, capability, operation, validate, validator, deadline, attempt
+            )
+            attempt.outcome = SourceOutcome(
+                source=source, status=result.status, retry_after_seconds=result.retry_after_seconds
+            )
+            return result
+    except TimeoutError:
+        return MetadataFetch(status=SourceStatus.TIMEOUT)
+
+
+async def _read_admitted[T](
+    registry: MetadataSourceRegistry,
+    source: MetadataSource,
+    capability: SourceCapability,
+    operation: Callable[[MetadataSourceAdapter, str | None], Awaitable[MetadataFetch[T]]],
+    validate: Callable[[T], None],
+    validator: str | None,
+    deadline: float,
+    attempt: AccountAttempt,
+) -> MetadataFetch[T]:
     adapter = None
     try:
         if asyncio.get_running_loop().time() >= deadline:
             return MetadataFetch(status=SourceStatus.TIMEOUT)
-        async with asyncio.timeout_at(deadline), registry.read_slots:
+        async with asyncio.timeout_at(deadline):
             async with asyncio.timeout(registry.per_source_timeout):
                 adapter = registry.factories[source].factory(registry.runtime[source])
+                attempt.started = True
                 result = await operation(adapter, validator)
                 if result.status is SourceStatus.OK:
                     if result.data is None:

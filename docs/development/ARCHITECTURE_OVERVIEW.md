@@ -700,8 +700,19 @@ failures have no timed retry: a changed source policy or credential scope admits
 them again. Only one-way configuration scope keys are stored, never credentials.
 Cancellation, failed commits and stale attempts cannot discard or resurrect
 settled retry work. Infrastructure lock failures retain a sweep-level pause.
-Durable account-wide cooldown admission across different series remains separate
-from these entity retries; existing provider clients retain process-local throttling.
+Account-wide cooldown admission is separate from entity retries. The source
+registry uses `metadata_source_accounts` for remote-source authentication holds,
+rate limits and transient outages across tasks, series and process restarts.
+Credential scope, not source priority, identifies the account. Local catalogs
+and fresh response-cache hits do not depend on account admission. Each provider
+read obtains its request slot before claiming a bounded recovery probe; one
+probe runs after a cooldown expires and an abandoned probe expires after 45
+seconds. Cancellation releases its lease without clearing the previous failure.
+Revision-checked outcome writes cannot clear a newer hold. Account transactions
+are short and independent of library transactions; provider I/O starts only
+after the admission transaction ends. Existing client request pacing remains
+in force. Authentication-held work still requires corrected credentials; operator
+retry visibility and deliberate re-probe controls remain separate follow-up work.
 Post-restore aftercare keeps its recovery marker while continuation batches remain
 active; it observes completion without retaining a database transaction between checks.
 Cancellation leaves the marker and sweep checkpoint available for the next startup.
