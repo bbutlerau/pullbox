@@ -351,6 +351,25 @@ coalesces at most eight concurrent reads per database, and drains cancelled work
 Availability checks precede cache reads; local catalog reads stay generation-bound
 in their existing reader rather than entering this remote-response cache.
 
+`schemas/metadata_snapshot.py` and `services/metadata_assembly.py` define a
+versioned descriptive snapshot with per-field source, domain, observation time
+and override markers. New source-aware series adoption uses that assembler for
+series/issue descriptive fields, after complete-catalog and identity checks.
+Snapshots distinguish verified identities from observed crosswalks. Exact-ID or
+issue-parent disagreement stops assembly; priority cannot resolve it. Local edits,
+including intentional clears, are preserved. Background assembly fills gaps;
+explicit refresh can replace tracked provider-managed values under domain priority.
+
+`services/metadata_refresh_snapshot.py` supplies the bounded read phase for
+series, issue and Story Arc descriptive refresh. It requests only known exact
+identities, revalidates cached responses, cascades by requested domain, stops
+unnecessary lower-priority reads and retains typed partial outcomes. It does not
+write metadata, attach identities or change catalog membership. The caller must
+revalidate ownership and all captured source-policy revisions before applying it.
+Durable snapshot storage, ordinary refresh command/task wiring, the remaining
+credits/membership fields and coordinated XML/sidecar writers are still pending;
+an in-memory assembly result is not evidence that those workflows are complete.
+
 The existing import/cache and ordinary series-refresh consumers have not yet
 migrated to this registry. Metron has token settings, bounded transport and
 series/issue/arc adapter operations; GCD execution remains unimplemented, and

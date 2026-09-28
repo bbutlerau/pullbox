@@ -30,12 +30,15 @@ from pullbox.models.issue import IssueStatus
 from pullbox.models.metadata_identity import IssueExternalIdentity, SeriesExternalIdentity
 from pullbox.models.metadata_source import MetadataSourceConfig
 from pullbox.models.series import IssueCatalogState, SeriesStatus, SeriesType
+from pullbox.schemas.metadata_snapshot import MetadataSnapshot
 from pullbox.schemas.metadata_sources import ProviderIssueRead, ProviderSeriesRead, SourceStatus
+from pullbox.services.metadata_assembly import assemble_metadata
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
 from pullbox.services.metadata_identity_attachment import attach_verified_identities
 from pullbox.services.metadata_identity_review import record_identity_observation
 from pullbox.services.metadata_service import MetadataService, classify_issue_metadata
 from pullbox.services.metadata_source_reads import source_id
+from pullbox.services.metadata_sources import read_source_policies
 from pullbox.services.metadata_writer_identity import metadata_write_scope
 
 logger = structlog.get_logger(__name__)
@@ -65,6 +68,8 @@ class SourceSeriesBundle:
 class SeriesAdoptionResult:
     series: Series
     created: bool
+    snapshot: MetadataSnapshot | None = None
+    issue_snapshots: tuple[MetadataSnapshot, ...] = ()
 
 
 async def fetch_source_series_bundle(
@@ -343,21 +348,51 @@ async def _adopt(
     identities = _identities(profile, MetadataEntityKind.SERIES)
     series = await _series_owner(session, identities)
     created = series is None
+    snapshot = None
+    issue_snapshots: tuple[MetadataSnapshot, ...] = ()
     if series is None:
         await _require_unowned_issues(session, bundle)
+        policies = await read_source_policies(session)
+        now = datetime.now(UTC)
+        native_parent = ExternalIdentityRef(
+            profile.identity_namespace, MetadataEntityKind.SERIES, profile.external_id
+        )
+        try:
+            snapshot = assemble_metadata(
+                MetadataEntityKind.SERIES, identities, [profile], policies, now=now
+            )
+            issue_snapshots = tuple(
+                assemble_metadata(
+                    MetadataEntityKind.ISSUE,
+                    [
+                        ExternalIdentityRef(
+                            metadata.identity_namespace,
+                            MetadataEntityKind.ISSUE,
+                            metadata.external_id,
+                        )
+                    ],
+                    [metadata.model_copy(update={"issue_number_text": text})],
+                    policies,
+                    now=now,
+                    parent_identities=[native_parent],
+                )
+                for metadata, (_, text) in zip(bundle.issues, numbers, strict=True)
+            )
+        except ValueError as exc:
+            raise SeriesAdoptionError("The source metadata cannot be assembled safely.") from exc
+        values = snapshot.values
         publisher_id = (
-            await MetadataService._ensure_publisher(session, profile.publisher)
-            if profile.publisher
+            await MetadataService._ensure_publisher(session, values.publisher)
+            if values.publisher
             else None
         )
-        now = datetime.now(UTC)
         series = Series(
-            title=profile.title,
-            sort_title=profile.sort_title or profile.title,
-            year_start=profile.year_start,
-            year_end=profile.year_end,
-            description=profile.description,
-            cover_url=profile.image_url,
+            title=values.title,
+            sort_title=values.sort_title or values.title,
+            year_start=values.year_start,
+            year_end=values.year_end,
+            description=values.description,
+            cover_url=values.image_url,
             status=SeriesStatus(profile.status)
             if profile.status is not None and profile.status in SeriesStatus
             else SeriesStatus.UNKNOWN,
@@ -398,19 +433,23 @@ async def _adopt(
         return SeriesAdoptionResult(series, False)
     for offset in range(0, len(bundle.issues), 200):
         members = []
-        for metadata, (number, text) in zip(
-            bundle.issues[offset : offset + 200], numbers[offset : offset + 200], strict=True
+        for metadata, (number, text), issue_snapshot in zip(
+            bundle.issues[offset : offset + 200],
+            numbers[offset : offset + 200],
+            issue_snapshots[offset : offset + 200],
+            strict=True,
         ):
+            issue_values = issue_snapshot.values
             issue = Issue(
                 series_id=series.id,
                 issue_number=number,
                 issue_number_text=text,
-                title=metadata.title,
-                description=metadata.description,
-                release_date=metadata.cover_date,
-                store_date=metadata.store_date,
-                cover_url=metadata.image_url,
-                page_count=metadata.page_count,
+                title=issue_values.title,
+                description=issue_values.description,
+                release_date=issue_values.cover_date,
+                store_date=issue_values.store_date,
+                cover_url=issue_values.image_url,
+                page_count=issue_values.page_count,
                 status=IssueStatus.WANTED if monitored else IssueStatus.SKIPPED,
                 metadata_source=_metadata_label(metadata.source),
                 issue_type=classify_issue_metadata(series.series_type, metadata.title)[1],
@@ -444,4 +483,4 @@ async def _adopt(
         source=profile.source.value,
         issue_count=len(bundle.issues),
     )
-    return SeriesAdoptionResult(series, True)
+    return SeriesAdoptionResult(series, True, snapshot, issue_snapshots)

@@ -24,6 +24,7 @@ from pullbox.models.metadata_identity import (
 from pullbox.models.metadata_source import MetadataSourceConfig
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import IssueCatalogState
+from pullbox.schemas.metadata_snapshot import MetadataSnapshot
 from pullbox.services.metadata_series_adoption import (
     SeriesAdoptionError,
     SourceSeriesBundle,
@@ -90,6 +91,39 @@ async def test_new_series_without_comicvine_id_has_verified_native_identity_and_
         assert await session.scalar(select(func.count()).select_from(SeriesExternalIdentity)) == 1
         assert await session.scalar(select(func.count()).select_from(IssueExternalIdentity)) == 6
         assert await session.scalar(select(func.count()).select_from(IssueIdentityEvent)) == 6
+
+
+async def test_new_add_returns_canonical_snapshots_matching_persisted_metadata(identity_probe_db):
+    _, factory, _ = identity_probe_db
+    data = bundle()
+    data.series.description = "Canonical description"
+    data.issues[0].cover_date = date(2026, 9, 28)
+    async with factory.begin() as session:
+        result = await adopt_source_series_bundle(session, data)
+        snapshot = getattr(result, "snapshot", None)
+        assert isinstance(snapshot, MetadataSnapshot)
+        assert snapshot.values.title == result.series.title
+        assert snapshot.values.description == result.series.description
+        assert snapshot.identities == (ExternalIdentityRef(Namespace.METRON, Kind.SERIES, "42"),)
+        snapshots = result.issue_snapshots
+        issues = list(await session.scalars(select(Issue).order_by(Issue.id)))
+        assert len(snapshots) == len(issues) == 6
+        for item, issue in zip(snapshots, issues, strict=True):
+            assert item.values.title == issue.title
+            assert item.values.cover_date == issue.release_date
+            assert item.values.issue_number_text == issue.issue_number_text
+
+
+async def test_add_filters_unsafe_artwork_before_database_write(identity_probe_db):
+    _, factory, _ = identity_probe_db
+    data = bundle()
+    data.series.image_url = "https://127.0.0.1/private"
+    data.issues[0].image_url = "file:///private"
+    async with factory.begin() as session:
+        result = await adopt_source_series_bundle(session, data)
+        assert result.series.cover_url is None
+        issue = await session.scalar(select(Issue).order_by(Issue.id))
+        assert issue.cover_url is None
 
 
 async def test_caller_rollback_removes_whole_catalog_and_evidence(identity_probe_db):
