@@ -461,6 +461,18 @@ in one open pass without changing reference files. This is read support, not
 offline XSD validation or permission to rewrite either document; coordinated
 canonical output remains pending.
 
+`services/archive_metadata_reconciliation.py` compares both embedded documents
+into canonical-shaped series/issue values without I/O or persistence. It retains
+each document and its raw payload, exposes descriptive disagreements separately
+from exact-ID conflicts, and leaves disputed shared fields unset. Missing and
+explicitly empty credits remain distinct. Partial ComicInfo publication dates
+never become invented dates or series start years. Scoped ComicVine markers and
+validated resource URLs yield unverified evidence, not attachments or crosswalks.
+Both XML paths share the same bounded envelope; duplicate fields and archive
+probe diagnostics remain reviewable. This comparison is not write authorization:
+canonical adoption, output-schema validation and coordinated atomic writers
+remain required before the existing import/writer consumers switch to it.
+
 The existing import/cache consumers have not yet migrated to this registry.
 Metron has token settings, bounded transport and
 series/issue/arc adapter operations; GCD execution remains unimplemented, and

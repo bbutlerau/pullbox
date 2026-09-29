@@ -3,14 +3,10 @@
 from __future__ import annotations
 
 import enum
-import io
 import re
 from dataclasses import dataclass, replace
 from datetime import date
-from xml.etree import ElementTree
-
-from defusedxml import ElementTree as DefusedElementTree
-from defusedxml.common import DefusedXmlException
+from typing import TYPE_CHECKING
 
 from pullbox.core.metadata_identity import (
     ExactIdentityEvidence,
@@ -20,17 +16,24 @@ from pullbox.core.metadata_identity import (
     MetadataEntityKind,
     find_exact_identity_conflicts,
 )
-from pullbox.core.xml_security import UnsafeXmlError, normalize_xml_for_expat
+from pullbox.core.metadata_xml import (
+    MAX_METADATA_XML_BYTES,
+    MAX_METADATA_XML_DEPTH,
+    MAX_METADATA_XML_NODES,
+    MetadataXmlError,
+    parse_metadata_xml,
+)
 
-MAX_METRONINFO_BYTES = 2 * 1024 * 1024
-MAX_METRONINFO_DEPTH = 32
-MAX_METRONINFO_NODES = 4096
+if TYPE_CHECKING:
+    from xml.etree import ElementTree
+
+MAX_METRONINFO_BYTES = MAX_METADATA_XML_BYTES
+MAX_METRONINFO_DEPTH = MAX_METADATA_XML_DEPTH
+MAX_METRONINFO_NODES = MAX_METADATA_XML_NODES
 MAX_METRONINFO_CREDITS = 128
 MAX_METRONINFO_ROLES = 32
-_MAX_ATTRIBUTES = 16
 _MAX_FIELD_LENGTH = 4096
 _CALENDAR_TIMEZONE = r"(?:Z|[+-](?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:00))?"
-_XINCLUDE = "{http://www.w3.org/2001/XInclude}"
 _SCHEMA_HINT = "{http://www.w3.org/2001/XMLSchema-instance}noNamespaceSchemaLocation"
 _SOURCES = {
     "metron": IdentityNamespace.METRON,
@@ -152,70 +155,12 @@ class MetronInfoData:
 def parse_metroninfo(payload: bytes | str) -> MetronInfoData:
     """Read local metadata only; callers retain authority and archive safety checks."""
     try:
-        root = _bounded_tree(payload)
-    except _ReadError as exc:
-        return MetronInfoData(diagnostics=(MetronInfoDiagnostic(exc.code, "MetronInfo"),))
-    return _Reader(root).read()
-
-
-class _ReadError(ValueError):
-    def __init__(self, code: MetronInfoDiagnosticCode) -> None:
-        super().__init__(code.value)
-        self.code = code
-
-
-def _bounded_tree(payload: bytes | str) -> ElementTree.Element:
-    if len(payload) > MAX_METRONINFO_BYTES:
-        raise _ReadError(MetronInfoDiagnosticCode.TOO_LARGE)
-    try:
-        if isinstance(payload, str) and len(payload.encode("utf-8")) > MAX_METRONINFO_BYTES:
-            raise _ReadError(MetronInfoDiagnosticCode.TOO_LARGE)
-        normalized = normalize_xml_for_expat(payload)
-        header = normalized[:512]
-        if isinstance(header, bytes):
-            header = header.decode("ascii", errors="ignore")
-        encoding = re.search(r"<\?xml\b[^>]*\bencoding\s*=\s*['\"]([^'\"]+)", header)
-        if encoding and encoding[1].lower() not in {
-            "utf-8",
-            "utf-16",
-            "utf-16le",
-            "utf-16be",
-            "us-ascii",
-        }:
-            raise _ReadError(MetronInfoDiagnosticCode.UNSUPPORTED_ENCODING)
-        stream = io.StringIO(normalized) if isinstance(normalized, str) else io.BytesIO(normalized)
-        depth = nodes = 0
-        root: ElementTree.Element | None = None
-        iterator = DefusedElementTree.iterparse(
-            stream,
-            events=("start", "end"),
-            forbid_dtd=True,
-            forbid_entities=True,
-            forbid_external=True,
+        root = parse_metadata_xml(payload, root_name="MetronInfo")
+    except MetadataXmlError as exc:
+        return MetronInfoData(
+            diagnostics=(MetronInfoDiagnostic(MetronInfoDiagnosticCode(exc.code), "MetronInfo"),)
         )
-        for event, node in iterator:
-            if event == "start":
-                if root is None:
-                    root = node
-                depth += 1
-                nodes += 1
-                if (
-                    depth > MAX_METRONINFO_DEPTH
-                    or nodes > MAX_METRONINFO_NODES
-                    or len(node.attrib) > _MAX_ATTRIBUTES
-                ):
-                    raise _ReadError(MetronInfoDiagnosticCode.COMPLEXITY_LIMIT)
-                if node.tag.startswith(_XINCLUDE):
-                    raise _ReadError(MetronInfoDiagnosticCode.UNSAFE_XML)
-            else:
-                depth -= 1
-    except DefusedXmlException as exc:
-        raise _ReadError(MetronInfoDiagnosticCode.UNSAFE_XML) from exc
-    except (ElementTree.ParseError, UnsafeXmlError, UnicodeError, LookupError) as exc:
-        raise _ReadError(MetronInfoDiagnosticCode.INVALID_XML) from exc
-    if root is None or root.tag != "MetronInfo":
-        raise _ReadError(MetronInfoDiagnosticCode.INVALID_ROOT)
-    return root
+    return _Reader(root).read()
 
 
 class _Reader:
