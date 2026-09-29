@@ -12,6 +12,8 @@ function metadataSourceSettings(seed, csrf) {
     metronBase: null, metronEnabled: false, metronToken: '', metronClear: false,
     metronSaving: false, metronError: '', metronMessage: '', metronConflict: false,
     healthRefreshPending: false,
+    retryOpen: false, retrySource: null, retryPage: {items: [], total: 0, offset: 0, limit: 10, has_more: false},
+    retryLoading: false, retryError: '', retryTrigger: null,
     init() { this.accept(seed); this.acceptMetron(seed.find(item => item.source === 'metron_api')); },
     destroy() {
       this.alive = false; this.metronToken = '';
@@ -71,6 +73,7 @@ function metadataSourceSettings(seed, csrf) {
         this.savedSources = this.savedSources.map(item =>
           item.source === 'metron_api' && item.revision === base.revision ? clone(descriptor) : item);
         this.acceptMetron(policy);
+        this.healthRefreshPending = true;
         this.healthMessage = '';
         this.metronMessage = 'Metron settings saved. Connection checks use this saved configuration.';
       } catch (_) {
@@ -210,7 +213,7 @@ function metadataSourceSettings(seed, csrf) {
     },
     status(item) {
       if (!item.capabilities.length && item.availability !== 'feature_disabled') return 'Not available in this build';
-      const state = item.availability || item.last_status || 'not_checked';
+      const state = item.availability || item.account?.status || item.last_status || 'not_checked';
       return {
         ok: 'Ready', empty: 'Ready', disabled: 'Disabled', feature_disabled: 'Not released yet',
         not_implemented: 'Not available in this build', unconfigured: 'Not configured',
@@ -219,6 +222,47 @@ function metadataSourceSettings(seed, csrf) {
         incompatible_response: 'Unexpected provider response', unsupported: 'Not supported',
         not_checked: 'Not checked yet',
       }[state] || 'Needs attention';
+    },
+    dateLabel(value) { return value ? new Date(value).toLocaleString() : ''; },
+    holdMessage(item) {
+      if (item.availability) return '';
+      const account = item.account;
+      if (account?.probe_until && new Date(account.probe_until) > new Date()) return 'A connection check is in progress.';
+      if (account?.status === 'authentication_failed') return 'Automatic requests are paused. Check saved access, then test the connection to resume waiting work.';
+      if (account?.retry_at && new Date(account.retry_at) > new Date()) return 'Requests can resume after ' + this.dateLabel(account.retry_at) + '. Other sources can still run.';
+      return '';
+    },
+    retryState(row) {
+      return {
+        ready: 'Ready for the next scheduled run',
+        waiting: 'Waiting until ' + this.dateLabel(row.retry_at),
+        authentication_required: 'Check saved access, then test the connection',
+        source_disabled: 'Enable and configure this source to resume',
+      }[row.state] || 'Needs attention';
+    },
+    async showRetries(source, trigger) {
+      if (this.retryLoading) return;
+      this.retrySource = source; this.retryTrigger = trigger; this.retryOpen = true;
+      this.retryPage = {items: [], total: 0, offset: 0, limit: 10, has_more: false};
+      await this.loadRetries(0);
+    },
+    closeRetries() {
+      if (this.retryLoading) return;
+      this.retryOpen = false;
+      this.$nextTick(() => this.retryTrigger?.focus({preventScroll: true}));
+    },
+    async loadRetries(offset) {
+      if (this.retryLoading) return;
+      this.retryLoading = true; this.retryError = '';
+      const query = new URLSearchParams({limit: '10', offset: String(offset)});
+      if (this.retrySource) query.set('source', this.retrySource);
+      try {
+        const response = await this.request('/api/v1/metadata/retries?' + query);
+        if (!response.ok) throw new Error('load');
+        if (this.alive) this.retryPage = response.data;
+      } catch (_) {
+        if (this.alive) this.retryError = 'Could not load deferred work. Check the connection and retry.';
+      } finally { this.retryLoading = false; }
     },
     canTest(item) { return item.enabled && item.capabilities.length > 0 && !item.availability; },
     async refreshHealth() {
@@ -252,7 +296,12 @@ function metadataSourceSettings(seed, csrf) {
         }
       } catch (_) {
         if (this.alive) this.healthMessage = 'Could not check ' + this.labels[item.source] + '. Check the connection and retry.';
-      } finally { this.testing = null; this.flushHealthRefresh(); }
+      } finally {
+        this.testing = null;
+        await this.refreshHealth();
+        if (this.retryOpen && !this.retryLoading) await this.loadRetries(this.retryPage.offset);
+        this.flushHealthRefresh();
+      }
     },
   };
 }

@@ -146,6 +146,94 @@ async def test_auth_failure_does_not_schedule_automatic_retry(isolated, monkeypa
 
 
 @pytest.mark.parametrize("task_id", ["sync_new_issues", "refresh_metadata"])
+async def test_successful_explicit_probe_retries_held_task_without_reimport(isolated, task_id):
+    from pullbox.models import Issue
+    from pullbox.models.issue import IssueStatus
+    from tests.integration.metadata_identity.test_source_account_admission import reader
+
+    factory, adapter, scheduler = isolated
+    series_id, data = await add_series(factory)
+    offer(adapter, data)
+    original = adapter.series
+
+    async def rejected(*args, **kwargs):
+        raise MetadataSourceError(SourceStatus.AUTHENTICATION_FAILED)
+
+    adapter.series = rejected
+    await getattr(metadata_task, task_id)()
+    scheduler._scheduler.add_job.assert_not_called()
+    adapter.series = original
+    scheduler.schedule_task_continuation.reset_mock()
+    result = await (await reader(factory, adapter)).check(adapter.source, retry_authentication=True)
+    assert result.status is SourceStatus.OK
+    assert scheduler.schedule_task_continuation.called, (
+        "Recovered work must not wait for the next daily cron"
+    )
+    assert scheduler.schedule_task_continuation.call_args.args == (task_id,)
+    assert scheduler.schedule_task_continuation.call_args.kwargs["interval_seconds"] == 60
+    assert scheduler.schedule_task_continuation.call_args.kwargs["run_at"] <= datetime.now(
+        UTC
+    ) + timedelta(seconds=61)
+    scheduler.schedule_task_continuation.reset_mock()
+    await factory.kw["bind"].dispose()
+    from unittest.mock import patch
+
+    from pullbox.tasks import metadata_sweep_state
+
+    with patch("pullbox.database.get_session_factory", return_value=factory):
+        await metadata_sweep_state.recover_metadata_sweep_schedules()
+    assert scheduler.schedule_task_continuation.call_args.args == (task_id,)
+    assert (await getattr(metadata_task, task_id)()).status == "completed"
+    async with factory() as session:
+        series = await session.get(Series, series_id)
+        assert series.issue_count == 2 and series.path == "/read-only/original"
+        owned = await session.scalar(
+            select(Issue).where(Issue.series_id == series_id, Issue.issue_number_text == "1")
+        )
+        assert owned.status is IssueStatus.OWNED and owned.manual_skip
+        assert list(await session.scalars(select(MetadataSeriesRetry))) == []
+    assert scheduler._scheduler.add_job.call_count == 1
+
+
+async def test_recovery_continuation_does_not_restart_completed_daily_sweep(isolated, monkeypatch):
+    from pullbox.core.metadata_identity import MetadataSource
+    from pullbox.providers.metadata import sources
+    from tests.integration.metadata_identity.test_source_account_admission import reader
+
+    factory, adapter, _ = isolated
+    _, data = await add_series(factory)
+    offer(adapter, data)
+    original = adapter.series
+
+    async def rejected(*args, **kwargs):
+        raise MetadataSourceError(SourceStatus.AUTHENTICATION_FAILED)
+
+    adapter.series = rejected
+    async with factory.begin() as session:
+        await session.execute(
+            update(MetadataSourceConfig)
+            .where(MetadataSourceConfig.source == Source.COMICVINE_LOCAL.value)
+            .values(enabled=True)
+        )
+    _, local_data = await add_series(factory, identifier=43, source=MetadataSource.COMICVINE_LOCAL)
+    local = DailyAdapter(local_data)
+    local.source = Source.COMICVINE_LOCAL
+    offer(local, local_data)
+    monkeypatch.setattr(
+        sources,
+        "metadata_sources",
+        lambda: {**registry(adapter).factories, **registry(local).factories},
+    )
+    await metadata_task.sync_new_issues()
+    assert local.calls
+    prior = list(local.calls)
+    adapter.series = original
+    await (await reader(factory, adapter)).check(adapter.source, retry_authentication=True)
+    await metadata_task.sync_new_issues()
+    assert local.calls == prior, "Account recovery must not rerun completed healthy-source work"
+
+
+@pytest.mark.parametrize("task_id", ["sync_new_issues", "refresh_metadata"])
 async def test_successful_fallback_retries_only_the_failed_source(isolated, monkeypatch, task_id):
     from pullbox.core.comicvine_key import save_comicvine_api_key
     from pullbox.providers.metadata import sources

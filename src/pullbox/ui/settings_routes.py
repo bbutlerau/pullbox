@@ -280,13 +280,12 @@ async def load_settings_tab(request: Request, session: DbSession, tab: str) -> d
         active_key = await get_comicvine_api_key(session)
         ctx["has_comicvine_key"] = bool(active_key)
         ctx["obfuscated_key"] = obfuscate_api_key(active_key)
-        from pullbox.services.metadata_discovery import describe_source_policies
-        from pullbox.services.metadata_sources import read_source_policies
+        from pullbox.services.metadata_source_status import source_status
 
         ctx["metadata_source_seed"] = [
             policy.model_dump(mode="json")
-            for policy in describe_source_policies(
-                await read_source_policies(session),
+            for policy in await source_status(
+                session,
                 gcd_api_enabled=get_settings().metadata_gcd_api_v2_enabled,
             )
         ]

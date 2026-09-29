@@ -10,8 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
 from pullbox.models import MetadataSeriesRetry, Series
+from pullbox.models.metadata_source_account import MetadataSourceAccount
 from pullbox.models.series import IssueCatalogState
 from pullbox.schemas.metadata_sources import SourceOutcome, SourceStatus
+from pullbox.services.metadata_account_admission import account_key
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
 from pullbox.services.metadata_sources import SourceRuntime, load_source_runtime
 from pullbox.services.metadata_writer_identity import metadata_write_scope
@@ -179,6 +181,37 @@ async def settle_retry(
             "",
         )
     async with metadata_write_scope(session):
+        # A failure may settle after an explicit account probe has already recovered.
+        auth_sources = {
+            source
+            for source, (status, _, _) in pending.items()
+            if status == SourceStatus.AUTHENTICATION_FAILED.value
+        }
+        if auth_sources:
+            current = {
+                item.policy.source.value: item
+                for item in await retry_runtime(
+                    session, gcd_api_enabled=admission.registry.gcd_api_enabled
+                )
+            }
+            for account in await session.scalars(
+                select(MetadataSourceAccount)
+                .where(MetadataSourceAccount.source.in_(auth_sources))
+                .order_by(MetadataSourceAccount.source)
+                .with_for_update()
+            ):
+                runtime = current[account.source]
+                if (
+                    runtime.unavailable is None
+                    and account.account_key == account_key(runtime)
+                    and pending[account.source][2] == config_key(runtime)
+                    and account.status != SourceStatus.AUTHENTICATION_FAILED.value
+                ):
+                    pending[account.source] = (
+                        account.status or SourceStatus.UNAVAILABLE.value,
+                        account.retry_at or now,
+                        pending[account.source][2],
+                    )
         if (
             await session.scalar(select(Series.id).where(Series.id == series_id).with_for_update())
             is None

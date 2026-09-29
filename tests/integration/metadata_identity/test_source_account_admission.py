@@ -190,9 +190,9 @@ async def test_probe_is_not_claimed_while_waiting_for_local_request_capacity(acc
     original = gate.admit
     entered = asyncio.Event()
 
-    async def admission(runtime):
+    async def admission(runtime, **kwargs):
         entered.set()
-        return await original(runtime)
+        return await original(runtime, **kwargs)
 
     monkeypatch.setattr(gate, "admit", admission)
     task = asyncio.create_task(instance.series(adapter.source, "42"))
@@ -423,6 +423,7 @@ async def test_account_migration_matches_model_and_preserves_library(identity_pr
             revision = _revision("w4q5r6s7t890_add_metadata_source_accounts", sync)
             revision.downgrade()
             revision.upgrade()
+            _revision("x5r6s7t8u901_allow_metadata_authentication_probes", sync).upgrade()
             expected = MetaData()
             name = "metadata_source_accounts"
             Base.metadata.tables[name].to_metadata(expected)

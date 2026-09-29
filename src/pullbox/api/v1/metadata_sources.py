@@ -4,13 +4,14 @@ from datetime import UTC, datetime
 from typing import Literal
 
 import structlog
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from pullbox.api.deps import AuthenticatedUser, DbSession, InteractiveOperatorUser, Settings
 from pullbox.core.exceptions import ConfigurationError
 from pullbox.core.metadata_identity import MetadataSource
 from pullbox.models.library import LibraryRoot
 from pullbox.schemas.metadata_sources import (
+    DeferredMetadataRead,
     MetadataFetch,
     MetadataPage,
     ProviderIssueRead,
@@ -30,10 +31,12 @@ from pullbox.schemas.metadata_sources import (
     StoryArcPreviewQuery,
     StoryArcPreviewRead,
 )
+from pullbox.schemas.pagination import PaginatedResponse
 from pullbox.services.metadata_arc_preview import preview_source_arc
-from pullbox.services.metadata_discovery import MetadataSourceRegistry, describe_source_policies
+from pullbox.services.metadata_discovery import MetadataSourceRegistry
 from pullbox.services.metadata_read_cache import source_read_cache
 from pullbox.services.metadata_series_preview import preview_series_folder, preview_source_series
+from pullbox.services.metadata_source_status import deferred_work, source_status
 from pullbox.services.metadata_sources import (
     SourceConfigurationConflictError,
     load_source_runtime,
@@ -184,8 +187,24 @@ async def series_issues(
 async def sources(
     session: DbSession, _user: InteractiveOperatorUser, settings: Settings
 ) -> list[SourceDescriptor]:
-    return describe_source_policies(
-        await read_source_policies(session), gcd_api_enabled=settings.metadata_gcd_api_v2_enabled
+    return await source_status(session, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled)
+
+
+@router.get("/retries", response_model=PaginatedResponse[DeferredMetadataRead])
+async def retries(
+    session: DbSession,
+    _user: InteractiveOperatorUser,
+    settings: Settings,
+    source: MetadataSource | None = None,
+    limit: int = Query(default=10, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=1_000_000),
+) -> PaginatedResponse[DeferredMetadataRead]:
+    return await deferred_work(
+        session,
+        source=source,
+        limit=limit,
+        offset=offset,
+        gcd_api_enabled=settings.metadata_gcd_api_v2_enabled,
     )
 
 
@@ -194,11 +213,11 @@ async def save_priorities(
     body: SourcePriorityWrite, session: DbSession, user: InteractiveOperatorUser, settings: Settings
 ) -> list[SourceDescriptor]:
     try:
-        policies = await save_source_priorities(session, body)
+        await save_source_priorities(session, body)
     except SourceConfigurationConflictError as exc:
         raise HTTPException(409, str(exc)) from exc
     logger.info("metadata_source_priorities_updated", user_id=user.id)
-    return describe_source_policies(policies, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled)
+    return await source_status(session, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled)
 
 
 @router.put("/sources/{source}", response_model=SourcePolicyRead)
@@ -251,7 +270,7 @@ async def test_source(
     checked_at = datetime.now(UTC)
     outcome = await MetadataSourceRegistry(
         runtime, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled
-    ).check(source)
+    ).check(source, retry_authentication=True)
     recorded = await record_source_health(session, source, revision, outcome, checked_at)
     logger.info(
         "metadata_source_test_complete",

@@ -168,6 +168,8 @@ class MetadataSourceRegistry:
         semaphore: asyncio.Semaphore,
         deadline: float,
         handle: _SourceHandle | None = None,
+        *,
+        retry_authentication: bool = False,
     ) -> tuple[SourcePage, SourceOutcome]:
         unavailable = self._unavailable(source, search=query is not None)
         if unavailable is not None:
@@ -176,7 +178,10 @@ class MetadataSourceRegistry:
             return SourcePage([]), SourceOutcome(source=source, status=SourceStatus.TIMEOUT)
         try:
             async with account_request(
-                self.runtime[source], slots=semaphore, deadline=deadline
+                self.runtime[source],
+                slots=semaphore,
+                deadline=deadline,
+                retry_authentication=retry_authentication,
             ) as attempt:
                 if attempt.blocked is not None:
                     return SourcePage([]), attempt.blocked
@@ -344,12 +349,15 @@ class MetadataSourceRegistry:
                 await asyncio.gather(*tasks, return_exceptions=True)
         return self._group_pages(pages)
 
-    async def check(self, source: MetadataSource) -> SourceOutcome:
+    async def check(
+        self, source: MetadataSource, *, retry_authentication: bool = False
+    ) -> SourceOutcome:
         _, outcome = await self._run(
             source,
             None,
             asyncio.Semaphore(1),
             asyncio.get_running_loop().time() + self.total_timeout,
+            retry_authentication=retry_authentication,
         )
         return outcome
 

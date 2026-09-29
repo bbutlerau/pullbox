@@ -50,6 +50,8 @@ class AccountAttempt:
     probe: bool = False
     started: bool = False
     outcome: SourceOutcome | None = None
+    authentication_probe: bool = False
+    config_key: str = ""
 
 
 def source_account_admission(
@@ -65,7 +67,11 @@ def source_account_admission(
 
 @asynccontextmanager
 async def account_request(
-    runtime: SourceRuntime, *, slots: asyncio.Semaphore, deadline: float
+    runtime: SourceRuntime,
+    *,
+    slots: asyncio.Semaphore,
+    deadline: float,
+    retry_authentication: bool = False,
 ) -> AsyncIterator[AccountAttempt]:
     async with asyncio.timeout_at(deadline):
         await slots.acquire()
@@ -74,7 +80,7 @@ async def account_request(
         if gate is None or runtime.policy.source not in _REMOTE or runtime.credential is None:
             yield AccountAttempt()
             return
-        attempt = await gate.admit(runtime)
+        attempt = await gate.admit(runtime, retry_authentication=retry_authentication)
         try:
             yield attempt
         finally:
@@ -91,7 +97,11 @@ class MetadataAccountAdmission:
         self.factory = factory
         self.gcd_api_enabled = gcd_api_enabled
 
-    async def admit(self, runtime: SourceRuntime) -> AccountAttempt:
+    async def admit(
+        self, runtime: SourceRuntime, *, retry_authentication: bool = False
+    ) -> AccountAttempt:
+        from pullbox.models.metadata_series_retry import MetadataSeriesRetry
+        from pullbox.services.metadata_series_retry import config_key
         from pullbox.services.metadata_sources import load_source_runtime
 
         source, key = runtime.policy.source, account_key(runtime)
@@ -134,7 +144,23 @@ class MetadataAccountAdmission:
                     row.status = row.retry_at = row.lease_until = None
                     row.revision += 1
                 now = datetime.now(UTC)
-                if row.status == SourceStatus.AUTHENTICATION_FAILED.value:
+                if (
+                    retry_authentication
+                    and row.status is None
+                    and await session.scalar(
+                        select(MetadataSeriesRetry.id)
+                        .where(
+                            MetadataSeriesRetry.source == source.value,
+                            MetadataSeriesRetry.config_key == config_key(current),
+                            MetadataSeriesRetry.status == SourceStatus.AUTHENTICATION_FAILED.value,
+                        )
+                        .limit(1)
+                    )
+                ):
+                    # Older deferred work can predate the account-state table.
+                    row.status = SourceStatus.AUTHENTICATION_FAILED.value
+                authentication_probe = row.status == SourceStatus.AUTHENTICATION_FAILED.value
+                if authentication_probe and not retry_authentication:
                     return AccountAttempt(
                         blocked=SourceOutcome(
                             source=source, status=SourceStatus.AUTHENTICATION_FAILED
@@ -155,7 +181,13 @@ class MetadataAccountAdmission:
                 if probe:
                     row.lease_until = now + timedelta(seconds=45)
                     row.revision += 1
-                return AccountAttempt(key=key, revision=row.revision, probe=probe)
+                return AccountAttempt(
+                    key=key,
+                    revision=row.revision,
+                    probe=probe,
+                    authentication_probe=authentication_probe,
+                    config_key=config_key(current),
+                )
         except (SQLAlchemyError, TimeoutError):
             logger.warning("metadata_account_admission_unavailable", source=source.value)
             return AccountAttempt(
@@ -165,12 +197,16 @@ class MetadataAccountAdmission:
             )
 
     async def finish(self, runtime: SourceRuntime, attempt: AccountAttempt) -> None:
+        from pullbox.models.metadata_series_retry import MetadataSeriesRetry
+
         outcome = attempt.outcome if attempt.started else None
         failed = outcome is not None and outcome.status in _FAILURES
         if not failed and not attempt.probe:
             return
+        wake_tasks: list[str] = []
         try:
             async with asyncio.timeout(2), self.factory.begin() as session:
+                due = None
                 statement = (
                     update(Account)
                     .where(
@@ -190,10 +226,50 @@ class MetadataAccountAdmission:
                         else (datetime.now(UTC) + timedelta(seconds=max(60, min(delay, 7 * 86400))))
                     )
                     statement = statement.values(status=outcome.status.value, retry_at=due)
-                elif outcome is not None:
+                elif outcome is not None and (
+                    not attempt.authentication_probe or outcome.status is SourceStatus.OK
+                ):
                     statement = statement.values(status=None, retry_at=None)
                 # Cancellation only releases the probe lease, retaining the prior failure.
-                await session.execute(statement)
+                changed = await session.scalar(statement.returning(Account.id))
+                if (
+                    changed is not None
+                    and attempt.authentication_probe
+                    and outcome is not None
+                    and (outcome.status is SourceStatus.OK or due is not None)
+                ):
+                    criteria = (
+                        MetadataSeriesRetry.source == runtime.policy.source.value,
+                        MetadataSeriesRetry.config_key == attempt.config_key,
+                        MetadataSeriesRetry.status == SourceStatus.AUTHENTICATION_FAILED.value,
+                    )
+                    wake_tasks = list(
+                        await session.scalars(
+                            select(MetadataSeriesRetry.task_id)
+                            .where(MetadataSeriesRetry.source == runtime.policy.source.value)
+                            .distinct()
+                        )
+                    )
+                    await session.execute(
+                        update(MetadataSeriesRetry)
+                        .where(*criteria)
+                        .values(
+                            status=(
+                                outcome.status.value if due else SourceStatus.UNAVAILABLE.value
+                            ),
+                            retry_at=due or datetime.now(UTC),
+                            revision=MetadataSeriesRetry.revision + 1,
+                        )
+                    )
+            if wake_tasks:
+                from pullbox.tasks.metadata_sweep_state import MetadataSweep, schedule_sweep
+
+                for task_id in wake_tasks:
+                    try:
+                        schedule_sweep(task_id, MetadataSweep(active=True))
+                    except Exception:
+                        # Durable retry deadlines also restore this wakeup after restart.
+                        logger.warning("metadata_retry_wakeup_failed", task_id=task_id)
         except (SQLAlchemyError, TimeoutError):
             logger.warning(
                 "metadata_account_outcome_store_failed", source=runtime.policy.source.value

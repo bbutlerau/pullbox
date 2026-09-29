@@ -88,10 +88,19 @@ def schedule_sweep(task_id: str, state: MetadataSweep) -> None:
 
 async def recover_metadata_sweep_schedules() -> None:
     """Restore interrupted batches without waiting for tomorrow's cron."""
+    from pullbox.config import get_settings
     from pullbox.database import get_session_factory
+    from pullbox.services.metadata_series_retry import retry_deadline, retry_runtime
 
     async with get_session_factory()() as session:
+        runtime = await retry_runtime(
+            session, gcd_api_enabled=get_settings().metadata_gcd_api_v2_enabled
+        )
         for task_id in TASK_IDS:
             state = await load_sweep(session, task_id)
+            if not state.active:
+                deadline = await retry_deadline(session, task_id, runtime)
+                if deadline is not None:
+                    state = MetadataSweep(active=True, retry_at=deadline.timestamp())
             if state.active:
                 schedule_sweep(task_id, state)

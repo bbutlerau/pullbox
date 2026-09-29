@@ -9,6 +9,93 @@ from tests.e2e.pages.settings import SettingsPage
 pytestmark = pytest.mark.e2e
 
 
+@pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 320)])
+def test_account_hold_and_deferred_work_keep_draft_and_allow_paged_review(
+    authed_page, seeded_server, theme, width
+):
+    page = authed_page
+    page.set_viewport_size({"width": width, "height": 1000})
+    SettingsPage(page, seeded_server).goto("metadata")
+    page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
+    sources = page.request.get(seeded_server + "/api/v1/metadata/sources").json()
+    for item in sources:
+        if item["source"] == "metron_api":
+            item.update(
+                enabled=True,
+                availability=None,
+                credential_configured=True,
+                account={"status": "authentication_failed", "retry_at": None, "probe_until": None},
+                deferred_series=13,
+                deferred_work=26,
+            )
+    page.route("**/api/v1/metadata/sources", lambda route: route.fulfill(json=sources))
+    page.evaluate("window.dispatchEvent(new CustomEvent('metadata-credentials-updated'))")
+    card = page.get_by_test_id("metadata-source-priority")
+    order = card.get_by_test_id("metadata-order-global")
+    expect(card.get_by_role("button", name="Test Metron", exact=True)).to_be_enabled()
+    order.locator('[data-order-direction="down"]').first.click()
+    draft = order.locator("[data-source-label]").all_text_contents()
+
+    def retries(route):
+        from urllib.parse import parse_qs, urlparse
+
+        offset = int(parse_qs(urlparse(route.request.url).query).get("offset", [0])[0])
+        route.fulfill(
+            json={
+                "total": 26,
+                "limit": 10,
+                "offset": offset,
+                "has_more": offset < 20,
+                "items": [
+                    {
+                        "id": index,
+                        "series_id": 1,
+                        "series_title": f"Waiting series {index}",
+                        "source": "metron_api",
+                        "task_id": "refresh_metadata",
+                        "state": "authentication_required",
+                        "retry_at": None,
+                    }
+                    for index in range(offset + 1, min(offset + 11, 27))
+                ],
+            }
+        )
+
+    page.route("**/api/v1/metadata/retries?**", retries)
+    button = card.get_by_role("button", name="View deferred work for Metron", exact=True)
+    expect(card.get_by_text("13 series have deferred metadata work.", exact=True)).to_be_visible()
+    button.press("Enter")
+    panel = page.get_by_test_id("metadata-deferred-work")
+    expect(panel.get_by_text("Waiting series 1", exact=True)).to_be_visible()
+    panel.get_by_role("button", name="Next", exact=True).press("Enter")
+    expect(panel.get_by_text("Waiting series 11", exact=True)).to_be_visible()
+    expect(panel.get_by_text("Waiting series 1", exact=True)).to_have_count(0)
+    expect(order.locator("[data-source-label]")).to_have_text(draft)
+    expect(card.get_by_role("button", name="Save metadata priority", exact=True)).to_be_enabled()
+    assert panel.evaluate("node => node.scrollWidth <= node.clientWidth + 1")
+    assert_no_axe_violations(
+        page,
+        name=f"metadata-deferred-{theme}-{width}",
+        include=["[data-testid='metadata-source-health']"],
+    )
+    panel.evaluate("node => node.scrollIntoView({block: 'start'})")
+    page.screenshot(
+        path=f"test-results/metadata-deferred-{theme}-{width}.png", animations="disabled"
+    )
+    panel.evaluate("node => { node.keepThisPanel = true; }")
+    page.route(
+        "**/api/v1/metadata/retries?**",
+        lambda route: route.fulfill(status=503, json={"detail": "Unavailable"}),
+    )
+    panel.get_by_role("button", name="Next", exact=True).press("Enter")
+    expect(panel.get_by_role("alert")).to_contain_text("Could not load deferred work")
+    expect(panel.get_by_text("Waiting series 11", exact=True)).to_be_visible()
+    assert panel.evaluate("node => node.keepThisPanel") is True
+    panel.get_by_role("button", name="Close deferred work", exact=True).press("Enter")
+    expect(panel).to_be_hidden()
+    expect(button).to_be_focused()
+
+
 def test_metadata_priorities_save_reload_and_domain_reset(authed_page, seeded_server):
     page = authed_page
     errors = []

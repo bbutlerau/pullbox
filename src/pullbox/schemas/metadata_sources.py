@@ -326,9 +326,28 @@ class StoryArcDiscoveryRead(BaseModel):
     sources: list[StoryArcSourceOutcome]
 
 
+class SourceAccountRead(BaseModel):
+    status: SourceStatus | None
+    retry_at: datetime | None
+    probe_until: datetime | None
+
+
+class DeferredMetadataRead(BaseModel):
+    id: int
+    series_id: int
+    series_title: str
+    source: str
+    task_id: Literal["refresh_metadata", "sync_new_issues"]
+    state: Literal["ready", "waiting", "authentication_required", "source_disabled"]
+    retry_at: datetime | None
+
+
 class SourceDescriptor(SourcePolicyRead):
     capabilities: list[SourceCapability]
     availability: SourceStatus | None = None
+    account: SourceAccountRead | None = None
+    deferred_series: int = 0
+    deferred_work: int = 0
 
 
 class SourceTestRead(BaseModel):

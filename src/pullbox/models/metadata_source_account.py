@@ -19,7 +19,7 @@ class MetadataSourceAccount(Base, IdentityMixin, TimestampMixin):
         CheckConstraint(
             "(status IS NULL AND retry_at IS NULL AND lease_until IS NULL) OR "
             "(status IS NOT NULL AND status = 'authentication_failed' "
-            "AND retry_at IS NULL AND lease_until IS NULL) OR "
+            "AND retry_at IS NULL) OR "
             "(status IS NOT NULL AND status IN ('rate_limited','timeout','unavailable') "
             "AND retry_at IS NOT NULL)",
             name="ck_metadata_account_state",

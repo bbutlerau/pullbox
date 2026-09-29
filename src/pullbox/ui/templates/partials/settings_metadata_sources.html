@@ -59,14 +59,25 @@
         <div class="min-w-0 space-y-1">
           <p class="text-sm font-medium text-pb-text" x-text="labels[item.source]"></p>
           <p class="text-sm text-pb-text-sec" x-text="status(item)"></p>
+          <p class="text-sm text-pb-text-sec" x-show="holdMessage(item)" x-text="holdMessage(item)"></p>
+          <p class="text-sm text-pb-text-sec" x-show="item.deferred_series > 0" x-text="item.deferred_series + (item.deferred_series === 1 ? ' series has' : ' series have') + ' deferred metadata work.'"></p>
         </div>
+        <div class="flex flex-wrap items-center justify-end gap-2 ml-auto">
+        <button type="button" class="btn-ghost" x-show="item.deferred_work > 0" :disabled="retryLoading"
+                :aria-label="'View deferred work for ' + labels[item.source]" @click="showRetries(item.source, $el)">View deferred work</button>
         <button type="button" class="btn-ghost" :disabled="busy || !canTest(item)"
                 :aria-label="'Test ' + labels[item.source]" :aria-busy="testing === item.source"
                 @click="test(item)" x-text="testing === item.source ? 'Checking...' : 'Test connection'">Test connection</button>
+        </div>
       </div>
     </template>
     <p role="status" x-show="healthMessage" x-cloak class="pt-3 text-sm text-pb-text-sec" x-text="healthMessage"></p>
   </div>
+  <div class="flex flex-wrap justify-end gap-2 border-t border-pb-border p-5">
+    <button type="button" class="btn-ghost" :disabled="busy" @click="refreshHealth()">Refresh status</button>
+    <button type="button" class="btn-ghost" :disabled="retryLoading" @click="showRetries(null, $el)">View all deferred work</button>
+  </div>
+  {% include "partials/settings_metadata_deferred.html" %}
 {% endcall %}
 </div>
 {% include "partials/settings_metron.html" %}
