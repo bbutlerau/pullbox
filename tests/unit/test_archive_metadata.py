@@ -6,9 +6,10 @@ import io
 import random
 import tarfile
 import zipfile
+from dataclasses import asdict
+from pathlib import Path
 from stat import S_IFLNK
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import py7zr
@@ -18,9 +19,6 @@ from pullbox.core.archive import ArchiveError, ArchiveReader, ArchiveResourceLim
 from pullbox.core.archive_metadata import MAX_METADATA_BYTES, MetadataReadDiagnostic
 from pullbox.core.comicinfo import parse_comicinfo
 from pullbox.core.metroninfo import parse_metroninfo
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 COMICINFO = b"<ComicInfo><Series>Harbor Lights</Series><Number>13a</Number></ComicInfo>"
 METRONINFO = b'<MetronInfo><IDS><ID source="Metron">101</ID></IDS><Number>13a</Number></MetronInfo>'
@@ -89,6 +87,62 @@ def test_probe_opens_archive_once(tmp_path: Path, suffix: str, backend: str) -> 
         result = ArchiveReader(path).read_metadata_files()
     assert result.metroninfo.payload == METRONINFO
     assert opened.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "suffix,backend",
+    [(".cbz", "zipfile.ZipFile"), (".cbt", "tarfile.open"), (".cb7", "py7zr.SevenZipFile")],
+)
+def test_rich_metadata_is_read_with_comicinfo_once_without_mutating_read_only_source(
+    tmp_path: Path, suffix: str, backend: str
+) -> None:
+    payload = (Path(__file__).parents[1] / "fixtures/metroninfo/descriptive.xml").read_bytes()
+    path = _archive(
+        tmp_path / f"issue{suffix}",
+        [("metadata/MetronInfo.xml", payload), ("ComicInfo.xml", COMICINFO), ("001.jpg", b"page")],
+    )
+    original_bytes = path.read_bytes()
+    path.chmod(0o444)
+    before = path.stat()
+    original_files = set(tmp_path.rglob("*"))
+    module, name = backend.split(".")
+    original = getattr({"zipfile": zipfile, "tarfile": tarfile, "py7zr": py7zr}[module], name)
+    with patch(backend, wraps=original) as opened:
+        result = ArchiveReader(path).read_metadata_files()
+        assert result.metroninfo.payload and result.comicinfo.payload
+        metron = parse_metroninfo(result.metroninfo.payload)
+        comic = parse_comicinfo(result.comicinfo.payload.decode())
+    assert asdict(metron).get("credits")
+    assert metron.credits[0].creator.resource_id == "creator:17"
+    assert metron.page_count == 1200 and metron.stories == ("New Shores", "Homeward")
+    assert comic and comic.series == metron.series == "Harbor Lights"
+    assert not metron.diagnostics
+    assert opened.call_count == 1
+    assert path.read_bytes() == original_bytes
+    assert set(tmp_path.rglob("*")) == original_files
+    after = path.stat()
+    assert (after.st_mode, after.st_mtime_ns, after.st_ino) == (
+        before.st_mode,
+        before.st_mtime_ns,
+        before.st_ino,
+    )
+
+
+def test_bad_rich_metadata_does_not_discard_valid_comicinfo(tmp_path: Path) -> None:
+    path = _archive(
+        tmp_path / "issue.cbz",
+        [
+            ("ComicInfo.xml", COMICINFO),
+            ("MetronInfo.xml", b"<MetronInfo><Credits><Credit><Creator>Broken"),
+        ],
+    )
+    original = path.read_bytes()
+    result = ArchiveReader(path).read_metadata_files()
+    assert result.metroninfo.payload and result.comicinfo.payload
+    assert parse_metroninfo(result.metroninfo.payload).diagnostics
+    comic = parse_comicinfo(result.comicinfo.payload.decode())
+    assert comic and comic.series == "Harbor Lights" and comic.number == "13a"
+    assert path.read_bytes() == original
 
 
 @pytest.mark.parametrize("suffix", [".cbz", ".cbt", ".cb7"])

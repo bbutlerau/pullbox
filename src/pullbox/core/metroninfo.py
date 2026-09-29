@@ -25,6 +25,8 @@ from pullbox.core.xml_security import UnsafeXmlError, normalize_xml_for_expat
 MAX_METRONINFO_BYTES = 2 * 1024 * 1024
 MAX_METRONINFO_DEPTH = 32
 MAX_METRONINFO_NODES = 4096
+MAX_METRONINFO_CREDITS = 128
+MAX_METRONINFO_ROLES = 32
 _MAX_ATTRIBUTES = 16
 _MAX_FIELD_LENGTH = 4096
 _CALENDAR_TIMEZONE = r"(?:Z|[+-](?:(?:0[0-9]|1[0-3]):[0-5][0-9]|14:00))?"
@@ -88,6 +90,21 @@ class MetronInfoArc:
 
 
 @dataclass(frozen=True)
+class MetronInfoResource:
+    """Descriptive resource with an opaque local ID, never an identity claim."""
+
+    value: str
+    resource_id: str | None = None
+    language: str | None = None
+
+
+@dataclass(frozen=True)
+class MetronInfoCredit:
+    creator: MetronInfoResource
+    roles: tuple[MetronInfoResource, ...] = ()
+
+
+@dataclass(frozen=True)
 class MetronInfoData:
     series: str | None = None
     number: str | None = None
@@ -106,6 +123,26 @@ class MetronInfoData:
     release_references: tuple[MetronInfoReleaseReference, ...] = ()
     diagnostics: tuple[MetronInfoDiagnostic, ...] = ()
     has_unmapped_content: bool = False
+    sort_name: str | None = None
+    language: str | None = None
+    volume_count: int | None = None
+    publisher_id: str | None = None
+    imprint: MetronInfoResource | None = None
+    alternative_names: tuple[MetronInfoResource, ...] = ()
+    collection_title: str | None = None
+    manga_volume: str | None = None
+    summary: str | None = None
+    notes: str | None = None
+    page_count: int | None = None
+    age_rating: str | None = None
+    story_resources: tuple[MetronInfoResource, ...] = ()
+    genres: tuple[MetronInfoResource, ...] = ()
+    tags: tuple[MetronInfoResource, ...] = ()
+    characters: tuple[MetronInfoResource, ...] = ()
+    teams: tuple[MetronInfoResource, ...] = ()
+    locations: tuple[MetronInfoResource, ...] = ()
+    reprints: tuple[MetronInfoResource, ...] = ()
+    credits: tuple[MetronInfoCredit, ...] | None = None
 
     @property
     def evidence(self) -> tuple[ExactIdentityEvidence, ...]:
@@ -223,6 +260,83 @@ class _Reader:
 
     def field(self, parent: ElementTree.Element | None, tag: str, locator: str) -> str | None:
         return self.read_text(self.single(parent, tag, locator), locator)
+
+    def attribute(self, node: ElementTree.Element | None, name: str, locator: str) -> str | None:
+        if node is None or name not in node.attrib:
+            return None
+        value = node.attrib[name]
+        if len(value) > _MAX_FIELD_LENGTH:
+            self.diagnostic(MetronInfoDiagnosticCode.INVALID_FIELD, f"{locator}/@{name}")
+            return None
+        self.seen[node].add(name)
+        return value
+
+    def language(self, node: ElementTree.Element | None, locator: str) -> str | None:
+        value = self.attribute(node, "lang", locator)
+        if value is not None and not re.fullmatch(r"[a-z]{2}", value):
+            self.diagnostic(MetronInfoDiagnosticCode.INVALID_FIELD, f"{locator}/@lang")
+            return None
+        return value
+
+    def resource(
+        self, node: ElementTree.Element | None, locator: str, *, localized: bool = False
+    ) -> MetronInfoResource | None:
+        if node is None:
+            return None
+        self.seen.setdefault(node, set())
+        value = self.read_text(node, locator)
+        resource_id = self.attribute(node, "id", locator)
+        language = self.language(node, locator) if localized else None
+        if value is None:
+            self.diagnostic(MetronInfoDiagnosticCode.INVALID_FIELD, locator)
+            return None
+        return MetronInfoResource(value, resource_id, language)
+
+    def resources(
+        self,
+        parent: ElementTree.Element | None,
+        group_tag: str,
+        tag: str,
+        locator: str,
+        *,
+        localized: bool = False,
+    ) -> tuple[MetronInfoResource, ...]:
+        group = self.single(parent, group_tag, locator)
+        if group is None:
+            return ()
+        result = []
+        for index, node in enumerate(group.findall(tag), 1):
+            item = self.resource(node, f"{locator}/{tag}[{index}]", localized=localized)
+            if item is not None:
+                result.append(item)
+        return tuple(result)
+
+    def read_credits(self) -> tuple[MetronInfoCredit, ...] | None:
+        group = self.single(self.root, "Credits", "Credits")
+        if group is None:
+            return None
+        diagnostic_count = len(self.diagnostics)
+        nodes = group.findall("Credit")
+        if len(nodes) > MAX_METRONINFO_CREDITS:
+            self.diagnostic(MetronInfoDiagnosticCode.COMPLEXITY_LIMIT, "Credits")
+            return ()
+        credits = []
+        for index, node in enumerate(nodes, 1):
+            locator = f"Credits/Credit[{index}]"
+            self.seen[node] = set()
+            creator = self.resource(
+                self.single(node, "Creator", f"{locator}/Creator"), f"{locator}/Creator"
+            )
+            if creator is None:
+                self.diagnostic(MetronInfoDiagnosticCode.INVALID_FIELD, f"{locator}/Creator")
+            roles = self.single(node, "Roles", f"{locator}/Roles")
+            if roles is not None and len(roles.findall("Role")) > MAX_METRONINFO_ROLES:
+                self.diagnostic(MetronInfoDiagnosticCode.COMPLEXITY_LIMIT, f"{locator}/Roles")
+                return ()
+            values = self.resources(node, "Roles", "Role", f"{locator}/Roles")
+            if creator is not None:
+                credits.append(MetronInfoCredit(creator, values))
+        return tuple(credits) if len(self.diagnostics) == diagnostic_count else ()
 
     def integer(
         self,
@@ -361,28 +475,20 @@ class _Reader:
             self.identities[parent] = True
         if find_exact_identity_conflicts(self.identities):
             self.diagnostic(MetronInfoDiagnosticCode.EXACT_ID_CONFLICT, "IDS")
-        stories_group = self.single(self.root, "Stories", "Stories")
-        stories = []
-        if stories_group is not None:
-            for index, node in enumerate(stories_group.findall("Story"), 1):
-                self.seen[node] = set()
-                value = self.read_text(node, f"Stories/Story[{index}]")
-                if value:
-                    stories.append(value)
+        stories = self.resources(self.root, "Stories", "Story", "Stories")
+        publisher = self.single(self.root, "Publisher", "Publisher")
         data = MetronInfoData(
             series=self.field(series, "Name", "Series/Name"),
             number=self.field(self.root, "Number", "Number"),
             alternative_number=self.field(self.root, "AlternativeNumber", "AlternativeNumber"),
-            publisher=self.field(
-                self.single(self.root, "Publisher", "Publisher"), "Name", "Publisher/Name"
-            ),
+            publisher=self.field(publisher, "Name", "Publisher/Name"),
             start_year=self.year(series, "StartYear", "Series/StartYear"),
             volume=self.integer(series, "Volume", "Series/Volume"),
             series_format=self.field(series, "Format", "Series/Format"),
             issue_count=self.integer(series, "IssueCount", "Series/IssueCount", minimum=1),
             cover_date=self.date("CoverDate"),
             store_date=self.date("StoreDate"),
-            stories=tuple(stories),
+            stories=tuple(item.value for item in stories),
             arcs=self.read_arcs(primary),
             primary_source=primary,
             identities=tuple(
@@ -391,6 +497,34 @@ class _Reader:
             release_references=tuple(
                 MetronInfoReleaseReference(value, flag) for value, flag in self.releases.items()
             ),
+            sort_name=self.field(series, "SortName", "Series/SortName"),
+            language=self.language(series, "Series"),
+            volume_count=self.integer(series, "VolumeCount", "Series/VolumeCount", minimum=1),
+            publisher_id=self.attribute(publisher, "id", "Publisher"),
+            imprint=self.resource(
+                self.single(publisher, "Imprint", "Publisher/Imprint"), "Publisher/Imprint"
+            ),
+            alternative_names=self.resources(
+                series,
+                "AlternativeNames",
+                "AlternativeName",
+                "Series/AlternativeNames",
+                localized=True,
+            ),
+            collection_title=self.field(self.root, "CollectionTitle", "CollectionTitle"),
+            manga_volume=self.field(self.root, "MangaVolume", "MangaVolume"),
+            summary=self.field(self.root, "Summary", "Summary"),
+            notes=self.field(self.root, "Notes", "Notes"),
+            page_count=self.integer(self.root, "PageCount", "PageCount"),
+            age_rating=self.field(self.root, "AgeRating", "AgeRating"),
+            story_resources=stories,
+            genres=self.resources(self.root, "Genres", "Genre", "Genres"),
+            tags=self.resources(self.root, "Tags", "Tag", "Tags"),
+            characters=self.resources(self.root, "Characters", "Character", "Characters"),
+            teams=self.resources(self.root, "Teams", "Team", "Teams"),
+            locations=self.resources(self.root, "Locations", "Location", "Locations"),
+            reprints=self.resources(self.root, "Reprints", "Reprint", "Reprints"),
+            credits=self.read_credits(),
         )
         unmapped = any(
             node not in self.seen

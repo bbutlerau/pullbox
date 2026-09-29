@@ -14,6 +14,15 @@ reader, not full schema validation or lossless XML rewriting. The 1.1 fixture
 includes an unmapped community field deliberately; it must not become canonical
 issue identity or silently disappear in a later rewrite.
 
+`descriptive.xml` adds credits, opaque creator/role IDs, aliases/languages,
+publisher/imprint resources, summary, notes, page count, collection fields and
+named resources. `test_metroninfo_descriptive.py` verifies bounded immutable reads,
+unknown-content diagnostics, absent versus empty credits, and no partial credit
+lists after malformed or over-limit input. Unknown role text remains evidence;
+reading it is not a claim that it passes the output schema. Generic resource IDs
+do not establish provider identities. Missing language does not invent a user
+value from the schema default.
+
 `test_metroninfo.py` covers parsed fields, scoped identities, LOCG discovery
 references, conflicts, supported encodings, and XML/resource boundaries.
 `test_archive_metadata.py` builds temporary ZIP, TAR, and 7z archives with

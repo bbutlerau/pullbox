@@ -451,6 +451,16 @@ rich metadata/membership fields, legacy consumers and coordinated XML/sidecar
 writers are pending.
 This does not complete the full metadata feature.
 
+The bounded MetronInfo reader preserves descriptive fields, creator/role resources,
+localized aliases and schema-specific resource IDs alongside exact issue/series
+evidence. Resource IDs remain opaque document data, not foreign identity claims.
+Missing credits differ from an explicit empty list; malformed or over-limit
+credits cannot produce a partial list. Unsupported elements and attributes still
+raise preservation diagnostics. The paired archive probe reads both XML documents
+in one open pass without changing reference files. This is read support, not
+offline XSD validation or permission to rewrite either document; coordinated
+canonical output remains pending.
+
 The existing import/cache consumers have not yet migrated to this registry.
 Metron has token settings, bounded transport and
 series/issue/arc adapter operations; GCD execution remains unimplemented, and
