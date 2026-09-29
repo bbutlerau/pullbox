@@ -1,6 +1,6 @@
 """Retained removal authorization and private staging evidence."""
 
-from sqlalchemy import Boolean, CheckConstraint, String, Text
+from sqlalchemy import Boolean, CheckConstraint, Index, String, Text, false
 from sqlalchemy.orm import Mapped, mapped_column
 
 from pullbox.models.base import Base, IdentityMixin, TimestampMixin
@@ -9,6 +9,7 @@ from pullbox.models.base import Base, IdentityMixin, TimestampMixin
 class LibraryRemoval(Base, IdentityMixin, TimestampMixin):
     __tablename__ = "library_removals"
     __table_args__ = (
+        Index("ix_library_removal_workspace_pending", "workspace_cleaned", "active", "id"),
         CheckConstraint(
             "state IN ('intended','detached','complete','abandoned','review')",
             name="ck_library_removal_state",
@@ -28,3 +29,4 @@ class LibraryRemoval(Base, IdentityMixin, TimestampMixin):
     plan_json: Mapped[str] = mapped_column(Text)
     cleanup_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     trash_path_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    workspace_cleaned: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())

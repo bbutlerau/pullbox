@@ -211,6 +211,15 @@ async def _backup(
 
 
 async def complete_removal(session: AsyncSession, operation_id: UUID) -> str:
+    """Finish committed work, then prune only its proven terminal workspaces."""
+    from pullbox.services.library_removal_workspaces import prune_terminal_removal
+
+    state = await _complete_removal(session, operation_id)
+    await prune_terminal_removal(session, operation_id)
+    return state
+
+
+async def _complete_removal(session: AsyncSession, operation_id: UUID) -> str:
     """Own clean-session transactions; caller must commit detachment first.
 
     Slow copying, verification and recursive cleanup run without a DB transaction.

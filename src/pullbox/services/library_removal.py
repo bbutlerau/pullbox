@@ -140,6 +140,9 @@ async def recover_library_removals(session: AsyncSession) -> int:
         ).all()
         await session.commit()
         if not rows:
+            from pullbox.services.library_removal_workspaces import prune_terminal_removals
+
+            await prune_terminal_removals(session)
             return restored
         for row_id, operation in rows:
             last_id = row_id
@@ -327,6 +330,10 @@ async def recover_uncommitted_removal(session: AsyncSession, operation_id: UUID)
     row.state, row.active = ("abandoned", False) if restored else ("review", True)
     state = row.state
     await finish_short_mutation(asyncio.create_task(session.commit()))
+    if restored:
+        from pullbox.services.library_removal_workspaces import prune_terminal_removal
+
+        await prune_terminal_removal(session, operation_id)
     return state
 
 

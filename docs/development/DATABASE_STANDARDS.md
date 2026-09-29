@@ -620,6 +620,15 @@ without replacing an existing destination before removing its private source.
 Cancellation joins workers and leaves retryable proof. Unknown replacements are
 preserved. The old public source path is never used for cleanup.
 
+`workspace_cleaned` records proven terminal staging-directory cleanup, separately
+from payload disposition and retained cleanup evidence. Its composite index serves
+bounded startup recovery; completed markers avoid repeated filesystem scans.
+Upgrade defaults existing records to unverified without touching files. Downgrade
+drops only the marker/index and preserves all authorization and cleanup receipts.
+Only inactive complete/abandoned records may be pruned. Descriptor-relative empty
+directory removal and lock checks run under short admission; payloads, replacements
+and unknown contents are never recursively removed by terminal housekeeping.
+
 These are owner-integration primitives, not yet the public delete implementation.
 Series/browser/bulk deletion must adopt the complete lifecycle before paired
 background writing is enabled. POSIX file locking is implemented;

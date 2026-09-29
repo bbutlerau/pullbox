@@ -649,7 +649,16 @@ off-thread in bounded pages without a database transaction. Completed removal
 receipts protect a newly trashed tree for its full retention window even when
 child files have old modification times. The settings surface reports retained
 entries instead of claiming that protected trash was emptied. Public deletion
-owner integration and terminal private-workspace cleanup remain separate work.
+owner integration remains separate work.
+
+`library_removal_workspaces.py` prunes only proven empty workspaces after a
+committed completion or restored abandonment. It keeps original journal receipts,
+checks directory identity through non-following descriptors and refuses live
+cleanup locks, unknown contents or replaced directories. Startup retries terminal
+workspace cleanup in bounded pages, but never resumes payload deletion. An indexed
+completion marker prevents repeated filesystem inspection of cleaned workspaces.
+Cancellation joins the short worker before releasing mutation admission. No public
+series/browser/bulk deletion behavior is activated by this housekeeping boundary.
 
 The existing import/cache consumers have not yet migrated to this registry.
 Metron has token settings, bounded transport and
