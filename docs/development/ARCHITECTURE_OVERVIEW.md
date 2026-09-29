@@ -526,9 +526,14 @@ sources without an intermediate CBZ. RAR/TAR members are streamed; solid 7z is
 decompressed once into bounded, private numbered spools under the owner's staging
 directory, never archive-supplied filesystem paths. Special/encrypted/split
 members and unsafe or oversized payloads fail closed. Cancellation checks cover
-extraction, copying and verification. Production conversion caller migration,
-cross-filesystem publication/trash recovery and paired PDF conversion remain
-outstanding; legacy converters have not switched to this boundary.
+extraction, copying and verification. PDF input uses bounded, private page spools
+under the same owner workspace. Poppler inspects the page count, encryption and
+dimensions before rendering, then renders one page at a time at the requested
+quality without silently downscaling. Output bytes, page pixels and helper
+deadlines are bounded; cancellation kills/reaps the helper before cleanup.
+Both XML documents are still written during the single CBZ construction.
+Production conversion callers have not yet switched their metadata content
+policy to this paired boundary.
 
 `utilities/executors/archive_metadata_staging.py` hands paired CBZ work to the
 interruptible archive worker without giving it a final library destination.
@@ -542,6 +547,8 @@ and revalidate the supplied fingerprints before publication. This context is
 not a durable journal, permission to mutate reference files or a filesystem lock.
 The shared supervisor reaps workers after task cancellation, including during
 spawn and repeated cancellation, and shields pipe draining during kill escalation.
+Paired workers on POSIX run in isolated process groups, unwind helper cleanup on
+SIGTERM, and terminate remaining helpers after cancellation or abnormal exit.
 Legacy operations still publish inside their workers; they have not migrated to
 the staged owner-publication contract. Production binding, journal recovery and
 consumer migration remain required.

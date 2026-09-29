@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
+import signal
+import subprocess
 import sys
 import zipfile
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -806,3 +810,45 @@ def test_copy_with_retries_cleans_partial_file_before_success(
 
     assert calls == 2
     assert target.read_text() == "comic"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX isolated worker group contract")
+async def test_crashed_paired_worker_does_not_leave_a_running_helper(tmp_path, monkeypatch):
+    from pullbox.utilities.executors.archive_metadata_staging import ArchiveMetadataStagingError
+
+    spawn = asyncio.create_subprocess_exec
+    marker = tmp_path / "child.pid"
+    script = (
+        "import pathlib,subprocess,sys,time; "
+        "child=subprocess.Popen([sys.executable, '-c', "
+        "'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+        f"pathlib.Path({str(marker)!r}).write_text(str(child.pid)); "
+        "time.sleep(0.1); sys.exit(1)"
+    )
+
+    async def launch(*_args, **kwargs):
+        return await spawn(sys.executable, "-c", script, **kwargs)
+
+    monkeypatch.setattr(archive_subprocess.asyncio, "create_subprocess_exec", launch)
+    child_pid = None
+    try:
+        with pytest.raises(ArchiveMetadataStagingError):
+            await _run_archive_operation("paired_stage", {})
+        child_pid = int(marker.read_text())
+        for _attempt in range(50):
+            state = subprocess.run(
+                ["ps", "-o", "stat=", "-p", str(child_pid)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=1,
+            ).stdout.strip()
+            if not state or state.startswith("Z"):
+                break
+            await asyncio.sleep(0.01)
+        assert not state or state.startswith("Z"), "worker exited but its helper is still executing"
+    finally:
+        if child_pid is not None:
+            with suppress(ProcessLookupError):
+                os.kill(child_pid, signal.SIGKILL)

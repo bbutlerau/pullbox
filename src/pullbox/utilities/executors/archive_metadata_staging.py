@@ -1,4 +1,4 @@
-"""Private paired CBZ output from ZIP/RAR/7z/TAR for journal-owning workflows."""
+"""Private paired CBZ output from archives/PDF for journal-owning workflows."""
 
 import os
 import shutil
@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from pullbox.core.file_safety import FileSafetyError
 from pullbox.core.metadata_identity import ExternalIdentityRef
+from pullbox.core.metadata_pdf_source import PdfQuality
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot
 from pullbox.services.archive_metadata_rendering import ArchiveMetadataRenderError
 from pullbox.services.archive_metadata_writing import write_cbz_metadata
@@ -45,6 +46,7 @@ class _StagingRequest(BaseModel):
     previous_series: MetadataSnapshot | None = None
     previous_issue: MetadataSnapshot | None = None
     replace_managed: bool = Field(default=False, strict=True)
+    pdf_quality: PdfQuality = "medium"
 
 
 class _StagingResult(BaseModel):
@@ -87,6 +89,7 @@ async def stage_cbz_metadata_interruptible(
     previous_series: MetadataSnapshot | None = None,
     previous_issue: MetadataSnapshot | None = None,
     replace_managed: bool = False,
+    pdf_quality: PdfQuality = "medium",
 ) -> AsyncIterator[StagedArchiveMetadata]:
     """Stage a verified pair, then yield to the independently authorized owner.
 
@@ -111,6 +114,7 @@ async def stage_cbz_metadata_interruptible(
         previous_series=previous_series,
         previous_issue=previous_issue,
         replace_managed=replace_managed,
+        pdf_quality=pdf_quality,
     )
     encoded = request.model_dump_json().encode("utf-8")
     if len(encoded) > _MAX_REQUEST_BYTES:
@@ -245,6 +249,7 @@ def worker_stage_metadata(payload: dict[str, Any]) -> dict[str, Any]:
             previous_series=request.previous_series,
             previous_issue=request.previous_issue,
             replace_managed=request.replace_managed,
+            pdf_quality=request.pdf_quality,
         )
         _check_fingerprint(request.source_path, request.source_fingerprint)
     except ArchiveMetadataRenderError:

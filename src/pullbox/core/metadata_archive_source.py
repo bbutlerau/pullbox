@@ -11,11 +11,14 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, BinaryIO
+from typing import IO, TYPE_CHECKING, BinaryIO
 
 from py7zr.io import Py7zIO, WriterFactory
 
 from pullbox.core.file_safety import FileSafetyError
+
+if TYPE_CHECKING:
+    from pullbox.core.metadata_pdf_source import PdfQuality
 
 
 @dataclass
@@ -47,6 +50,8 @@ def open_metadata_archive(
     validate: Callable[[list[zipfile.ZipInfo]], None],
     check_cancelled: Callable[[], None],
     progress: Callable[[int, int], None],
+    pdf_quality: "PdfQuality" = "medium",
+    pdf_progress: Callable[[int, int], None] | None = None,
 ) -> Iterator[MetadataArchiveSource]:
     """Never extract archive-supplied paths; solid 7z uses private numbered spools.
 
@@ -66,6 +71,18 @@ def open_metadata_archive(
         elif header.startswith(b"7z\xbc\xaf\x27\x1c"):
             result = _open_7z(
                 stream, stack, limit, scratch_parent, validate, check_cancelled, progress
+            )
+        elif header.startswith(b"%PDF-"):
+            from pullbox.core.metadata_pdf_source import open_pdf_pages
+
+            result = open_pdf_pages(
+                stream,
+                stack,
+                limit=limit,
+                scratch_parent=scratch_parent,
+                quality=pdf_quality,
+                check_cancelled=check_cancelled,
+                progress=pdf_progress or progress,
             )
         elif header[257:262] == b"ustar" or path.suffix.casefold() in {".cbt", ".tar"}:
             result = _open_tar(stream, stack, limit, check_cancelled)

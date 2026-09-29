@@ -17,16 +17,20 @@ import inspect
 import json
 import os
 import shutil
+import signal
 import sys
 import tempfile
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import structlog
 
 from pullbox.core.exceptions import JobCancelledError, JobPausedError
+
+if TYPE_CHECKING:
+    from types import FrameType
 
 ControlCheck = Callable[[], Awaitable[None]]
 ProgressCallback = Callable[[str, int, int, str], Awaitable[None] | None]
@@ -256,6 +260,7 @@ async def _run_archive_operation(
 ) -> dict[str, Any]:
     stdout: bytes = b""
     stderr: bytes = b""
+    isolated_group = operation == "paired_stage" and os.name != "nt"
     spawn_task = asyncio.create_task(
         asyncio.create_subprocess_exec(
             sys.executable,
@@ -266,12 +271,15 @@ async def _run_archive_operation(
             json.dumps(payload),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=isolated_group,
         )
     )
     try:
         proc = await asyncio.shield(spawn_task)
     except BaseException:
-        await _await_worker_cleanup(asyncio.create_task(_cleanup_spawned_worker(spawn_task)))
+        await _await_worker_cleanup(
+            asyncio.create_task(_cleanup_spawned_worker(spawn_task, isolated_group=isolated_group))
+        )
         raise
     communicate_task = asyncio.create_task(proc.communicate())
     last_reported_transfer = -1
@@ -339,13 +347,25 @@ async def _run_archive_operation(
     except BaseException as exc:
         was_running = proc.returncode is None
         await _await_worker_cleanup(
-            asyncio.create_task(_terminate_worker_process(proc, communicate_task))
+            asyncio.create_task(
+                _terminate_worker_process(proc, communicate_task, isolated_group=isolated_group)
+            )
         )
         if was_running and isinstance(
             exc, (JobCancelledError, JobPausedError, asyncio.CancelledError)
         ):
             _cleanup_operation_paths(operation, payload, effective_cleanup_paths)
         raise
+
+    if isolated_group:
+        cleanup_task = asyncio.create_task(
+            _terminate_worker_process(proc, communicate_task, isolated_group=True)
+        )
+        try:
+            await asyncio.shield(cleanup_task)
+        except BaseException:
+            await _await_worker_cleanup(cleanup_task)
+            raise
 
     if proc.returncode != 0:
         _cleanup_operation_paths(operation, payload, effective_cleanup_paths)
@@ -389,14 +409,19 @@ async def _dispatch_progress_callback(
 async def _terminate_worker_process(
     proc: asyncio.subprocess.Process,
     communicate_task: asyncio.Task[tuple[bytes, bytes]],
+    *,
+    isolated_group: bool = False,
 ) -> None:
-    if proc.returncode is not None:
+    if proc.returncode is not None and not isolated_group:
         with contextlib.suppress(Exception):
             await communicate_task
         return
 
     with contextlib.suppress(ProcessLookupError):
-        proc.terminate()
+        if isolated_group:
+            os.killpg(proc.pid, signal.SIGTERM)
+        else:
+            proc.terminate()
     try:
         await asyncio.wait_for(
             asyncio.shield(communicate_task), timeout=_PROCESS_TERMINATE_TIMEOUT_SECONDS
@@ -404,14 +429,26 @@ async def _terminate_worker_process(
         return
     except TimeoutError:
         with contextlib.suppress(ProcessLookupError):
-            proc.kill()
+            if isolated_group:
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
         with contextlib.suppress(Exception):
             await communicate_task
+    finally:
+        if isolated_group:
+            # A child can close inherited pipes and still outlive its worker.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(proc.pid, signal.SIGKILL)
 
 
-async def _cleanup_spawned_worker(task: asyncio.Task[asyncio.subprocess.Process]) -> None:
+async def _cleanup_spawned_worker(
+    task: asyncio.Task[asyncio.subprocess.Process], *, isolated_group: bool = False
+) -> None:
     proc = await task
-    await _terminate_worker_process(proc, asyncio.create_task(proc.communicate()))
+    await _terminate_worker_process(
+        proc, asyncio.create_task(proc.communicate()), isolated_group=isolated_group
+    )
 
 
 async def _await_worker_cleanup(task: asyncio.Task[None]) -> None:
@@ -559,6 +596,11 @@ def _worker_main(argv: list[str]) -> int:
 
     operation = argv[1]
     payload = json.loads(argv[2])
+    previous_handler = (
+        signal.signal(signal.SIGTERM, _cancel_paired_worker)
+        if operation == "paired_stage" and os.name != "nt"
+        else None
+    )
 
     try:
         if operation == "convert":
@@ -585,9 +627,17 @@ def _worker_main(argv: list[str]) -> int:
             )
         )
         return 1
+    finally:
+        if previous_handler is not None:
+            signal.signal(signal.SIGTERM, previous_handler)
 
     sys.stdout.write(json.dumps(result))
     return 0
+
+
+def _cancel_paired_worker(_signum: int, _frame: FrameType | None) -> None:
+    # Let private renderers reap their children before the parent escalates to SIGKILL.
+    raise JobCancelledError("Archive worker stopped")
 
 
 def _worker_convert(payload: dict[str, Any]) -> dict[str, Any]:

@@ -83,6 +83,40 @@ async def test_real_worker_yields_private_verified_pair_and_never_replaces_sourc
     assert list(source.parent.iterdir()) == [source]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX isolated worker group cleanup")
+async def test_cancel_during_completed_worker_cleanup_cannot_return_prepared_output(
+    source, monkeypatch
+):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    cleanup = archive_subprocess._terminate_worker_process
+
+    async def delayed_cleanup(proc, communicate, **kwargs):
+        assert proc.returncode == 0
+        entered.set()
+        await release.wait()
+        await cleanup(proc, communicate, **kwargs)
+
+    async def prepare():
+        async with stage(source):
+            return "unexpected prepared output"
+
+    monkeypatch.setattr(archive_subprocess, "_terminate_worker_process", delayed_cleanup)
+    task = asyncio.create_task(prepare())
+    try:
+        await asyncio.wait_for(entered.wait(), 10)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert list(source.parent.iterdir()) == [source]
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 async def test_owner_can_publish_after_journal_boundary_without_repacking(source):
     target = source.parent / "library.cbz"
     async with stage(source) as prepared:
@@ -300,7 +334,12 @@ async def test_unreadable_worker_result_has_fixed_error(source, monkeypatch, out
     async def launch(*_args, **_kwargs):
         return Process()
 
+    async def cleanup(proc, communicate, **_kwargs):
+        assert isinstance(proc, Process)
+        await communicate
+
     monkeypatch.setattr(archive_subprocess.asyncio, "create_subprocess_exec", launch)
+    monkeypatch.setattr(archive_subprocess, "_terminate_worker_process", cleanup)
     with pytest.raises(staging.ArchiveMetadataStagingError, match="worker_failed") as error:
         async with stage(source):
             pytest.fail("invalid worker result must not be accepted")

@@ -20,6 +20,7 @@ from pullbox.core.file_safety import (
 )
 from pullbox.core.metadata_archive_source import MetadataArchiveSource, open_metadata_archive
 from pullbox.core.metadata_identity import ExternalIdentityRef
+from pullbox.core.metadata_pdf_source import PdfQuality
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot
 from pullbox.services.archive_metadata_rendering import render_archive_metadata
 
@@ -45,6 +46,7 @@ def write_cbz_metadata(
     previous_series: MetadataSnapshot | None = None,
     previous_issue: MetadataSnapshot | None = None,
     replace_managed: bool = False,
+    pdf_quality: PdfQuality = "medium",
 ) -> bool:
     """Write a verified pair in one CBZ construction, off the event loop.
 
@@ -56,6 +58,8 @@ def write_cbz_metadata(
     """
     if isinstance(max_uncompressed_bytes, bool) or max_uncompressed_bytes <= 0:
         raise ValueError("Archive budget must be positive")
+    if pdf_quality not in {"high", "medium", "low"}:
+        raise ValueError("Invalid PDF quality preset")
     source_path = source_path.absolute()
     target_path = target_path.absolute()
     refresh = source_path == target_path
@@ -94,6 +98,10 @@ def write_cbz_metadata(
             check_cancelled=lambda: _check_cancelled(check_cancelled),
             progress=lambda current, total: _progress(
                 progress_callback, check_cancelled, "extracting", current, total
+            ),
+            pdf_quality=pdf_quality,
+            pdf_progress=lambda current, total: _progress(
+                progress_callback, check_cancelled, "rendering", current, total, "pages"
             ),
         ) as source:
             entries = source.entries
