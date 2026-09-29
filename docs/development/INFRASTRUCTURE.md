@@ -604,6 +604,7 @@ Production dependency categories:
 | Auth/security | bcrypt, itsdangerous, cryptography |
 | Logging/tasks | structlog, APScheduler |
 | Archive/media | rarfile, py7zr, Pillow, pdf2image, tzlocal |
+| Embedded metadata | defusedxml for bounded parsing; xmlschema for offline MetronInfo XSD 1.1 validation |
 
 Development dependency categories:
 
@@ -619,6 +620,9 @@ Development dependency categories:
 
 - Keep production dependencies minimal.
 - Every production dependency should justify its runtime value.
+- MetronInfo's bundled schema requires XSD 1.1 assertions. Keep its schema,
+  upstream license, and provenance in the built package; validation must not
+  download schemas or follow document-supplied resource locations.
 - Prefer standard library tools when they are good enough.
 - Use compatible-release pinning where practical.
 - Avoid unnecessary dependency churn.

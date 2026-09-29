@@ -482,8 +482,16 @@ diagnostics rather than becoming provider-filled gaps. Previously observed IDs
 survive refreshes without acquiring verified ownership. Existing baseline storage
 retains this additive provenance with the same revision/transaction checks.
 This comparison and adoption are not write authorization: production file-binding
-integration, output-schema validation and coordinated atomic writers remain
-required before the existing import/writer consumers switch to them.
+integration and coordinated atomic writers remain required before the existing
+import/writer consumers switch to them.
+
+`core/metroninfo_schema.py` provides the offline output-schema gate. It validates
+a bounded, defused document with the bundled, pinned MetronInfo 1.1 XSD through
+`XMLSchema11`, including its primary-ID/URL assertions. Schema location hints
+cannot trigger network or filesystem access. Validation errors expose fixed
+codes, not XML payloads. The schema, MIT license and provenance ship in the
+Python package. This gate checks representation, not identity or write authority;
+canonical paired rendering and archive integration are still required.
 
 The existing import/cache consumers have not yet migrated to this registry.
 Metron has token settings, bounded transport and
