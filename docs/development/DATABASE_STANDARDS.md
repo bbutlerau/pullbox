@@ -487,6 +487,25 @@ persist across refreshes until a new archive comparison updates them. The caller
 still owns independent file/target matching and atomic application to entity rows;
 baseline persistence alone neither establishes that match nor permits file writes.
 
+### Archive Publication Intent
+
+`archive_metadata_publications` stores versioned, bounded evidence before a paired
+archive replacement. A unique operation ID supports exact replay; active file and
+canonical-path reservations reject concurrent attempts. Nullable `SET NULL` file
+links preserve the immutable intent when the library row is deleted; the path
+reservation and evidence survive. There is no age-based lease takeover.
+
+Services use caller-owned transactions and the shared SQLite write/savepoint
+boundary. Publication locks source policies, series, issue, root, file, then the
+journal row. Recovery only locks the journal row. Large file hashing, rendering
+and staging stay outside write transactions; only the short, offloaded atomic
+publication and directory-sync boundary retains the lock. An intent must commit
+before publication. A failed post-rename transaction leaves evidence for later
+inspection instead of authorizing blind replacement. Published records remain
+reserved pending coherent canonical/file-state finalization. Downgrade refuses
+to discard any intended, published or review record; only abandoned-only history
+may be removed. No existing archive is backfilled or mutated by the migration.
+
 ### Source Catalog Checkpoints
 
 `series_catalog_checkpoints` records complete issue-catalog progress separately

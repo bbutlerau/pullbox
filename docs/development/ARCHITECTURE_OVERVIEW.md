@@ -555,6 +555,22 @@ evidence immediately before publication. These read sets are not locks or a
 durable journal. Production migration still requires a serialized recoverable
 publication boundary, output baseline persistence and crash reconciliation.
 
+`services/archive_metadata_publication.py` now retains bounded publication intent
+before replacement. Independent file/path reservations do not expire, and deleting
+a library row does not erase recovery evidence. Preparation validates the staged
+XML against its canonical snapshots and hashes source/output outside DB sessions.
+Publication rechecks binding under policy/parent/issue/root/file locks and holds
+the journal lock through the short offloaded stat/rename/directory-sync boundary.
+Cancellation joins file work before releasing the lock. Recovery hashes outside
+the transaction, then rechecks file evidence and journal revision under that same
+lock. It recognizes the verified staged inode/content after a rename/DB-commit
+failure, abandons only a proven untouched original, and retains unknown outcomes
+for review. Recovery never republishes or deletes a file. The published state is
+filesystem evidence only, not completed canonical DB adoption; its reservation
+stays active. Production callers remain unchanged pending finalization, rollback,
+shared mutation coordination and restart orchestration. Existing legacy writers
+and external filesystem programs are not fenced by this new journal.
+
 The existing import/cache consumers have not yet migrated to this registry.
 Metron has token settings, bounded transport and
 series/issue/arc adapter operations; GCD execution remains unimplemented, and

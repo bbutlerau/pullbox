@@ -5,6 +5,7 @@ Import Base from here for migration target_metadata.
 """
 
 from pullbox.models.airdcpp import AirDcppAcquisition, AirDcppClientSettings
+from pullbox.models.archive_metadata_publication import ArchiveMetadataPublication
 from pullbox.models.audit_log import AuditEventType, AuditLog
 from pullbox.models.base import Base, IdentityMixin, TimestampMixin
 from pullbox.models.blocklist import BlocklistEntry, BlocklistReason
@@ -132,6 +133,7 @@ __all__ = [
     "APIKey",
     "AirDcppAcquisition",
     "AirDcppClientSettings",
+    "ArchiveMetadataPublication",
     "AuditEventType",
     "AuditLog",
     "Base",
