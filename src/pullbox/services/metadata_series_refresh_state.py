@@ -62,7 +62,7 @@ class RefreshEntityState:
     values: MetadataValues
     baseline: MetadataSnapshot | None
     baseline_revision: int
-    claims: tuple[tuple[ExternalIdentityRef, IdentityVerificationState, int], ...]
+    claims: tuple[tuple[ExternalIdentityRef, IdentityVerificationState | None, int], ...]
     event_id: int
     comicvine_id: int | None
     overrides: frozenset[str] = frozenset()

@@ -20,7 +20,7 @@ from pullbox.schemas.metadata_snapshot import (
     MetadataValues,
     field_domain,
 )
-from pullbox.services.metadata_assembly import assemble_metadata
+from pullbox.services.metadata_assembly import MetadataCandidate, assemble_metadata
 from pullbox.services.metadata_baselines import (
     MetadataBaselineWrite,
     load_metadata_baseline,
@@ -39,6 +39,7 @@ async def persist_arc_metadata(
     *,
     created: bool,
     replace_managed: bool = False,
+    candidates: Sequence[MetadataCandidate] | None = None,
 ) -> None:
     """Apply descriptive fields only; membership and placements retain their own rules."""
     evidence = preview.source_evidence
@@ -79,7 +80,7 @@ async def persist_arc_metadata(
     snapshot = assemble_metadata(
         kind,
         identities,
-        [evidence.arc],
+        candidates if candidates is not None else [evidence.arc],
         await read_source_policies(session),
         now=now,
         current=current,

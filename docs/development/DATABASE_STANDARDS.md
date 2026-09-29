@@ -456,6 +456,13 @@ share that transaction; pre-existing rows are not retrospectively attributed to
 the incoming source. Issue baseline writes are batched at 200. Refresh reloads
 current mapped fields after claiming the arc, retaining user changes and clears.
 Corrupt provenance aborts the entire refresh, including membership additions.
+Source-bound multi-source refresh captures an immutable read set before provider
+I/O and releases its read transaction. It locks source policies before the arc,
+then compares mapped fields, baseline revision/payload, identity claims/history,
+arc revision/lifecycle/monitoring and managed-placement presence before saving.
+A stale read aborts the complete membership and metadata write, including when a
+caller catches the domain error. Secondary sources never acquire membership or
+identity ownership through descriptive enrichment.
 
 ### Source Catalog Checkpoints
 

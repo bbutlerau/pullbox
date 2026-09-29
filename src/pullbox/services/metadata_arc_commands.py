@@ -17,6 +17,7 @@ from pullbox.schemas.metadata_arc_catalog import (
 )
 from pullbox.schemas.metadata_sources import StoryArcPreviewQuery
 from pullbox.services.metadata_arc_catalog import fetch_source_arc_catalog
+from pullbox.services.metadata_arc_refresh import prepare_arc_metadata
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
 from pullbox.services.metadata_read_cache import source_read_cache
 from pullbox.services.metadata_sources import load_source_runtime
@@ -161,6 +162,7 @@ async def source_arc_refresh_transaction(
     decision: ArcCatalogRefresh,
 ) -> AsyncIterator[ArcCommandResult]:
     _require_decision(session, preview, decision)
+    metadata_refresh = await prepare_arc_metadata(session, story_arc_id, preview)
     async with session.begin():
         result = await catalog_writer(preview).refresh(
             session,
@@ -168,6 +170,7 @@ async def source_arc_refresh_transaction(
             preview,
             expected_revision=decision.expected_revision,
             library_root_id=decision.library_root_id,
+            metadata_refresh=metadata_refresh,
         )
         yield ArcCommandResult(
             result.story_arc,

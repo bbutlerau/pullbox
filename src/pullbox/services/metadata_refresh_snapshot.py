@@ -44,6 +44,7 @@ async def fetch_metadata_snapshot(
     overrides: frozenset[str] = frozenset(),
     replace_managed: bool = False,
     parent_identities: Sequence[ExternalIdentityRef] = (),
+    initial_candidates: Sequence[MetadataCandidate] = (),
 ) -> MetadataRefreshSnapshot:
     """Fetch only attached identities and stop each domain at its first usable value.
 
@@ -121,6 +122,14 @@ async def fetch_metadata_snapshot(
             ):
                 raise MetadataAssemblyError("Issue refresh requires verified parent identities.")
             remaining.add(source)
+
+    # A freshly fetched catalog may already include this exact descriptive row.
+    # Validate it through the same assembler, but still consult higher priorities.
+    candidates.extend(initial_candidates)
+    snapshot = assemble(local=True)
+    for candidate in initial_candidates:
+        remaining.discard(candidate.source)
+        outcomes[candidate.source] = SourceOutcome(source=candidate.source, status=SourceStatus.OK)
 
     def rank(source: MetadataSource, field: str) -> tuple[int, str]:
         policy = reader.runtime[source].policy

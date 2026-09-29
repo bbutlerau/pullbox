@@ -75,6 +75,30 @@ async def test_separate_domain_priority_and_gap_fill_without_repeat_fetch():
     assert all(len(a.calls) == 1 and a.closed == 1 for a in adapters.values())
 
 
+async def test_fresh_catalog_evidence_is_reused_without_skipping_higher_priority():
+    registry, adapters = setup()
+    seed = row(METRON, title="Already fetched").model_copy(
+        update={"description": "Catalog description"}
+    )
+    result = await fetch(
+        registry,
+        fields=frozenset({"title", "description"}),
+        initial_candidates=[seed],
+    )
+    assert result.snapshot.values.title == "Primary"
+    assert result.snapshot.values.description == "Catalog description"
+    assert adapters[CV].calls == [("series", "42", None)]
+    assert not adapters[METRON].calls
+    assert {outcome.status for outcome in result.outcomes} == {SourceStatus.OK}
+
+
+async def test_seeded_evidence_cannot_bypass_exact_identity_validation():
+    registry, adapters = setup()
+    with pytest.raises(MetadataAssemblyError, match="verified exact identity"):
+        await fetch(registry, initial_candidates=[row(METRON, external_id="99")])
+    assert not any(adapter.calls for adapter in adapters.values())
+
+
 async def test_failure_keeps_typed_outcome_and_falls_back_without_changing_user_value():
     registry, adapters = setup()
     adapters[CV].error = MetadataSourceError(SourceStatus.RATE_LIMITED, 60)

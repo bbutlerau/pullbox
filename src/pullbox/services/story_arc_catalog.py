@@ -26,6 +26,7 @@ from pullbox.services.metadata_arc_catalog import (
     MAX_CATALOG_PARENTS,
     project_source_arc_catalog,
 )
+from pullbox.services.metadata_arc_refresh import ArcMetadataRefresh, require_arc_refresh_state
 from pullbox.services.metadata_assembly import MetadataAssemblyError
 from pullbox.services.metadata_baselines import MetadataBaselineConflictError
 from pullbox.services.story_arc_catalog_evidence import (
@@ -340,7 +341,10 @@ class StoryArcCatalogService:
         expected_revision: int,
         library_root_id: int | None = None,
         replace_metadata: bool = True,
+        metadata_refresh: ArcMetadataRefresh | None = None,
     ) -> StoryArcCatalogRefreshResult:
+        if metadata_refresh is not None and metadata_refresh.before.entity.local_id != story_arc_id:
+            raise StoryArcCatalogError("metadata_changed", "Story arc changed; refresh the review")
         delta = await self.preview_refresh(session, story_arc_id, preview)
         if isinstance(expected_revision, bool) or delta.revision != expected_revision:
             raise StoryArcCatalogError("revision_conflict", "Story arc changed; refresh the review")
@@ -353,6 +357,8 @@ class StoryArcCatalogService:
         await self._enclose_savepoint(session)
         try:
             async with session.begin_nested():
+                if metadata_refresh is not None:
+                    await require_arc_refresh_state(session, metadata_refresh)
                 await require_catalog_source_revision(session, preview)
                 await require_crosswalk_ownership(session, preview)
                 claimed = await session.execute(
@@ -366,7 +372,12 @@ class StoryArcCatalogService:
                     )
                 await attach_arc_identity(session, arc, preview)
                 await persist_arc_metadata(
-                    session, arc, preview, created=False, replace_managed=replace_metadata
+                    session,
+                    arc,
+                    preview,
+                    created=False,
+                    replace_managed=replace_metadata,
+                    candidates=metadata_refresh.fetched.candidates if metadata_refresh else None,
                 )
                 issues = await seed_members(
                     session, preview, root, preview.metadata.issue_provider_ids
@@ -411,6 +422,20 @@ class StoryArcCatalogService:
                 if preview.source_evidence is None:
                     arc.cover_url = preview.metadata.cover_url
                 self._diagnostics(arc, preview, root.id, delta.removed_issue_provider_ids, pending)
+                if metadata_refresh is not None:
+                    arc.diagnostics = {
+                        **arc.diagnostics,
+                        "metadata_refresh": {
+                            "checked_at": datetime.now(UTC).isoformat(),
+                            "outcomes": [
+                                item.model_dump(
+                                    mode="json",
+                                    include={"source", "status", "retry_after_seconds"},
+                                )
+                                for item in metadata_refresh.fetched.outcomes
+                            ],
+                        },
+                    }
                 await session.flush()
                 return StoryArcCatalogRefreshResult(
                     arc, tuple(created), delta.removed_issue_provider_ids

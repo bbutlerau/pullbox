@@ -22,6 +22,7 @@ from pullbox.schemas.metadata_sources import MetadataDomain, SourceCapability
 from pullbox.services.import_activity import has_active_import_scheduler_protection
 from pullbox.services.metadata_arc_catalog import StoryArcSourceError, fetch_source_arc_catalog
 from pullbox.services.metadata_arc_commands import catalog_writer
+from pullbox.services.metadata_arc_refresh import fetch_arc_metadata, read_arc_refresh_state
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
 from pullbox.services.metadata_read_cache import source_read_cache
 from pullbox.services.metadata_sources import load_source_runtime
@@ -150,6 +151,7 @@ async def _refresh_arc(factory: async_sessionmaker[AsyncSession], arc_id: int) -
         revision = arc.revision
         registry = await _registry(session)
         targets = await _targets(session, arc, registry)
+        before = await read_arc_refresh_state(session, arc_id)
     if not targets:
         return None
     try:
@@ -178,6 +180,11 @@ async def _refresh_arc(factory: async_sessionmaker[AsyncSession], arc_id: int) -
             raise failure
         if await has_active_import_scheduler_protection(factory):
             return None
+        metadata_refresh = await fetch_arc_metadata(
+            registry, before, preview, replace_managed=False
+        )
+        if await has_active_import_scheduler_protection(factory):
+            return None
         async with factory() as session:
             arc = await session.scalar(
                 select(StoryArc).where(StoryArc.id == arc_id, *_active_monitored())
@@ -202,6 +209,7 @@ async def _refresh_arc(factory: async_sessionmaker[AsyncSession], arc_id: int) -
                 expected_revision=revision,
                 library_root_id=default_roots[0] if len(default_roots) == 1 else None,
                 replace_metadata=False,
+                metadata_refresh=metadata_refresh,
             )
             await session.commit()
             # The wanted sweep rechecks monitoring, skips, dates and duplicates.

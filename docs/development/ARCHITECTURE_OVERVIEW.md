@@ -423,9 +423,17 @@ blocking other safe changes; the baseline records that restriction separately
 from user overrides. Existing order, skipped and removed members, partial parent
 catalogs and pending-placement review remain unchanged. Legacy snapshots without
 normalized source evidence are not silently assigned canonical provenance.
-Multi-source Arc descriptive-read integration, remaining credits/membership fields
-and coordinated XML/sidecar writers are still pending; baselines alone do not
-complete those workflows.
+Source-bound manual and scheduled Arc refresh use the shared descriptive cascade
+over verified attached identities. Fresh catalog evidence is reused without a
+second read of that transport; higher-priority sources can supply descriptive
+fields without taking over membership. The read set captures values, baseline,
+identity revisions/history, arc state, placement restrictions and source policies.
+Provider I/O runs after releasing the reader. Policy-first/arc locks and read-set
+revalidation precede the atomic catalog write; concurrent changes reject the whole
+refresh. Partial source outcomes are retained as bounded diagnostics. New Add and
+legacy preview compatibility still use their selected source; remaining legacy
+consumer migration, complete credits/membership fields and coordinated XML/sidecar
+writers are pending. This does not complete the full metadata feature.
 
 The existing import/cache consumers have not yet migrated to this registry.
 Metron has token settings, bounded transport and
