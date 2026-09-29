@@ -321,8 +321,8 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("cover_migration_failed", subsystem="cover_migration", exc_info=True)
 
     # Ensure utility directories (trash and export) exist
+    from pullbox.services.library_trash_cleanup import cleanup_trash
     from pullbox.utilities.settings import (
-        cleanup_utility_trash_retention,
         ensure_utility_directories,
         resolve_utility_directory,
     )
@@ -363,7 +363,8 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         )
         await ensure_utility_directories(trash_dir, export_dir)
         retention_days = int(util_cfg.get("utility_trash_retention_days", "30") or "30")
-        cleanup_utility_trash_retention(trash_dir, retention_days)
+        async with factory() as session:
+            await cleanup_trash(session, trash_dir, retention_days=retention_days)
     except Exception:
         logger.warning("utility_directory_creation_failed", subsystem="utility_dirs", exc_info=True)
 

@@ -1,6 +1,8 @@
 """Durable staging and recovery boundary for library removal owners."""
 
 import asyncio
+import hashlib
+import os
 import stat
 from contextlib import suppress
 from pathlib import Path
@@ -26,6 +28,11 @@ from pullbox.services.library_mutation_coordination import (
 )
 
 logger = structlog.get_logger(__name__)
+
+
+def trash_path_key(path: Path) -> str:
+    """Index literal trash paths without indexing arbitrarily long filenames."""
+    return hashlib.sha256(os.fsencode(path)).hexdigest()
 
 
 class RemovalPlan(BaseModel):
@@ -245,7 +252,11 @@ async def record_removal(session: AsyncSession, plan: RemovalPlan) -> None:
     if _fingerprint(plan.source) != plan.fingerprint or _fingerprint(plan.stage) is not None:
         raise ValidationError("Library removal source or staging changed.")
     session.add(
-        LibraryRemoval(operation_id=str(plan.operation_id), plan_json=plan.model_dump_json())
+        LibraryRemoval(
+            operation_id=str(plan.operation_id),
+            plan_json=plan.model_dump_json(),
+            trash_path_key=trash_path_key(plan.trash_path) if plan.trash_path else None,
+        )
     )
     await session.flush()
     session.info[f"removal_intent:{plan.operation_id}"] = session.sync_session.get_transaction()

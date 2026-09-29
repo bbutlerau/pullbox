@@ -219,7 +219,7 @@ function utilitiesSettings() {
     async emptyTrashNow() {
       const ok = await window.pbConfirm({
         title: 'Empty Utility Trash',
-        message: 'Delete everything currently in the utility trash folder? This cannot be undone.',
+        message: 'Permanently delete disposable contents from the utility trash folder? Protected recovery files will be kept. This cannot be undone.',
         confirmText: 'Empty Trash',
         destructive: true,
       });
@@ -240,10 +240,12 @@ function utilitiesSettings() {
         }
         if (typeof showToast === 'function') {
           showToast({
-            message: data.deleted_entries > 0
+            message: data.retained_entries > 0
+              ? `Cleanup finished. Deleted ${data.deleted_entries} item${data.deleted_entries === 1 ? '' : 's'}; kept ${data.retained_entries} protected or changed entr${data.retained_entries === 1 ? 'y' : 'ies'}. See the logs for details.`
+              : data.deleted_entries > 0
               ? `Trash emptied. Deleted ${data.deleted_entries} item${data.deleted_entries === 1 ? '' : 's'}.`
               : 'Trash is already empty.',
-            level: 'success',
+            level: data.retained_entries > 0 ? 'warning' : 'success',
           });
         }
       } catch (err) {

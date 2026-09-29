@@ -242,12 +242,38 @@ async def test_empty_trash_uses_resolved_context(
         "_resolve_utility_trash_context",
         AsyncMock(return_value=(tmp_path / ".trash", 30)),
     )
-    monkeypatch.setattr(utilities_router, "empty_utility_trash", lambda _path: 3)
+    from pullbox.services.library_trash_cleanup import TrashCleanupResult
+
+    cleanup = AsyncMock(return_value=TrashCleanupResult(deleted_entries=3))
+    monkeypatch.setattr(utilities_router, "cleanup_trash", cleanup, raising=False)
 
     response = await utilities_router.empty_trash(_user(), db_session)
 
     assert response == {"message": "Trash emptied.", "deleted_entries": 3}
     assert (tmp_path / ".trash").is_dir()
+    cleanup.assert_awaited_once_with(db_session, tmp_path / ".trash")
+
+
+@pytest.mark.asyncio
+async def test_empty_trash_reports_retained_recovery_files(db_session, tmp_path, monkeypatch):
+    from pullbox.services.library_trash_cleanup import TrashCleanupResult
+
+    monkeypatch.setattr(utilities_router, "ensure_no_active_import_file_mutation", AsyncMock())
+    monkeypatch.setattr(
+        utilities_router,
+        "_resolve_utility_trash_context",
+        AsyncMock(return_value=(tmp_path / ".trash", 30)),
+    )
+    monkeypatch.setattr(
+        utilities_router,
+        "cleanup_trash",
+        AsyncMock(return_value=TrashCleanupResult(deleted_entries=2, retained_entries=3)),
+        raising=False,
+    )
+    response = await utilities_router.empty_trash(_user(), db_session)
+    assert response["deleted_entries"] == 2
+    assert response["retained_entries"] == 3
+    assert "kept" in response["message"].lower()
 
 
 @pytest.mark.asyncio

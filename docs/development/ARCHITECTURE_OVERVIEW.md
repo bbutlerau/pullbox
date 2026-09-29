@@ -639,7 +639,17 @@ renames rather than copying large collections. Cancellation leaves owned partial
 copies/deletions retryable, and cleanup never follows the old public source path.
 The browser, series and bulk deletion commands still need to adopt this lifecycle;
 the primitives alone do not enable paired production writers or change public
-deletion semantics. Trash-retention coordination and non-POSIX locking remain open.
+deletion semantics. Non-POSIX removal locking remains open.
+
+`library_trash_cleanup.py` owns startup retention and interactive trash cleanup.
+It checks retained publication/conversion/removal reservations under shared
+admission before each short unlink, keeps private preparation directories, and
+refuses registered files or library roots inside trash. Directory traversal runs
+off-thread in bounded pages without a database transaction. Completed removal
+receipts protect a newly trashed tree for its full retention window even when
+child files have old modification times. The settings surface reports retained
+entries instead of claiming that protected trash was emptied. Public deletion
+owner integration and terminal private-workspace cleanup remain separate work.
 
 The existing import/cache consumers have not yet migrated to this registry.
 Metron has token settings, bounded transport and

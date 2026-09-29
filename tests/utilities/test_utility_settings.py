@@ -546,11 +546,12 @@ class TestTrashCleanup:
         assert existing.exists()
         assert not source.exists()
 
-    def test_cleanup_retention_deletes_old_files_and_prunes_empty_directories(
+    async def test_cleanup_retention_deletes_old_files_and_prunes_empty_directories(
         self,
         tmp_path: Path,
+        db_session: AsyncSession,
     ) -> None:
-        from pullbox.utilities.settings import cleanup_utility_trash_retention
+        from pullbox.services.library_trash_cleanup import cleanup_trash
 
         trash_dir = tmp_path / ".trash"
         nested_dir = trash_dir / "nested"
@@ -563,19 +564,21 @@ class TestTrashCleanup:
         old_timestamp = (datetime.now(tz=UTC) - timedelta(days=45)).timestamp()
         os.utime(old_file, (old_timestamp, old_timestamp))
 
-        deleted = cleanup_utility_trash_retention(trash_dir, retention_days=30)
+        await db_session.commit()
+        deleted = (await cleanup_trash(db_session, trash_dir, retention_days=30)).deleted_entries
 
         assert deleted == 2
         assert not old_file.exists()
         assert new_file.exists()
         assert not nested_dir.exists()
 
-    def test_cleanup_retention_keeps_freshly_trashed_old_file(
+    async def test_cleanup_retention_keeps_freshly_trashed_old_file(
         self,
         tmp_path: Path,
+        db_session: AsyncSession,
     ) -> None:
+        from pullbox.services.library_trash_cleanup import cleanup_trash
         from pullbox.utilities.settings import (
-            cleanup_utility_trash_retention,
             move_file_to_utility_trash,
         )
 
@@ -593,13 +596,16 @@ class TestTrashCleanup:
             relative_path=Path("Series/Issue 001.cbz"),
         )
 
-        deleted = cleanup_utility_trash_retention(trash_dir, retention_days=30)
+        await db_session.commit()
+        deleted = (await cleanup_trash(db_session, trash_dir, retention_days=30)).deleted_entries
 
         assert deleted == 0
         assert moved.exists()
 
-    def test_empty_trash_removes_all_contents_but_preserves_root(self, tmp_path: Path) -> None:
-        from pullbox.utilities.settings import empty_utility_trash
+    async def test_empty_trash_removes_all_contents_but_preserves_root(
+        self, tmp_path: Path, db_session: AsyncSession
+    ) -> None:
+        from pullbox.services.library_trash_cleanup import cleanup_trash
 
         trash_dir = tmp_path / ".trash"
         nested_dir = trash_dir / "nested"
@@ -607,7 +613,8 @@ class TestTrashCleanup:
         (nested_dir / "a.cbz").write_text("a")
         (trash_dir / "b.cb7").write_text("b")
 
-        deleted = empty_utility_trash(trash_dir)
+        await db_session.commit()
+        deleted = (await cleanup_trash(db_session, trash_dir)).deleted_entries
 
         assert deleted == 3
         assert trash_dir.exists()

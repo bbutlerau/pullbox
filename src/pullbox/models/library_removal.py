@@ -27,3 +27,4 @@ class LibraryRemoval(Base, IdentityMixin, TimestampMixin):
     state: Mapped[str] = mapped_column(String(10), default="intended")
     plan_json: Mapped[str] = mapped_column(Text)
     cleanup_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trash_path_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)

@@ -621,9 +621,22 @@ Cancellation joins workers and leaves retryable proof. Unknown replacements are
 preserved. The old public source path is never used for cleanup.
 
 These are owner-integration primitives, not yet the public delete implementation.
-Series/browser/bulk deletion and trash retention must adopt the complete lifecycle
-before paired background writing is enabled. POSIX file locking is implemented;
+Series/browser/bulk deletion must adopt the complete lifecycle before paired
+background writing is enabled. POSIX file locking is implemented;
 other platforms currently fail closed at private cleanup admission.
+
+Trash maintenance now owns an idle session and commits each short, identity-checked
+unlink separately. The startup and utility route callers finish configuration
+reads before entering that lifecycle; the service rejects an existing transaction
+instead of committing unrelated changes. Shared admission protects recovery
+dependencies until deletion finishes, including cancellation. Traversal and
+bounded directory-page construction occur outside transactions. The indexed
+`library_removals.trash_path_key` is a derived literal-path lookup, not identity
+authority: the bounded original plan and cleanup receipt are revalidated before
+using their publication time to protect a whole trash tree. Upgrade backfills this
+index in bounded batches without filesystem access; downgrade discards only the
+derived key, never the retained plan/receipt. Existing legacy trash files keep
+mtime-based retention until their writers adopt journaled ownership.
 
 ### Source Catalog Checkpoints
 

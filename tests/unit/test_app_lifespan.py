@@ -269,8 +269,8 @@ def patched_lifespan(monkeypatch: pytest.MonkeyPatch, tmp_path):
         lambda *_args: asyncio.sleep(0),
     )
     monkeypatch.setattr(
-        "pullbox.utilities.settings.cleanup_utility_trash_retention",
-        lambda *_args: None,
+        "pullbox.services.library_trash_cleanup.cleanup_trash",
+        lambda *_args, **_kwargs: asyncio.sleep(0),
     )
     monkeypatch.setattr(
         "pullbox.utilities.settings.resolve_utility_directory",
