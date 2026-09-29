@@ -24,11 +24,14 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal, cast
 
+import structlog
+
 from pullbox.core.exceptions import JobCancelledError, JobPausedError
 
 ControlCheck = Callable[[], Awaitable[None]]
 ProgressCallback = Callable[[str, int, int, str], Awaitable[None] | None]
-_ArchiveOperation = Literal["convert", "transfer", "embed", "materialize_embed"]
+_ArchiveOperation = Literal["convert", "transfer", "embed", "materialize_embed", "paired_stage"]
+logger = structlog.get_logger(__name__)
 
 _CONTROL_POLL_INTERVAL_SECONDS = 0.2
 _PROCESS_TERMINATE_TIMEOUT_SECONDS = 2.0
@@ -253,16 +256,23 @@ async def _run_archive_operation(
 ) -> dict[str, Any]:
     stdout: bytes = b""
     stderr: bytes = b""
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m",
-        "pullbox.utilities.executors.archive_subprocess",
-        "--worker",
-        operation,
-        json.dumps(payload),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    spawn_task = asyncio.create_task(
+        asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "pullbox.utilities.executors.archive_subprocess",
+            "--worker",
+            operation,
+            json.dumps(payload),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
     )
+    try:
+        proc = await asyncio.shield(spawn_task)
+    except BaseException:
+        await _await_worker_cleanup(asyncio.create_task(_cleanup_spawned_worker(spawn_task)))
+        raise
     communicate_task = asyncio.create_task(proc.communicate())
     last_reported_transfer = -1
     last_reported_state: tuple[str, int, int, str] | None = None
@@ -306,12 +316,7 @@ async def _run_archive_operation(
                     await _dispatch_progress_callback(progress_callback, *progress_state)
 
             if cancellation_check is not None:
-                try:
-                    await cancellation_check()
-                except (JobCancelledError, JobPausedError):
-                    await _terminate_worker_process(proc, communicate_task)
-                    _cleanup_paths(effective_cleanup_paths)
-                    raise
+                await cancellation_check()
         if progress_callback is not None and progress_total is not None:
             final_bytes = progress_total
             if progress_path is not None:
@@ -331,13 +336,19 @@ async def _run_archive_operation(
             progress_state = _read_progress_state(progress_state_path)
             if progress_state is not None and progress_state != last_reported_state:
                 await _dispatch_progress_callback(progress_callback, *progress_state)
-    except Exception:
-        if proc.returncode is None:
-            await _terminate_worker_process(proc, communicate_task)
+    except BaseException as exc:
+        was_running = proc.returncode is None
+        await _await_worker_cleanup(
+            asyncio.create_task(_terminate_worker_process(proc, communicate_task))
+        )
+        if was_running and isinstance(
+            exc, (JobCancelledError, JobPausedError, asyncio.CancelledError)
+        ):
+            _cleanup_operation_paths(operation, payload, effective_cleanup_paths)
         raise
 
     if proc.returncode != 0:
-        _cleanup_paths(effective_cleanup_paths)
+        _cleanup_operation_paths(operation, payload, effective_cleanup_paths)
         _raise_worker_error(operation, payload, stdout, stderr, returncode=proc.returncode)
 
     try:
@@ -347,7 +358,13 @@ async def _run_archive_operation(
             if payload_text:
                 payload_text = payload_text.splitlines()[-1]
             decoded = json.loads(payload_text or "{}")
-        except json.JSONDecodeError as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            if operation == "paired_stage":
+                from pullbox.utilities.executors.archive_metadata_staging import (
+                    ArchiveMetadataStagingError,
+                )
+
+                raise ArchiveMetadataStagingError("worker_failed") from None
             raise RuntimeError(
                 f"Archive worker returned invalid JSON for {operation}: {stdout!r}"
             ) from exc
@@ -378,14 +395,38 @@ async def _terminate_worker_process(
             await communicate_task
         return
 
-    proc.terminate()
+    with contextlib.suppress(ProcessLookupError):
+        proc.terminate()
     try:
-        await asyncio.wait_for(communicate_task, timeout=_PROCESS_TERMINATE_TIMEOUT_SECONDS)
+        await asyncio.wait_for(
+            asyncio.shield(communicate_task), timeout=_PROCESS_TERMINATE_TIMEOUT_SECONDS
+        )
         return
     except TimeoutError:
-        proc.kill()
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
         with contextlib.suppress(Exception):
             await communicate_task
+
+
+async def _cleanup_spawned_worker(task: asyncio.Task[asyncio.subprocess.Process]) -> None:
+    proc = await task
+    await _terminate_worker_process(proc, asyncio.create_task(proc.communicate()))
+
+
+async def _await_worker_cleanup(task: asyncio.Task[None]) -> None:
+    # A second cancel must not abandon a live child or race directory cleanup.
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+        except Exception:
+            break
+    try:
+        task.result()
+    except Exception as exc:
+        logger.warning("archive_worker_cleanup_failed", error_type=type(exc).__name__)
 
 
 def _cleanup_paths(paths: list[Path]) -> None:
@@ -397,6 +438,17 @@ def _cleanup_paths(paths: list[Path]) -> None:
                 path.unlink()
 
 
+def _cleanup_operation_paths(
+    operation: _ArchiveOperation, payload: dict[str, Any], paths: list[Path]
+) -> None:
+    if operation == "transfer" and payload.get("method") == "move":
+        # A stopped worker may already have removed the source. Its destination
+        # is recovery evidence, possibly the sole copy, never disposable output.
+        target = Path(str(payload["target"])).absolute()
+        paths = [path for path in paths if path.absolute() != target]
+    _cleanup_paths(paths)
+
+
 def _raise_worker_error(
     operation: _ArchiveOperation,
     payload: dict[str, Any],
@@ -405,6 +457,22 @@ def _raise_worker_error(
     *,
     returncode: int | None = None,
 ) -> None:
+    if operation == "paired_stage":
+        from pullbox.utilities.executors.archive_metadata_staging import (
+            ArchiveMetadataStagingError,
+        )
+
+        code = "worker_failed"
+        with contextlib.suppress(ValueError, TypeError, AttributeError):
+            diagnostic = json.loads(stderr).get("message")
+            if diagnostic in {
+                "invalid_plan",
+                "unsafe_archive",
+                "metadata_conflict",
+                "source_changed",
+            }:
+                code = diagnostic
+        raise ArchiveMetadataStagingError(code)
     details: dict[str, Any] | None = None
     raw = (
         stderr.decode("utf-8", errors="replace").strip()
@@ -501,6 +569,10 @@ def _worker_main(argv: list[str]) -> int:
             result = _worker_embed(payload)
         elif operation == "materialize_embed":
             result = _worker_materialize_embed(payload)
+        elif operation == "paired_stage":
+            from pullbox.utilities.executors.archive_metadata_staging import worker_stage_metadata
+
+            result = worker_stage_metadata(payload)
         else:
             raise ValueError(f"Unsupported archive worker operation: {operation}")
     except Exception as exc:  # pragma: no cover - exercised via parent wrapper

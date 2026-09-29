@@ -524,6 +524,22 @@ successful commit point. Reference-only/keep-in-place callers are not authorized
 by this primitive. Production caller migration and single-construction non-ZIP
 conversion remain outstanding.
 
+`utilities/executors/archive_metadata_staging.py` hands paired CBZ work to the
+interruptible archive worker without giving it a final library destination.
+Canonical snapshots use a bounded private request file, not process arguments.
+The worker produces one verified private archive; its fingerprint and the
+original source fingerprint must still agree when the parent hands it off.
+The async context removes its own workspace on failure, cancellation or exit,
+without following a replaced workspace or deleting an artifact published out
+of it. The owner must recheck current binding/ownership/policy, journal intent,
+and revalidate the supplied fingerprints before publication. This context is
+not a durable journal, permission to mutate reference files or a filesystem lock.
+The shared supervisor reaps workers after task cancellation, including during
+spawn and repeated cancellation, and shields pipe draining during kill escalation.
+Legacy operations still publish inside their workers; they have not migrated to
+the staged owner-publication contract. Production binding, journal recovery and
+consumer migration remain required.
+
 The existing import/cache consumers have not yet migrated to this registry.
 Metron has token settings, bounded transport and
 series/issue/arc adapter operations; GCD execution remains unimplemented, and
