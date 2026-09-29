@@ -87,6 +87,30 @@ async def test_exact_arc_and_cross_series_members_preserve_source_and_order():
     assert adapter.closed == 2
 
 
+async def test_read_cleanup_failure_cannot_supply_metadata_for_a_catalog_write(monkeypatch):
+    adapter = ArcAdapter()
+
+    async def failed_close():
+        adapter.closed += 1
+        raise RuntimeError("secret-bearing cleanup failure")
+
+    monkeypatch.setattr(adapter, "close", failed_close)
+    result = await registry(adapter).story_arc(adapter.source, "42")
+    assert result.status is SourceStatus.UNAVAILABLE and result.data is None
+    assert adapter.closed == 1
+    adapter.error = MetadataSourceError(SourceStatus.RATE_LIMITED, 60)
+    limited = await registry(adapter).story_arc(adapter.source, "42")
+    assert limited.status is SourceStatus.RATE_LIMITED and limited.retry_after_seconds == 60
+
+    adapter.error, adapter.wait = None, asyncio.Event()
+    adapter.started.clear()
+    running = asyncio.create_task(registry(adapter).story_arc(adapter.source, "42"))
+    await adapter.started.wait()
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+
 @pytest.mark.parametrize(
     "updates",
     [

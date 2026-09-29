@@ -430,10 +430,15 @@ fields without taking over membership. The read set captures values, baseline,
 identity revisions/history, arc state, placement restrictions and source policies.
 Provider I/O runs after releasing the reader. Policy-first/arc locks and read-set
 revalidation precede the atomic catalog write; concurrent changes reject the whole
-refresh. Partial source outcomes are retained as bounded diagnostics. New Add and
-legacy preview compatibility still use their selected source; remaining legacy
-consumer migration, complete credits/membership fields and coordinated XML/sidecar
-writers are pending. This does not complete the full metadata feature.
+refresh. Partial source outcomes are retained as bounded diagnostics. Legacy Arc
+browser URLs now delegate to the same source-bound search, preview, Add and refresh
+commands. Pre-upgrade forms without a source revision must be previewed again;
+existing ComicVine arcs retain their identity and reviewed membership. New Add
+adopts the selected source, while refresh uses the descriptive cascade. Provider
+cleanup failure cannot supply a successful read for a write; primary cancellation
+and rate-limit outcomes remain intact. Remaining legacy consumer migration,
+complete credits/membership fields and coordinated XML/sidecar writers are pending.
+This does not complete the full metadata feature.
 
 The existing import/cache consumers have not yet migrated to this registry.
 Metron has token settings, bounded transport and

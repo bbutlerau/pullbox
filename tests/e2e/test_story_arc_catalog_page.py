@@ -463,8 +463,8 @@ def test_catalog_add_is_enabled_and_explains_missing_root(
     page.get_by_role("option").nth(1).click()
     expect(error).not_to_be_visible()
     held: list[Route] = []
-    page.route("**/story-arcs/catalog/80", lambda route: held.append(route))
-    with page.expect_request("**/story-arcs/catalog/80"):
+    page.route("**/story-arcs/catalog/comicvine_api/80", lambda route: held.append(route))
+    with page.expect_request("**/story-arcs/catalog/comicvine_api/80"):
         add.click()
     expect(add).to_be_disabled()
     expect(page.get_by_role("button", name="Retry preview")).to_be_disabled()
@@ -481,7 +481,7 @@ def test_catalog_add_explains_no_available_roots(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "pullbox.ui.story_arc_catalog_routes.load_story_arc_placement_roots",
+        "pullbox.ui.story_arc_source_routes.load_story_arc_placement_roots",
         AsyncMock(return_value=((), False)),
     )
     page = authed_page
@@ -497,7 +497,10 @@ def test_catalog_add_explains_no_available_roots(
 
 
 def test_catalog_partial_failure_and_retry_are_visible(
-    authed_page: Page, seeded_server: str, catalog_provider: CatalogProvider
+    authed_page: Page,
+    seeded_server: str,
+    catalog_provider: CatalogProvider,
+    advance_account_clock: Callable[[timedelta], None],
 ) -> None:
     page = authed_page
     catalog_provider.metadata = replace(
@@ -520,11 +523,12 @@ def test_catalog_partial_failure_and_retry_are_visible(
     catalog_provider.fail = True
     page.get_by_role("button", name="Retry preview").click()
     expect(page.get_by_test_id("story-arc-preview-submit-error")).not_to_be_visible()
-    expect(page.get_by_role("alert")).to_contain_text("couldn't load this arc")
+    expect(page.get_by_role("alert")).to_contain_text("Could not finish the story arc")
     catalog_provider.fail = False
     catalog_provider.metadata = replace(
         catalog_provider.metadata, membership_complete=True, declared_issue_count=2
     )
+    advance_account_clock(timedelta(minutes=6))
     page.get_by_role("button", name="Retry preview").click()
     expect(page.get_by_test_id("story-arc-catalog-add-form")).to_be_visible()
     page.set_viewport_size({"width": 640, "height": 900})
@@ -535,7 +539,10 @@ def test_catalog_partial_failure_and_retry_are_visible(
 
 
 def test_preview_pagination_retry_and_add_keep_all_page_choices(
-    authed_page: Page, seeded_server: str, catalog_provider: CatalogProvider
+    authed_page: Page,
+    seeded_server: str,
+    catalog_provider: CatalogProvider,
+    advance_account_clock: Callable[[timedelta], None],
 ) -> None:
     page = authed_page
     catalog_provider.metadata = replace(
@@ -603,7 +610,7 @@ def test_preview_pagination_retry_and_add_keep_all_page_choices(
     expect(page.get_by_role("switch", name="Monitor this story arc")).to_be_checked()
     catalog_provider.fail = True
     page.get_by_role("button", name="Retry preview").click()
-    expect(page.get_by_role("alert")).to_contain_text("couldn't load this arc")
+    expect(page.get_by_role("alert")).to_contain_text("Could not finish the story arc")
     expect(first.locator("[data-reading-position]")).to_have_text("2")
     expect(page.get_by_role("button", name="Add Story Arc", exact=True)).to_be_enabled()
     catalog_provider.fail = False
@@ -611,6 +618,7 @@ def test_preview_pagination_retry_and_add_keep_all_page_choices(
         catalog_provider.metadata,
         issue_provider_ids=tuple(str(number) for number in range(101, 153) if number != 103),
     )
+    advance_account_clock(timedelta(minutes=6))
     page.get_by_role("button", name="Retry preview").click()
     expect(workspace.get_by_role("status")).to_contain_text("1 added, 1 no longer listed")
     expect(first.locator("[data-reading-position]")).to_have_text("2")
@@ -632,7 +640,9 @@ def test_preview_pagination_retry_and_add_keep_all_page_choices(
     expect(page.get_by_test_id("page-dock-pagination")).not_to_be_visible()
     page.get_by_role("switch", name="Monitor this story arc").press("Space")
     with page.expect_request(
-        lambda request: request.method == "POST" and "/story-arcs/catalog/77" in request.url
+        lambda request: (
+            request.method == "POST" and "/story-arcs/catalog/comicvine_api/77" in request.url
+        )
     ) as submitted:
         page.get_by_role("button", name="Add Story Arc", exact=True).click()
     page.wait_for_url(re.compile(r"/story-arcs/\d+\?notice=catalog-added$"))
@@ -768,8 +778,8 @@ def test_preview_reorder_single_member_and_pending_retry_are_disabled(
     expect(controls).to_have_count(4)
     expect(controls.nth(1)).to_be_enabled()
     held: list[Route] = []
-    page.route("**/story-arcs/catalog/79", lambda route: held.append(route))
-    with page.expect_request("**/story-arcs/catalog/79"):
+    page.route("**/story-arcs/catalog/comicvine_api/79", lambda route: held.append(route))
+    with page.expect_request("**/story-arcs/catalog/comicvine_api/79"):
         retry.click()
     expect(retry).to_be_disabled()
     for index in range(4):

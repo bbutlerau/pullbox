@@ -216,6 +216,7 @@ async def _read_admitted[T](
     attempt: AccountAttempt,
 ) -> MetadataFetch[T]:
     adapter = None
+    close_failed = False
     try:
         if asyncio.get_running_loop().time() >= deadline:
             return MetadataFetch(status=SourceStatus.TIMEOUT)
@@ -234,16 +235,15 @@ async def _read_admitted[T](
                     or (result.status is SourceStatus.NOT_MODIFIED and validator is None)
                 ):
                     raise ValueError("Invalid source read outcome")
-                return result
     except TimeoutError:
-        return MetadataFetch(status=SourceStatus.TIMEOUT)
+        result = MetadataFetch(status=SourceStatus.TIMEOUT)
     except MetadataSourceError as exc:
-        return MetadataFetch(status=exc.status, retry_after_seconds=exc.retry_after_seconds)
+        result = MetadataFetch(status=exc.status, retry_after_seconds=exc.retry_after_seconds)
     except (ValueError, TypeError, AttributeError):
-        return MetadataFetch(status=SourceStatus.INCOMPATIBLE_RESPONSE)
+        result = MetadataFetch(status=SourceStatus.INCOMPATIBLE_RESPONSE)
     except Exception:
         logger.warning("metadata_source_read_failed", source=source.value, capability=capability)
-        return MetadataFetch(status=SourceStatus.UNAVAILABLE)
+        result = MetadataFetch(status=SourceStatus.UNAVAILABLE)
     finally:
         if adapter is not None:
             try:
@@ -251,6 +251,14 @@ async def _read_admitted[T](
                     await adapter.close()
             except Exception:
                 logger.warning("metadata_source_close_failed", source=source.value)
+                close_failed = True
+    if close_failed and result.status in {
+        SourceStatus.OK,
+        SourceStatus.NOT_FOUND,
+        SourceStatus.NOT_MODIFIED,
+    }:
+        return MetadataFetch(status=SourceStatus.UNAVAILABLE)
+    return result
 
 
 async def read_series(

@@ -9,6 +9,7 @@ from pullbox.config import get_settings
 from pullbox.core.metadata_identity import MetadataEntityKind, MetadataSource
 from pullbox.schemas.metadata_sources import (
     SourceCapability,
+    SourceStatus,
     StoryArcDiscoveryQuery,
     StoryArcDiscoveryRead,
 )
@@ -50,6 +51,10 @@ async def arc_search_context(
             )
         except MetadataSearchBusyError as exc:
             error = str(exc)
+    if not snapshot.results and any(
+        row.status not in {SourceStatus.OK, SourceStatus.EMPTY} for row in snapshot.sources
+    ):
+        error = "Story Arc search failed. Check the source status below and retry."
     total = len(snapshot.results)
     total_pages = max(1, (total + 19) // 20)
     page = min(page, total_pages)
@@ -63,10 +68,8 @@ async def arc_search_context(
             transport,
         )
         owners.update({(transport.identity_namespace, key): value for key, value in found.items()})
-    revisions = {row.policy.source: row.policy.revision for row in runtime}
     results = []
     for row in visible:
-        native = revisions[row.source] > 0 or row.source is not MetadataSource.COMICVINE_API
         results.append(
             {
                 "metadata": {
@@ -79,9 +82,7 @@ async def arc_search_context(
                 "existing_id": owners.get((row.identity_namespace, row.external_id)),
                 "source_label": SOURCE_LABELS[row.source],
                 "dom_id": f"arc-result-{row.source.value}-{row.external_id}",
-                "preview_url": f"/story-arcs/catalog/{row.source.value}/{row.external_id}"
-                if native
-                else f"/story-arcs/catalog/{row.external_id}",
+                "preview_url": f"/story-arcs/catalog/{row.source.value}/{row.external_id}",
             }
         )
     params = {"q": query, **({"source": source.value} if source else {})}

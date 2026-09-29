@@ -18,6 +18,7 @@ from pullbox.schemas.metadata_arc_catalog import (
     ArcCatalogSelection,
 )
 from pullbox.schemas.metadata_sources import StoryArcPreviewQuery
+from pullbox.services.cover_url_service import build_story_arc_cover_url
 from pullbox.services.metadata_arc_commands import (
     ArcCommandResult,
     catalog_writer,
@@ -46,9 +47,26 @@ class SourceArcAddForm(StoryArcCatalogAddForm):
     source_revision: int = Field(ge=1, lt=2**63)
 
 
-def command_message(exc: Exception | None = None) -> str:
+def command_message(exc: Exception | None = None, *, code: str = "") -> str:
     if isinstance(exc, StoryArcCatalogError):
+        if exc.code == "incomplete_membership":
+            return "Incomplete member list. Nothing was changed; retry the preview."
         return str(exc)
+    messages = {
+        "file_defaults_changed": (
+            "Story Arc file defaults changed. Review Settings > Media Management, "
+            "then preview this arc again."
+        ),
+        "canonical_root_required": (
+            "Choose a library root for new series before saving provider changes."
+        ),
+        "canonical_root_unavailable": (
+            "Restore or enable the saved library root in Settings, then retry provider changes. "
+            "Existing series paths and arc storage haven't changed."
+        ),
+    }
+    if code in messages:
+        return messages[code]
     return (
         "The arc wasn't changed. Review the current source and file settings, then retry preview."
     )
@@ -95,7 +113,7 @@ async def source_arc_preview(
 ) -> Response:
     username = user.username
     preview = None
-    message = command_message() if error else ""
+    message = command_message(code=error) if error else ""
     revision = 0
     try:
         selection = await current_selection(session, source, provider_id)
@@ -163,9 +181,13 @@ async def source_arc_add(
         StoryArcPlacementIntegrationError,
         IntegrityError,
         ValidationError,
-    ):
+    ) as exc:
         await session.rollback()
-        return _redirect(request, f"/story-arcs/catalog/{source.value}/{provider_id}?error=review")
+        code = exc.code if isinstance(exc, StoryArcCatalogError) else "review"
+        return _redirect(
+            request,
+            f"/story-arcs/catalog/{source.value}/{provider_id}?{urlencode({'error': code})}",
+        )
     schedule_work(result, request, background_tasks)
     return _redirect(request, destination)
 
@@ -179,10 +201,16 @@ async def source_refresh_preview(
     error: str,
 ) -> Response:
     arc_id, name = arc.id, arc.name
+    cover_src = build_story_arc_cover_url(arc)
+    resource_url = (
+        f"https://comicvine.gamespot.com/story-arc/4045-{selection.external_id}/"
+        if selection.source is MetadataSource.COMICVINE_API
+        else None
+    )
     catalog = arc.diagnostics.get("provider_catalog", {})
     root = catalog.get("canonical_library_root_id") if isinstance(catalog, dict) else None
     preview = changes = None
-    message = command_message() if error else ""
+    message = command_message(code=error) if error else ""
     revision = 0
     try:
         current = await current_selection(session, selection.source, selection.external_id)
@@ -201,8 +229,8 @@ async def source_refresh_preview(
         "pages/story_arc_catalog_refresh.html",
         story_arc_id=arc_id,
         arc_name=name,
-        arc_cover_src=None,
-        arc_comicvine_url=None,
+        arc_cover_src=cover_src,
+        arc_comicvine_url=resource_url,
         source_label=SOURCE_LABELS[selection.source],
         source_revision=revision,
         preview=preview,
