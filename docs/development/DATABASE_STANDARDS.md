@@ -476,6 +476,17 @@ ComicVine writer likewise resolves known IDs exactly; name-only reuse is limited
 to unclaimed descriptive rows. No credit schema migration or provenance backfill
 is needed for this additive snapshot field.
 
+Canonical field origins may retain the fixed embedded document names ComicInfo.xml
+and MetronInfo.xml. This local provenance cannot also claim a provider source,
+provider freshness, derivation or explicit user override. Older version-one
+snapshot JSON without the field remains valid. Archive-derived empty credits are
+not provider-enrichment gaps; subsequent edits and clears become user overrides.
+Observed archive identities stay unverified and cannot pass the baseline writer's
+ownership check as verified identities. Archive review/preservation diagnostics
+persist across refreshes until a new archive comparison updates them. The caller
+still owns independent file/target matching and atomic application to entity rows;
+baseline persistence alone neither establishes that match nor permits file writes.
+
 ### Source Catalog Checkpoints
 
 `series_catalog_checkpoints` records complete issue-catalog progress separately

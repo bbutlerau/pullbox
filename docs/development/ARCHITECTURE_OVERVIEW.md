@@ -469,9 +469,21 @@ explicitly empty credits remain distinct. Partial ComicInfo publication dates
 never become invented dates or series start years. Scoped ComicVine markers and
 validated resource URLs yield unverified evidence, not attachments or crosswalks.
 Both XML paths share the same bounded envelope; duplicate fields and archive
-probe diagnostics remain reviewable. This comparison is not write authorization:
-canonical adoption, output-schema validation and coordinated atomic writers
-remain required before the existing import/writer consumers switch to it.
+probe diagnostics remain reviewable. The shared canonical assembler accepts this
+comparison only for an independently resolved file/target and parent binding;
+it does not perform that matching. Adopted fields retain bounded document-name
+provenance, never fabricated API attribution. Local values and explicit empty
+credits survive later provider refreshes; user edits/clears remain authoritative.
+Unchanged XML that agrees with an existing provider-managed baseline retains its
+normal explicit-refresh authority; external XML edits instead require review.
+Exact target/parent conflicts and differing issue designations abort assembly.
+Descriptive disagreements and unsupported XML remain durable review/preservation
+diagnostics rather than becoming provider-filled gaps. Previously observed IDs
+survive refreshes without acquiring verified ownership. Existing baseline storage
+retains this additive provenance with the same revision/transaction checks.
+This comparison and adoption are not write authorization: production file-binding
+integration, output-schema validation and coordinated atomic writers remain
+required before the existing import/writer consumers switch to them.
 
 The existing import/cache consumers have not yet migrated to this registry.
 Metron has token settings, bounded transport and

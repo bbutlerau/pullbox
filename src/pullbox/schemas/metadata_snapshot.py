@@ -9,6 +9,8 @@ from pullbox.core.metadata_identity import ExternalIdentityRef, MetadataEntityKi
 from pullbox.schemas.metadata_credits import MetadataCredits
 from pullbox.schemas.metadata_sources import MetadataDomain
 
+type EmbeddedDocument = Literal["ComicInfo.xml", "MetronInfo.xml"]
+
 
 def field_domain(kind: MetadataEntityKind, field: str) -> MetadataDomain:
     if field == "image_url":
@@ -52,6 +54,7 @@ class FieldOrigin(BaseModel):
     observed_at: AwareDatetime
     user_override: bool = False
     derivation: Literal["classification", "lifecycle", "catalog", "normalization"] | None = None
+    embedded_documents: tuple[EmbeddedDocument, ...] = ()
 
 
 class MetadataSnapshot(BaseModel):
@@ -81,6 +84,16 @@ class MetadataSnapshot(BaseModel):
                 or origin.field in fields
                 or origin.domain is not field_domain(self.entity_kind, origin.field)
                 or (origin.user_override and origin.source is not None)
+                or (
+                    origin.embedded_documents
+                    and (
+                        len(set(origin.embedded_documents)) != len(origin.embedded_documents)
+                        or origin.source is not None
+                        or origin.source_updated_at is not None
+                        or origin.user_override
+                        or origin.derivation is not None
+                    )
+                )
                 or (
                     origin.derivation is not None
                     and (origin.source is not None or origin.user_override)
