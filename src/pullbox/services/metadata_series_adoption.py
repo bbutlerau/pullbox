@@ -48,6 +48,7 @@ from pullbox.services.metadata_catalog_checkpoints import (
     CatalogCheckpointConflictError,
     save_full_catalog_checkpoint,
 )
+from pullbox.services.metadata_credits import write_issue_credits
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
 from pullbox.services.metadata_identity_attachment import attach_verified_identities
 from pullbox.services.metadata_identity_review import record_identity_observation
@@ -558,6 +559,15 @@ async def _adopt(
                 await record_identity_observation(
                     session, _request(bundle, metadata, crosswalk, issue.id, observation=True)
                 )
+        await write_issue_credits(
+            session,
+            {
+                issue.id: item.values.credits
+                for (issue, _), item in zip(
+                    members, issue_snapshots[offset : offset + 200], strict=True
+                )
+            },
+        )
         await save_metadata_baselines(
             session,
             [

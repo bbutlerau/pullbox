@@ -20,6 +20,7 @@ from pullbox.services.metadata_assembly import (
     MetadataAssemblyError,
     MetadataCandidate,
     assemble_metadata,
+    missing_metadata_value,
 )
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
 
@@ -93,7 +94,7 @@ async def fetch_metadata_snapshot(
     needed = set()
     for field in requested_fields:
         value = getattr(snapshot.values, field)
-        missing = value is None or (isinstance(value, str) and not value.strip())
+        missing = missing_metadata_value(value)
         origin = initial.get(field)
         if origin is not None and origin.user_override:
             continue

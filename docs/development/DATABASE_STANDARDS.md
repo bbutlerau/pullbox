@@ -464,6 +464,18 @@ A stale read aborts the complete membership and metadata write, including when a
 caller catches the domain error. Secondary sources never acquire membership or
 identity ownership through descriptive enrichment.
 
+Issue snapshots can retain up to 128 descriptive creator credits. Each credit
+has a bounded name and normalized role list compatible with the existing
+Creator/IssueCreator columns. Relations and baseline values commit together;
+provider absence does not clear local credits. Refresh includes current creator
+names/roles in its read set to detect edits, clears and concurrent changes.
+Credit reads and writes use 200-issue batches, not per-issue queries. Writers
+retain existing linked creator IDs when possible and never rename a shared
+creator or claim another provider's creator ID from a name match. The legacy
+ComicVine writer likewise resolves known IDs exactly; name-only reuse is limited
+to unclaimed descriptive rows. No credit schema migration or provenance backfill
+is needed for this additive snapshot field.
+
 ### Source Catalog Checkpoints
 
 `series_catalog_checkpoints` records complete issue-catalog progress separately

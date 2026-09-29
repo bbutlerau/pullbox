@@ -41,6 +41,43 @@ async def _preview(count=2, **changes):
     return await fetch(adapter)
 
 
+async def test_new_arc_member_credits_reach_library_relations(identity_probe_db, tmp_path):
+    from pullbox.schemas.metadata_credits import parse_credits
+    from pullbox.utilities.comicinfo_creators import load_comicinfo_creator_fields
+
+    _, factory, _ = identity_probe_db
+    root = await _setup(factory, tmp_path)
+    preview = await _preview()
+    evidence = preview.source_evidence
+    preview = project_source_arc_catalog(
+        replace(
+            evidence,
+            issues=tuple(
+                row.model_copy(
+                    update={
+                        "credits": parse_credits(
+                            [
+                                {"name": "Arc Creator", "role": "writer"},
+                            ]
+                        )
+                    }
+                )
+                for row in evidence.issues
+            ),
+        ),
+        1,
+    )
+    async with factory.begin() as session:
+        await _add(_service(), session, preview, root)
+    async with factory() as session:
+        issue_ids = list(await session.scalars(select(Issue.id)))
+        assert len(issue_ids) == 2
+        for issue_id in issue_ids:
+            assert await load_comicinfo_creator_fields(session, issue_id) == {
+                "Writer": "Arc Creator"
+            }
+
+
 @pytest.mark.parametrize("source", [MetadataSource.METRON_API, MetadataSource.COMICVINE_API])
 async def test_arc_add_persists_graph_baselines_across_reconnect(
     identity_probe_db, tmp_path, source

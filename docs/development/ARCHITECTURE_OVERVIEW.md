@@ -436,8 +436,19 @@ commands. Pre-upgrade forms without a source revision must be previewed again;
 existing ComicVine arcs retain their identity and reviewed membership. New Add
 adopts the selected source, while refresh uses the descriptive cascade. Provider
 cleanup failure cannot supply a successful read for a write; primary cancellation
-and rate-limit outcomes remain intact. Remaining legacy consumer migration,
-complete credits/membership fields and coordinated XML/sidecar writers are pending.
+and rate-limit outcomes remain intact.
+
+Normalized issue reads and canonical snapshots retain bounded descriptive creator
+credits. Credit lists follow core-domain authority as a whole; lower-priority
+lists do not merge over an existing list. User edits and intentional clears remain
+overrides. Source-aware Add, issue catalog writes and newly seeded Story Arc
+members persist credits through the existing Creator/IssueCreator relations in
+the same transaction as their baseline. Refresh captures current relations in its
+read set before provider I/O and rejects in-flight changes. Reads/writes batch at
+200 issues; descriptive names never establish a foreign creator identity. No
+additional provider detail calls or archive writes are introduced. Remaining
+rich metadata/membership fields, legacy consumers and coordinated XML/sidecar
+writers are pending.
 This does not complete the full metadata feature.
 
 The existing import/cache consumers have not yet migrated to this registry.

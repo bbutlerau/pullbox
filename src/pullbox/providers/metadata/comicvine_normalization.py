@@ -5,6 +5,7 @@ from datetime import date
 from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.metadata_identity import MetadataEntityKind, MetadataSource
 from pullbox.providers.base import IssueMetadata, SeriesMetadata
+from pullbox.schemas.metadata_credits import parse_credits
 from pullbox.schemas.metadata_sources import MetadataPage, ProviderIssueRead, ProviderSeriesRead
 from pullbox.services.catalog.reader import CatalogIssueMetadata, CatalogSeriesMetadata
 from pullbox.services.metadata_source_reads import source_id
@@ -62,6 +63,11 @@ def issue(source: MetadataSource, row: IssueMetadata) -> ProviderIssueRead:
     except ValueError:
         key = None
     return ProviderIssueRead(
+        credits=parse_credits(
+            [{"name": credit.get("name"), "role": credit.get("role")} for credit in row.creators]
+        )
+        if row.creators
+        else None,
         source=source,
         identity_namespace=source.identity_namespace,
         external_id=identity,

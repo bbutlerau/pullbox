@@ -772,9 +772,16 @@ class MetadataService:
             creator = (
                 await session.execute(select(Creator).where(Creator.comicvine_id == comicvine_id))
             ).scalar_one_or_none()
-        if creator is None:
+        else:
+            # A name is descriptive evidence, not proof of another creator's
+            # ComicVine identity. Reuse only an unclaimed descriptive row.
             creator = (
-                await session.execute(select(Creator).where(Creator.name == name))
+                await session.execute(
+                    select(Creator)
+                    .where(Creator.name == name, Creator.comicvine_id.is_(None))
+                    .order_by(Creator.id)
+                    .limit(1)
+                )
             ).scalar_one_or_none()
         if creator is None:
             creator = Creator(name=name, comicvine_id=comicvine_id, comicvine_url=comicvine_url)

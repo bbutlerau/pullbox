@@ -26,6 +26,7 @@ from pullbox.services.metadata_baselines import (
     load_metadata_baseline,
     save_metadata_baselines,
 )
+from pullbox.services.metadata_credits import write_issue_credits
 from pullbox.services.metadata_series_adoption import persist_adoption_series_baseline
 from pullbox.services.metadata_sources import read_source_policies
 from pullbox.services.story_arc_catalog_types import StoryArcCatalogPreview
@@ -221,4 +222,8 @@ async def persist_seeded_metadata(
         issue.cover_url = snapshot.values.image_url
         writes.append(MetadataBaselineWrite(issue.id, snapshot))
     for offset in range(0, len(writes), 200):
+        await write_issue_credits(
+            session,
+            {item.local_id: item.snapshot.values.credits for item in writes[offset : offset + 200]},
+        )
         await save_metadata_baselines(session, writes[offset : offset + 200])

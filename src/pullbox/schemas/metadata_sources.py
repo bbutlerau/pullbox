@@ -12,6 +12,7 @@ from pullbox.core.metadata_identity import (
     MetadataEntityKind,
     MetadataSource,
 )
+from pullbox.schemas.metadata_credits import MetadataCredits
 
 
 class MetadataDomain(enum.StrEnum):
@@ -157,6 +158,7 @@ class ProviderSeriesRead(BaseModel):
 
 
 class ProviderIssueRead(BaseModel):
+    credits: MetadataCredits | None = None
     source: MetadataSource
     identity_namespace: IdentityNamespace
     external_id: str

@@ -6,6 +6,7 @@ from typing import Literal, Self
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 from pullbox.core.metadata_identity import ExternalIdentityRef, MetadataEntityKind, MetadataSource
+from pullbox.schemas.metadata_credits import MetadataCredits
 from pullbox.schemas.metadata_sources import MetadataDomain
 
 
@@ -38,6 +39,7 @@ class MetadataValues(BaseModel):
     store_date: date | None = None
     page_count: int | None = Field(default=None, ge=0, le=1000000, strict=True)
     image_url: str | None = Field(default=None, max_length=500)
+    credits: MetadataCredits | None = None
 
 
 class FieldOrigin(BaseModel):

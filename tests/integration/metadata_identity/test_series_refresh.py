@@ -13,6 +13,7 @@ from pullbox.core.metadata_identity import IdentityNamespace as Namespace
 from pullbox.core.metadata_identity import MetadataEntityKind as Kind
 from pullbox.core.metadata_identity import MetadataSource as Source
 from pullbox.models import Issue, Series
+from pullbox.models.creator import Creator, IssueCreator
 from pullbox.models.issue import IssueStatus
 from pullbox.models.metadata_baseline import SeriesMetadataBaseline
 from pullbox.models.metadata_identity import IssueExternalIdentity, SeriesExternalIdentity
@@ -144,7 +145,9 @@ async def test_refresh_preserves_local_edits_and_explicit_status_override(identi
         ).user_override
 
 
-@pytest.mark.parametrize("change", ["series_edit", "issue_edit", "identity", "policy", "baseline"])
+@pytest.mark.parametrize(
+    "change", ["series_edit", "issue_edit", "identity", "policy", "baseline", "credits"]
+)
 async def test_inflight_change_rejects_whole_refresh_without_losing_newer_state(
     identity_probe_db, change
 ):
@@ -176,6 +179,11 @@ async def test_inflight_change_rejects_whole_refresh_without_losing_newer_state(
                     await editor.execute(
                         update(Issue).where(Issue.id == issue_id).values(title="Newer issue edit")
                     )
+                elif change == "credits":
+                    author = Creator(name="User added author")
+                    editor.add(author)
+                    await editor.flush()
+                    editor.add(IssueCreator(issue_id=issue_id, creator_id=author.id, role="writer"))
                 elif change == "identity":
                     await editor.execute(
                         update(SeriesExternalIdentity).values(

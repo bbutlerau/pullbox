@@ -14,6 +14,7 @@ from pullbox.core.metadata_identity import (
     MetadataEntityKind,
     MetadataSource,
 )
+from pullbox.schemas.metadata_credits import MAX_CREDITS, MetadataCredit, parse_credits
 from pullbox.schemas.metadata_sources import (
     ProviderIssueRead,
     ProviderSeriesRead,
@@ -181,6 +182,29 @@ def series(value: object, *, detail: bool = False) -> ProviderSeriesRead:
     )
 
 
+def _credits(value: object) -> tuple[MetadataCredit, ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list) or len(value) > MAX_CREDITS:
+        raise ValueError("Expected bounded creator credits")
+    credits = []
+    for item in value:
+        row = object_row(item)
+        roles = row.get("role")
+        if not isinstance(roles, list) or len(roles) > 32:
+            raise ValueError("Expected bounded creator roles")
+        credits.append(
+            {
+                "name": _text(row.get("creator"), required=True, limit=255),
+                "role": ", ".join(
+                    _text(object_row(role).get("name"), required=True, limit=100) or ""
+                    for role in roles
+                ),
+            }
+        )
+    return parse_credits(credits)
+
+
 def issue(value: object) -> ProviderIssueRead:
     row = object_row(value)
     number = _text(row.get("number"), required=True, limit=100)
@@ -190,6 +214,7 @@ def issue(value: object) -> ProviderIssueRead:
     except ValueError:
         key = None
     return ProviderIssueRead(
+        credits=_credits(row.get("credits")),
         source=MetadataSource.METRON_API,
         identity_namespace=IdentityNamespace.METRON,
         external_id=external_id(row.get("id")),

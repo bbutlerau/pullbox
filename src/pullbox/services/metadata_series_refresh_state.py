@@ -25,6 +25,7 @@ from pullbox.services.metadata_catalog_checkpoints import (
     CatalogCheckpoint,
     read_catalog_checkpoints,
 )
+from pullbox.services.metadata_credits import read_issue_credits
 from pullbox.services.metadata_sources import read_source_policies
 
 SERIES_FIELDS = frozenset(
@@ -52,6 +53,7 @@ ISSUE_FIELDS = frozenset(
         "store_date",
         "page_count",
         "image_url",
+        "credits",
     }
 )
 
@@ -199,6 +201,7 @@ async def read_series_refresh_state(session: AsyncSession, series_id: int) -> Se
         .tuples()
         .all()
     )
+    credits = await read_issue_credits(session, [issue.id for issue, _, _ in members])
     issues = []
     for issue, issue_revision, issue_payload in members:
         previous = _baseline(issue_payload, MetadataEntityKind.ISSUE)
@@ -211,6 +214,9 @@ async def read_series_refresh_state(session: AsyncSession, series_id: int) -> Se
             store_date=issue.store_date,
             page_count=issue.page_count,
             image_url=issue.cover_url,
+            credits=credits.get(
+                issue.id, () if previous and previous.values.credits is not None else None
+            ),
         )
         issues.append(
             RefreshEntityState(

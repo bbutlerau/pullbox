@@ -11,6 +11,7 @@ from pullbox.models import Issue, Series
 from pullbox.models.issue import IssueStatus
 from pullbox.services.metadata_assembly import assemble_metadata
 from pullbox.services.metadata_baselines import MetadataBaselineWrite, save_metadata_baselines
+from pullbox.services.metadata_credits import write_issue_credits
 from pullbox.services.metadata_identity_attachment import attach_verified_identities
 from pullbox.services.metadata_identity_review import record_identity_observation
 from pullbox.services.metadata_series_adoption import (
@@ -152,6 +153,9 @@ async def apply_issue_batch(
                     await record_identity_observation(
                         session, _request(batch, metadata, crosswalk, issue.id, observation=True)
                     )
+        await write_issue_credits(
+            session, {issue.id: item.values.credits for issue, _, _, item in pending}
+        )
         await save_metadata_baselines(
             session,
             [

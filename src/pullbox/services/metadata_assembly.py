@@ -27,8 +27,8 @@ class MetadataAssemblyError(ValueError):
     """Evidence cannot safely describe one canonical entity."""
 
 
-def _missing(value: object) -> bool:
-    return value is None or (isinstance(value, str) and not value.strip())
+def missing_metadata_value(value: object) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip()) or value == ()
 
 
 def _identity_map(
@@ -142,7 +142,7 @@ def assemble_metadata(
     if current.image_url and not allowed_artwork_url(current.image_url):
         raise MetadataAssemblyError("Existing artwork requires a supported public provider URL.")
     origins = {item.field: item for item in previous.origins} if previous else {}
-    values = current.model_dump()
+    values = {field: getattr(current, field) for field in MetadataValues.model_fields}
     assembled: list[FieldOrigin] = []
 
     def rank(source: MetadataSource, domain: MetadataDomain) -> tuple[int, str]:
@@ -165,7 +165,7 @@ def assemble_metadata(
             for source in sorted(normalized, key=lambda source: rank(source, domain)):
                 candidate, incoming = normalized[source]
                 value = getattr(incoming, field)
-                if _missing(value):
+                if missing_metadata_value(value):
                     continue
                 may_replace = (
                     replace_managed
@@ -178,7 +178,7 @@ def assemble_metadata(
                         )
                     )
                 )
-                if _missing(existing) or may_replace:
+                if missing_metadata_value(existing) or may_replace:
                     values[field] = value
                     chosen = FieldOrigin(
                         field=field,
@@ -188,7 +188,7 @@ def assemble_metadata(
                         observed_at=now,
                     )
                 break
-        if not _missing(values[field]) or protected or prior is not None:
+        if not missing_metadata_value(values[field]) or protected or prior is not None:
             assembled.append(chosen)
     return MetadataSnapshot(
         entity_kind=kind,
