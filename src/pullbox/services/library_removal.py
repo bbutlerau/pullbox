@@ -38,9 +38,19 @@ class RemovalPlan(BaseModel):
     root_path: Path
     fingerprint: FileFingerprint
     directories: tuple[tuple[Path, int, int, int], ...]
+    disposition: Literal["retain", "delete", "trash"] = "retain"
+    trash_path: Path | None = None
+    trash_stage: Path | None = None
 
 
-def prepare_removal(source: Path, *, root_id: int, root_path: Path) -> RemovalPlan:
+def prepare_removal(
+    source: Path,
+    *,
+    root_id: int,
+    root_path: Path,
+    disposition: Literal["retain", "delete", "trash"] = "retain",
+    trash_path: Path | None = None,
+) -> RemovalPlan:
     """Create an empty private sibling; caller owns recording or discarding intent."""
     source, root_path = source.absolute(), root_path.resolve()
     before = _fingerprint(source)
@@ -52,11 +62,28 @@ def prepare_removal(source: Path, *, root_id: int, root_path: Path) -> RemovalPl
         or not (stat.S_ISREG(before[5]) or stat.S_ISDIR(before[5]))
     ):
         raise ValidationError("Library removal requires a regular file or folder inside its root.")
+    if (disposition == "trash") != (trash_path is not None):
+        raise ValidationError("Trash removal requires an explicit destination.")
+    if trash_path is not None and (
+        not trash_path.is_absolute()
+        or trash_path.resolve() != trash_path
+        or trash_path.is_relative_to(source)
+        or source.is_relative_to(trash_path)
+    ):
+        raise ValidationError("Trash must be a separate, resolved destination.")
     operation = uuid4()
     private = source.parent / f".pullbox-removal-{operation.hex}"
     private.mkdir(mode=0o700)
     created = private.lstat()
+    trash_private: Path | None = None
+    trash_created = None
     try:
+        if trash_path is not None:
+            trash_path.parent.mkdir(parents=True, exist_ok=True)
+            trash_private = trash_path.parent / f".pullbox-removal-trash-{operation.hex}"
+            trash_private.mkdir(mode=0o700)
+            trash_created = trash_private.lstat()
+        trash_stage = trash_private / "payload" if trash_private else None
         plan = RemovalPlan(
             operation_id=operation,
             source=source,
@@ -64,11 +91,21 @@ def prepare_removal(source: Path, *, root_id: int, root_path: Path) -> RemovalPl
             root_id=root_id,
             root_path=root_path,
             fingerprint=before,
-            directories=directories(source, private / "payload"),
+            directories=directories(
+                source, private / "payload", *((trash_path, trash_stage) if trash_stage else ())
+            ),
+            disposition=disposition,
+            trash_path=trash_path,
+            trash_stage=trash_stage,
         )
         _check_locations(plan)
         return decode_removal(plan.model_dump_json())
     except BaseException:
+        if trash_private is not None and trash_created is not None:
+            with suppress(OSError):
+                current = trash_private.lstat()
+                if (current.st_dev, current.st_ino) == (trash_created.st_dev, trash_created.st_ino):
+                    trash_private.rmdir()
         with suppress(OSError):
             current = private.lstat()
             if (current.st_dev, current.st_ino) == (created.st_dev, created.st_ino):
@@ -115,11 +152,28 @@ def decode_removal(encoded: str, *, operation_id: str | None = None) -> RemovalP
         raise ValidationError("Library removal evidence exceeds its limit.")
     plan = RemovalPlan.model_validate_json(encoded)
     expected_dirs = set(plan.source.parents) | set(plan.stage.parents)
+    if plan.trash_path is not None and plan.trash_stage is not None:
+        expected_dirs |= set(plan.trash_path.parents) | set(plan.trash_stage.parents)
+        if (
+            plan.trash_path.resolve() != plan.trash_path
+            or plan.trash_path.is_relative_to(plan.source)
+            or plan.source.is_relative_to(plan.trash_path)
+            or plan.trash_stage
+            != plan.trash_path.parent
+            / f".pullbox-removal-trash-{plan.operation_id.hex}"
+            / "payload"
+        ):
+            raise ValidationError("Library removal trash evidence is invalid.")
+    if (plan.disposition == "trash") != (
+        plan.trash_path is not None and plan.trash_stage is not None
+    ) or (plan.disposition != "trash" and (plan.trash_path or plan.trash_stage)):
+        raise ValidationError("Library removal disposition is invalid.")
     if (
         (operation_id is not None and str(plan.operation_id) != operation_id)
         or any(
             not path.is_absolute() or ".." in path.parts
-            for path in (plan.source, plan.stage, plan.root_path)
+            for path in (plan.source, plan.stage, plan.root_path, plan.trash_path, plan.trash_stage)
+            if path is not None
         )
         or plan.stage
         != plan.source.parent / f".pullbox-removal-{plan.operation_id.hex}" / "payload"
@@ -146,6 +200,8 @@ def _check_locations(plan: RemovalPlan) -> None:
             raise ValidationError("Library removal locations changed; review before retrying.")
     if stat.S_IMODE(plan.stage.parent.stat().st_mode) != 0o700:
         raise ValidationError("Library removal staging must remain private.")
+    if plan.trash_stage and stat.S_IMODE(plan.trash_stage.parent.stat().st_mode) != 0o700:
+        raise ValidationError("Library removal trash staging must remain private.")
 
 
 async def _check_authority(session: AsyncSession, plan: RemovalPlan) -> None:
@@ -175,7 +231,15 @@ async def record_removal(session: AsyncSession, plan: RemovalPlan) -> None:
     decode_removal(plan.model_dump_json())
     await lock_file_mutation_admission(session)
     await require_no_archive_publication(
-        session, plan.source, plan.stage.parent, include_descendants=True
+        session,
+        plan.source,
+        plan.stage.parent,
+        *(
+            (plan.trash_path, plan.trash_stage.parent)
+            if plan.trash_path and plan.trash_stage
+            else ()
+        ),
+        include_descendants=True,
     )
     await _check_authority(session, plan)
     if _fingerprint(plan.source) != plan.fingerprint or _fingerprint(plan.stage) is not None:
@@ -290,6 +354,14 @@ async def require_no_library_removal(
             for reserved, descendants in (
                 (plan.source, stat.S_ISDIR(plan.fingerprint[5])),
                 (plan.stage.parent, True),
+                *(
+                    (
+                        (plan.trash_path, stat.S_ISDIR(plan.fingerprint[5])),
+                        (plan.trash_stage.parent, True),
+                    )
+                    if plan.trash_path and plan.trash_stage
+                    else ()
+                ),
             ):
                 if any(
                     target == reserved

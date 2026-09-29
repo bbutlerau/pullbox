@@ -601,6 +601,30 @@ never permits deleting a registered output. Downgrade refuses retained completed
 or unresolved conversion evidence. Bulk utilities and other mutation entry points
 still require coordinated lifecycles before paired background writers activate.
 
+### Library Removal Journal
+
+`library_removals` retains bounded immutable source, root, private-stage and
+optional trash evidence independently of LibraryFile/series lifetimes. Admission
+reserves overlapping paths against archive publication, conversion and rename.
+The owner commits intent before a short exclusive staging rename, then commits
+the journal's detached state together with its selected database removals.
+Startup restores only uncommitted staging; it never resumes destructive cleanup.
+
+An explicit delete/trash disposition is required for cleanup. Historical plans
+default to retain-only. `cleanup_json` retains bounded copy/publication/deletion
+receipts; downgrade refuses to discard them. Cleanup owns clean-session
+transactions and holds a non-expiring OS file lock across its lifecycle, not a
+database write transaction across slow work. Same-filesystem trash uses exclusive
+rename; cross-filesystem trash copies privately, verifies content, and publishes
+without replacing an existing destination before removing its private source.
+Cancellation joins workers and leaves retryable proof. Unknown replacements are
+preserved. The old public source path is never used for cleanup.
+
+These are owner-integration primitives, not yet the public delete implementation.
+Series/browser/bulk deletion and trash retention must adopt the complete lifecycle
+before paired background writing is enabled. POSIX file locking is implemented;
+other platforms currently fail closed at private cleanup admission.
+
 ### Source Catalog Checkpoints
 
 `series_catalog_checkpoints` records complete issue-catalog progress separately

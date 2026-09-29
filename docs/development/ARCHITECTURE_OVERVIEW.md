@@ -629,6 +629,18 @@ the paired renderer is not activated by this lifecycle change. Bulk conversion,
 deletion and other writers still need to join coordination before paired background
 metadata writing can be enabled.
 
+`library_removal.py` adds durable reservation and same-filesystem private staging
+for deletion owners. Startup restores uncommitted staging before conversion
+recovery. `library_removal_cleanup.py` finishes explicitly authorized, committed
+detachment without holding the database writer across copying, hashing or recursive
+cleanup. Retained receipts and an OS file lock fence overlapping cleanup workers;
+trash publication never overwrites an existing destination. Same-filesystem trash
+renames rather than copying large collections. Cancellation leaves owned partial
+copies/deletions retryable, and cleanup never follows the old public source path.
+The browser, series and bulk deletion commands still need to adopt this lifecycle;
+the primitives alone do not enable paired production writers or change public
+deletion semantics. Trash-retention coordination and non-POSIX locking remain open.
+
 The existing import/cache consumers have not yet migrated to this registry.
 Metron has token settings, bounded transport and
 series/issue/arc adapter operations; GCD execution remains unimplemented, and
