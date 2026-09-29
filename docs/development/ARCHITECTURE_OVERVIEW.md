@@ -411,12 +411,24 @@ Source-aware Add Series saves series/issue baselines in its catalog transaction,
 including final lifecycle/format inference. Derived values have a distinct origin,
 not provider attribution or user-override markers. Explicit refresh may replace
 those values; background enrichment still fills gaps only. Existing-owner Add
-does not replace its baseline or local edits. Ordinary refresh command/task wiring,
-the remaining credits/membership fields and coordinated XML/sidecar writers are
-still pending; durable baselines alone do not complete those workflows.
+does not replace its baseline or local edits. Manual and scheduled Series refresh
+use the revision-checked canonical/catalog writer. Source-bound Story Arc Add also
+persists arc provenance and baselines for newly seeded parents/issues in its
+existing atomic graph transaction. Reused members retain their metadata and history.
+Arc refresh reads current descriptive values under the claimed arc revision,
+preserves edits and intentional clears, and saves the new baseline atomically with
+membership changes. Scheduled enrichment fills gaps; explicit refresh may replace
+provider-managed values. Managed placements keep the arc name fixed without
+blocking other safe changes; the baseline records that restriction separately
+from user overrides. Existing order, skipped and removed members, partial parent
+catalogs and pending-placement review remain unchanged. Legacy snapshots without
+normalized source evidence are not silently assigned canonical provenance.
+Multi-source Arc descriptive-read integration, remaining credits/membership fields
+and coordinated XML/sidecar writers are still pending; baselines alone do not
+complete those workflows.
 
-The existing import/cache and ordinary series-refresh consumers have not yet
-migrated to this registry. Metron has token settings, bounded transport and
+The existing import/cache consumers have not yet migrated to this registry.
+Metron has token settings, bounded transport and
 series/issue/arc adapter operations; GCD execution remains unimplemented, and
 GCD API v2 is additionally disabled by the release feature flag. Capability
 lists describe implemented adapter operations, not planned features.
@@ -696,8 +708,10 @@ windows where a valid source checkpoint permits them. Native and local sources
 do not require a ComicVine API key. Failed sources retain their checkpoints,
 including when a fallback succeeds. Retry attempts restrict reads to deferred
 sources and commit retry settlement with library/cursor changes. Authentication
-failures have no timed retry: a changed source policy or credential scope admits
-them again. Only one-way configuration scope keys are stored, never credentials.
+failures have no timed retry. Changed entity configuration can make an entity
+retry eligible, but the account guard still blocks known-failing credentials;
+priority edits cannot bypass an authentication hold. Only one-way configuration
+scope keys are stored, never credentials.
 Cancellation, failed commits and stale attempts cannot discard or resurrect
 settled retry work. Infrastructure lock failures retain a sweep-level pause.
 Account-wide cooldown admission is separate from entity retries. The source
@@ -711,8 +725,16 @@ seconds. Cancellation releases its lease without clearing the previous failure.
 Revision-checked outcome writes cannot clear a newer hold. Account transactions
 are short and independent of library transactions; provider I/O starts only
 after the admission transaction ends. Existing client request pacing remains
-in force. Authentication-held work still requires corrected credentials; operator
-retry visibility and deliberate re-probe controls remain separate follow-up work.
+in force. Settings shows current credential-scoped holds and a bounded, paginated
+list of deferred series work without provider calls or automatic polling. An
+authenticated, CSRF-protected Test connection explicitly permits one bounded
+authentication probe, never bypassing a timed rate limit. Success makes matching
+held retries due in the same transaction as account recovery; failed/cancelled or
+stale probes cannot clear newer holds. Older held retries without an account row
+are handled by the same manual check. Late authentication results are reconciled
+against recovered account state rather than recreating an indefinite hold.
+Successful recovery schedules existing continuations after commit, and startup
+also restores eligible retries for previously inactive sweeps.
 Post-restore aftercare keeps its recovery marker while continuation batches remain
 active; it observes completion without retaining a database transaction between checks.
 Cancellation leaves the marker and sweep checkpoint available for the next startup.

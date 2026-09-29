@@ -6,6 +6,11 @@ import pytest
 from sqlalchemy import event, func, select
 
 from pullbox.models import Issue, Series, StoryArc
+from pullbox.models.metadata_baseline import (
+    IssueMetadataBaseline,
+    SeriesMetadataBaseline,
+    StoryArcMetadataBaseline,
+)
 from pullbox.models.metadata_identity import (
     IssueIdentityEvent,
     SeriesIdentityEvent,
@@ -72,6 +77,9 @@ async def test_add_is_one_owned_transaction_including_response_and_commit(
             StoryArcIdentityEvent,
             SeriesIdentityEvent,
             IssueIdentityEvent,
+            StoryArcMetadataBaseline,
+            SeriesMetadataBaseline,
+            IssueMetadataBaseline,
         ):
             count = await session.scalar(select(func.count()).select_from(model))
             assert bool(count) is (failure == "none")

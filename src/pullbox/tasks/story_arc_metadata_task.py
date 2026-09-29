@@ -201,6 +201,7 @@ async def _refresh_arc(factory: async_sessionmaker[AsyncSession], arc_id: int) -
                 preview,
                 expected_revision=revision,
                 library_root_id=default_roots[0] if len(default_roots) == 1 else None,
+                replace_metadata=False,
             )
             await session.commit()
             # The wanted sweep rechecks monitoring, skips, dates and duplicates.

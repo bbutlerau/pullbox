@@ -424,6 +424,15 @@ Cancellation releases the probe while retaining the prior failure; a crashed
 process recovers through lease expiry. Reads fail closed if admission storage
 cannot be checked, instead of repeatedly submitting known-failing requests.
 
+An explicit Test connection may lease an authentication-held account while its
+retry deadline remains null. Only success clears that hold; cancellation retains
+it. Account recovery and matching credential/configuration-scoped entity retry
+deadlines commit atomically, with revision increments invalidating stale work.
+Scheduler wakeups happen after commit. Downgrading the authentication-probe
+migration clears active authentication leases and advances their revisions without
+discarding the hold, library or entity retries. Operator read DTOs expose status,
+deadlines and bounded task counts, never account/configuration keys or credentials.
+
 ### Canonical Metadata Baselines
 
 Series, issue and Story Arc metadata baselines use separate real foreign keys,
@@ -440,6 +449,13 @@ savepoint; PostgreSQL uses row locks. A stale batch rolls back even when its cal
 catches the conflict. Future refresh writers must additionally revalidate their
 captured source-policy and ownership revisions and current user values before
 applying network results; the baseline service is not a substitute for that check.
+
+Source-bound Story Arc commands save their canonical arc baseline inside the
+existing revision-claimed catalog savepoint. Newly seeded parent/issue baselines
+share that transaction; pre-existing rows are not retrospectively attributed to
+the incoming source. Issue baseline writes are batched at 200. Refresh reloads
+current mapped fields after claiming the arc, retaining user changes and clears.
+Corrupt provenance aborts the entire refresh, including membership additions.
 
 ### Source Catalog Checkpoints
 

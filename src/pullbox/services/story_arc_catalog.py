@@ -20,11 +20,14 @@ from pullbox.models.story_arc import (
     StoryArcResolutionState,
     StoryArcSourceKind,
 )
+from pullbox.services.metadata_arc_baselines import persist_arc_metadata
 from pullbox.services.metadata_arc_catalog import (
     MAX_CATALOG_MEMBERS,
     MAX_CATALOG_PARENTS,
     project_source_arc_catalog,
 )
+from pullbox.services.metadata_assembly import MetadataAssemblyError
+from pullbox.services.metadata_baselines import MetadataBaselineConflictError
 from pullbox.services.story_arc_catalog_evidence import (
     record_catalog_crosswalks,
     require_crosswalk_ownership,
@@ -242,6 +245,7 @@ class StoryArcCatalogService:
                 arc.policy_schema_version = STORY_ARC_PLACEMENT_POLICY_SCHEMA_VERSION
                 arc.policy_snapshot = policy.snapshot
                 await attach_arc_identity(session, arc, preview)
+                await persist_arc_metadata(session, arc, preview, created=True)
                 issues = await seed_members(session, preview, root, order)
                 await record_catalog_crosswalks(session, preview)
                 for position, provider_id in enumerate(order, start=1):
@@ -263,6 +267,11 @@ class StoryArcCatalogService:
                         await enqueue_story_arc_sync_work(session, library_file)
                 await initialize_catalog_placements(session, arc)
                 return arc
+        except (MetadataBaselineConflictError, MetadataAssemblyError) as exc:
+            raise StoryArcCatalogError(
+                "metadata_baseline_conflict",
+                "Metadata baseline needs review; preview the arc again",
+            ) from exc
         except IntegrityError as exc:
             raise StoryArcCatalogError(
                 "identity_conflict", "Catalog identities changed; refresh the preview"
@@ -330,6 +339,7 @@ class StoryArcCatalogService:
         *,
         expected_revision: int,
         library_root_id: int | None = None,
+        replace_metadata: bool = True,
     ) -> StoryArcCatalogRefreshResult:
         delta = await self.preview_refresh(session, story_arc_id, preview)
         if isinstance(expected_revision, bool) or delta.revision != expected_revision:
@@ -355,6 +365,9 @@ class StoryArcCatalogService:
                         "revision_conflict", "Story arc changed; refresh the review"
                     )
                 await attach_arc_identity(session, arc, preview)
+                await persist_arc_metadata(
+                    session, arc, preview, created=False, replace_managed=replace_metadata
+                )
                 issues = await seed_members(
                     session, preview, root, preview.metadata.issue_provider_ids
                 )
@@ -395,12 +408,18 @@ class StoryArcCatalogService:
                 pending = tuple(
                     row.id for row in rows if row.evidence.get("catalog_review_required") is True
                 ) + tuple(created)
-                arc.cover_url = preview.metadata.cover_url
+                if preview.source_evidence is None:
+                    arc.cover_url = preview.metadata.cover_url
                 self._diagnostics(arc, preview, root.id, delta.removed_issue_provider_ids, pending)
                 await session.flush()
                 return StoryArcCatalogRefreshResult(
                     arc, tuple(created), delta.removed_issue_provider_ids
                 )
+        except (MetadataBaselineConflictError, MetadataAssemblyError) as exc:
+            raise StoryArcCatalogError(
+                "metadata_baseline_conflict",
+                "Metadata baseline needs review; preview the arc again",
+            ) from exc
         except IntegrityError as exc:
             raise StoryArcCatalogError(
                 "identity_conflict", "Catalog identities changed; refresh the preview"

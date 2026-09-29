@@ -173,3 +173,33 @@ async def test_provider_failure_is_recorded_without_mutation(
         arc = await session.get(StoryArc, arc_id)
         assert arc.diagnostics["provider_refresh_error"]["code"] == "source_unavailable"
         assert len(list(await session.scalars(select(IssueStoryArc)))) == 1
+
+
+async def test_scheduled_arc_enrichment_fills_gaps_without_replacing_managed_values(
+    identity_probe_db, tmp_path, monkeypatch
+):
+    from pullbox.core.metadata_identity import MetadataEntityKind
+    from pullbox.services.metadata_baselines import load_metadata_baseline
+
+    _, factory, _ = identity_probe_db
+    arc_id, adapter = await setup(factory, tmp_path, monkeypatch)
+    async with factory() as session:
+        before = await session.get(StoryArc, arc_id)
+        title = before.name
+        assert before.description is None
+    adapter.arc = adapter.arc.model_copy(
+        update={
+            "title": "Different upstream title",
+            "description": "A newly supplied description",
+        }
+    )
+    await task.sync_story_arc_metadata()
+    async with factory() as session:
+        arc = await session.get(StoryArc, arc_id)
+        assert arc.name == title, "Background enrichment must not act like explicit refresh"
+        assert arc.description == "A newly supplied description"
+        saved = await load_metadata_baseline(session, MetadataEntityKind.STORY_ARC, arc_id)
+        assert saved is not None and saved.snapshot.values.title == title
+        assert saved.snapshot.values.description == arc.description
+        assert not any(origin.user_override for origin in saved.snapshot.origins)
+        assert len(list(await session.scalars(select(IssueStoryArc)))) == 2

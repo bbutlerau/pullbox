@@ -94,6 +94,8 @@ async def seed_members(
     series_metadata = {series.provider_id: series for series in preview.series}
     result: dict[str, Issue] = {}
     parents: dict[str, Series] = {}
+    new_parents: list[Series] = []
+    new_issues: list[Issue] = []
     parent_owners = await catalog_owners(
         session,
         MetadataEntityKind.SERIES,
@@ -131,6 +133,7 @@ async def seed_members(
                 parent = await _new_series(
                     session, parent_metadata, root, preview.source, profile=profile
                 )
+                new_parents.append(parent)
             parents[parent_key] = parent
         number, exact_number = parse_issue_number_text(
             metadata.issue_number_text or metadata.issue_number
@@ -182,8 +185,12 @@ async def seed_members(
             )
             session.add(issue)
             await session.flush()
+            new_issues.append(issue)
         result[provider_id] = issue
     await _attach_member_identities(session, preview, parents, result)
+    from pullbox.services.metadata_arc_baselines import persist_seeded_metadata
+
+    await persist_seeded_metadata(session, preview, new_parents, new_issues)
     return result
 
 
