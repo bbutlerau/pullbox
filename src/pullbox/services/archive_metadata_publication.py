@@ -33,6 +33,7 @@ from pullbox.services.archive_metadata_rendering import (
     ArchiveMetadataRenderError,
     render_archive_metadata,
 )
+from pullbox.services.library_mutation_coordination import lock_file_mutation_admission
 from pullbox.services.metadata_writer_identity import metadata_write_scope
 from pullbox.utilities.executors.archive_metadata_staging import StagedArchiveMetadata
 
@@ -274,6 +275,7 @@ async def record_archive_publication(
     path_key = hashlib.sha256(os.fsencode(plan.target.path)).hexdigest()
     try:
         async with metadata_write_scope(session):
+            await lock_file_mutation_admission(session)
             await _lock_binding(session, plan)
             existing = await load_archive_publication(session, operation_id)
             if existing:

@@ -16,6 +16,15 @@ _RENAME_NOREPLACE = 1
 _RENAME_EXCL = 4
 
 
+def rename_path_without_overwrite(source: Path, target: Path) -> None:
+    """Atomically claim a rename destination, including for directories."""
+    if not stat.S_ISDIR(source.lstat().st_mode):
+        publish_file_without_overwrite(source, target)
+    elif not _native_rename_without_overwrite(source, target):
+        # Directories cannot use the hard-link fallback; plain rename can overwrite.
+        raise OSError(errno.ENOTSUP, "Storage does not support exclusive directory rename")
+
+
 def publish_file_without_overwrite(stage: Path, target: Path) -> None:
     """Consume a stage using an atomic destination claim, never plain POSIX rename.
 

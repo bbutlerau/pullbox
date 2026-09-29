@@ -596,6 +596,16 @@ update; unresolved reservations block legacy enrichment. Recovery never repeats
 a filesystem replacement. Shared mutation coordination across other writers,
 paired enrichment-worker activation and no-op archive-write avoidance remain required.
 
+Short Library browser and series-folder renames now share a database admission
+mutex with new publication intent. They reject retained source/stage reservations,
+including folder descendants and orphaned file records, instead of relying only
+on a reference-file preflight. Library browser rename cancellation joins workers
+and commits before releasing coordination; compensation is identity-checked and
+never overwrites another destination. Folder path updates treat `%` and `_` as
+literal filename characters. Conversion, deletion, bulk utility writers and
+other mutation routes have not yet joined this contract. This does not authorize
+paired-writer activation or claim crash recovery for arbitrary legacy renames.
+
 The existing import/cache consumers have not yet migrated to this registry.
 Metron has token settings, bounded transport and
 series/issue/arc adapter operations; GCD execution remains unimplemented, and

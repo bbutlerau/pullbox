@@ -496,7 +496,8 @@ links preserve the immutable intent when the library row is deleted; the path
 reservation and evidence survive. There is no age-based lease takeover.
 
 Services use caller-owned transactions and the shared SQLite write/savepoint
-boundary. Import-owned publication first locks its job, imported file and action;
+boundary. Recording new intent first acquires the shared file-mutation admission
+mutex, before any owner/entity locks. Import-owned publication locks its job, imported file and action;
 publication then locks source policies, series, issue, root, file, then the
 journal row. Generic filesystem classification only locks the journal row;
 import-owner recovery uses the full owner/binding lock order. Large file hashing, rendering
@@ -552,6 +553,32 @@ pending caller edits and nested transactions. Startup/enrichment and rollback
 orchestration invoke it under the existing process-local import lane. Shared
 mutation fencing across all other writers and paired enrichment-worker activation
 remain required; the process-local lane is not a cross-process filesystem lock.
+
+### Short File Mutation Coordination
+
+`services/library_mutation_coordination.py` coordinates Library browser renames
+and series-folder renames with new archive-publication admission. SQLite acquires
+its writer transaction with a no-op ORM update; PostgreSQL uses the fixed
+transaction-scoped advisory key pair `0x50554C4C / 0x46494C45`. Acquire this mutex
+before entity locks and retain it through the caller's commit or rollback. No
+provider calls, archive rewriting or hashing may run under it. Existing bulk
+series-folder rename retains its caller-owned transaction; it is not a concurrent
+or background archive-conversion lane.
+
+Under the mutex, renames inspect bounded pages of active publication evidence,
+including source and private stage paths and directory descendants. Orphaned
+reservations survive deleted LibraryFile rows. Invalid or inconsistent plans fail
+closed. A terminal released publication does not block later renames. Publication
+work between commits remains protected by its durable reservation, not by a
+long-running advisory lock. This is cooperative application coordination, not a
+lock against external programs or a durable rename-recovery journal.
+
+Library browser renames join file work, commit and compensation on cancellation.
+Compensation reacquires admission, rechecks reservations/reference protection and
+moves back only the owned inode into an unclaimed destination. A completed commit
+is not undone when the request is cancelled. Conversion, deletion, bulk utility
+writers, import placement and other mutation paths still need the shared contract
+before paired background writing can be enabled.
 
 ### Source Catalog Checkpoints
 

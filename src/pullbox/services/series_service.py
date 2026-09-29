@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 
 from pullbox.core.events import EventBus, IssueWanted, SeriesAdded
 from pullbox.core.exceptions import NotFoundError, ValidationError
+from pullbox.core.file_publication import rename_path_without_overwrite
 from pullbox.core.library_file_ownership import (
     referenced_library_files_for_target,
     require_mutable_library_target,
@@ -40,6 +41,11 @@ from pullbox.services.cover_cache_service import (
     cache_imported_series_cover,
     find_imported_series_cover,
     purge_series_cover_cache,
+)
+from pullbox.services.library_mutation_coordination import (
+    finish_short_mutation,
+    lock_file_mutation_admission,
+    require_no_archive_publication,
 )
 from pullbox.services.library_root_management import validate_managed_library_root
 from pullbox.services.metadata_writer_identity import ImportIdentityOrigin
@@ -678,6 +684,7 @@ class SeriesService:
         Returns:
             The new path if renamed, or ``None`` if no rename was needed.
         """
+        await lock_file_mutation_admission(session)
         series = await session.get(Series, series_id)
         if not series or not series.path or not series.library_root_id:
             return None
@@ -703,6 +710,13 @@ class SeriesService:
         if current_path == expected_path:
             return None
 
+        await require_no_archive_publication(
+            session,
+            current_path,
+            expected_path,
+            expected_path.with_name(f"{expected_name} [cv-{series.comicvine_id}]"),
+            include_descendants=True,
+        )
         await require_mutable_library_target(
             session,
             current_path,
@@ -736,8 +750,12 @@ class SeriesService:
         # Rename on disk
         if current_path.is_dir():
             try:
-                await asyncio.to_thread(expected_path.parent.mkdir, parents=True, exist_ok=True)
-                await asyncio.to_thread(current_path.rename, expected_path)
+
+                def rename() -> None:
+                    expected_path.parent.mkdir(parents=True, exist_ok=True)
+                    rename_path_without_overwrite(current_path, expected_path)
+
+                await finish_short_mutation(asyncio.create_task(asyncio.to_thread(rename)))
                 series.path = str(expected_path)
                 logger.info(
                     "series_folder_renamed",

@@ -419,7 +419,12 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
     expect(page.locator("[data-membership-id]").nth(0)).to_have_attribute(
         "data-exact-issue-number", "1AU"
     )
-    page.get_by_role("button", name="Review issue 2 match").click()
+    # URL/rows appear before the boosted navigation's settle and scroll reset.
+    expect(page.locator("#content .htmx-added, #content.htmx-settling")).to_have_count(0)
+    review_toggle = page.get_by_role("button", name="Review issue 2 match")
+    expect(review_toggle).to_have_attribute("aria-expanded", "false")
+    review_toggle.click()
+    expect(review_toggle).to_have_attribute("aria-expanded", "true")
     expect(page.get_by_role("button", name="Confirm reading order")).to_be_visible()
     expect(page.get_by_role("button", name="Search local issues")).to_have_count(0)
     page.get_by_role("button", name="Confirm reading order").click()
