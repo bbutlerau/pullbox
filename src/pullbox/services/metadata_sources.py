@@ -62,8 +62,13 @@ def default_policy(source: MetadataSource) -> SourcePolicyRead:
 
 
 async def read_source_policies(session: AsyncSession) -> list[SourcePolicyRead]:
-    rows = {row.source: row for row in await session.scalars(select(MetadataSourceConfig))}
-    cv_row = await session.get(SystemConfig, "comicvine_api_key")
+    rows = {
+        row.source: row
+        for row in await session.scalars(
+            select(MetadataSourceConfig).execution_options(populate_existing=True)
+        )
+    }
+    cv_row = await session.get(SystemConfig, "comicvine_api_key", populate_existing=True)
     cv_configured = bool((cv_row and cv_row.value) or get_settings().comicvine_api_key)
     result = []
     for source in MetadataSource:

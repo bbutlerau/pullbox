@@ -540,6 +540,21 @@ Legacy operations still publish inside their workers; they have not migrated to
 the staged owner-publication contract. Production binding, journal recovery and
 consumer migration remain required.
 
+`services/archive_metadata_binding.py` captures one registered managed CBZ's
+issue/parent, verified identities and revisions, current values/credits, canonical
+baselines, source policies and root policy. It reuses the series refresh mapper
+with a bounded exact issue selection rather than loading the whole catalog.
+Legacy ComicVine columns must agree with active ownership; stale or conflicted
+claims do not disappear from the check. Local XML is assembled only after this
+independent binding and cannot acquire identity ownership. Database reads do not
+commit or flush pending caller edits. Filesystem probes run separately, off the
+event loop, and capture a writable regular file plus its directory identities
+inside the recorded root. Final revalidation checks both database state and
+canonical-path reference ownership; the owner separately rechecks filesystem
+evidence immediately before publication. These read sets are not locks or a
+durable journal. Production migration still requires a serialized recoverable
+publication boundary, output baseline persistence and crash reconciliation.
+
 The existing import/cache consumers have not yet migrated to this registry.
 Metron has token settings, bounded transport and
 series/issue/arc adapter operations; GCD execution remains unimplemented, and

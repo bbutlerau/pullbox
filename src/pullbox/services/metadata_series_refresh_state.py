@@ -98,7 +98,24 @@ def _baseline(payload: str | None, kind: MetadataEntityKind) -> MetadataSnapshot
         ) from exc
 
 
-async def read_series_refresh_state(session: AsyncSession, series_id: int) -> SeriesRefreshState:
+async def read_series_refresh_state(
+    session: AsyncSession, series_id: int, *, issue_ids: tuple[int, ...] | None = None
+) -> SeriesRefreshState:
+    """Capture a catalog or a bounded exact subset using the same value mapping."""
+    if issue_ids is not None and (
+        not issue_ids
+        or len(issue_ids) > 200
+        or len(set(issue_ids)) != len(issue_ids)
+        or any(
+            isinstance(item, bool) or not isinstance(item, int) or item <= 0 for item in issue_ids
+        )
+    ):
+        raise ValueError("Choose between one and 200 distinct positive issue IDs.")
+    issue_filter = (
+        Issue.series_id == series_id
+        if issue_ids is None
+        else (Issue.series_id == series_id) & Issue.id.in_(issue_ids)
+    )
     row = (
         await session.execute(
             select(
@@ -164,7 +181,7 @@ async def read_series_refresh_state(session: AsyncSession, series_id: int) -> Se
         await session.execute(
             select(Issue, IssueMetadataBaseline.revision, IssueMetadataBaseline.snapshot_json)
             .outerjoin(IssueMetadataBaseline, IssueMetadataBaseline.issue_id == Issue.id)
-            .where(Issue.series_id == series_id)
+            .where(issue_filter)
             .order_by(Issue.id)
             .limit(10001)
             .execution_options(populate_existing=True)
@@ -172,11 +189,13 @@ async def read_series_refresh_state(session: AsyncSession, series_id: int) -> Se
     ).all()
     if len(members) > 10000:
         raise ValueError("This series exceeds the bounded refresh limit of 10,000 issues.")
+    if issue_ids is not None and {issue.id for issue, _, _ in members} != set(issue_ids):
+        raise ValueError("Requested issues no longer belong to this series.")
     issue_claims: dict[int, list[tuple[ExternalIdentityRef, IdentityVerificationState, int]]] = {}
     for claim in await session.scalars(
         select(IssueExternalIdentity)
         .join(Issue, Issue.id == IssueExternalIdentity.issue_id)
-        .where(Issue.series_id == series_id)
+        .where(issue_filter)
         .order_by(IssueExternalIdentity.identity_namespace)
         .execution_options(populate_existing=True)
     ):
@@ -194,7 +213,7 @@ async def read_series_refresh_state(session: AsyncSession, series_id: int) -> Se
             await session.execute(
                 select(IssueIdentityEvent.issue_id, func.max(IssueIdentityEvent.id))
                 .join(Issue, Issue.id == IssueIdentityEvent.issue_id)
-                .where(Issue.series_id == series_id)
+                .where(issue_filter)
                 .group_by(IssueIdentityEvent.issue_id)
             )
         )
