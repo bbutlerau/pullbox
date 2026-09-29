@@ -58,6 +58,9 @@ async def require_no_archive_publication(
     publication evidence behind. Bound each page and fail closed on corrupt plans.
     """
     from pullbox.services.archive_metadata_publication import ArchivePublicationPlan
+    from pullbox.services.library_conversion_recovery import require_no_library_conversion
+
+    await require_no_library_conversion(session, *paths, include_descendants=include_descendants)
 
     targets = {variant for path in paths for variant in (path.absolute(), path.resolve())}
     last_id = 0

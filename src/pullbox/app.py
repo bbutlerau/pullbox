@@ -297,6 +297,12 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         logger.warning("library_path_reconciliation_failed", exc_info=True)
 
+    # Retained conversion intent must be reconciled before background file writers.
+    from pullbox.services.library_conversion_recovery import recover_library_conversions
+
+    async with get_session_factory()() as session:
+        await recover_library_conversions(session)
+
     # One-time migration: move covers from series folders to .covers/
     from pullbox.core.cover_migration import migrate_covers_to_dotcovers
 

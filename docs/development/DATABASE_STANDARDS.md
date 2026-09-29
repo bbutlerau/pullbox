@@ -580,6 +580,27 @@ is not undone when the request is cancelled. Conversion, deletion, bulk utility
 writers, import placement and other mutation paths still need the shared contract
 before paired background writing can be enabled.
 
+### Library Conversion Journal
+
+`library_conversions` retains bounded original, staged output and independent trash
+backup evidence. Preparation uses interruptible child processes outside database
+write transactions. The Library browser owns the session lifecycle: it commits
+intent before exclusive publication, then commits the existing LibraryFile's new
+path before removing the unchanged original. Reader state and issue identity keep
+their existing registration. Copying the backup into private staging on the trash
+filesystem supports cross-filesystem trash without a long SQLite write lock.
+
+Conversion reservations share admission with archive metadata publication and
+short renames. They cover original, output, backup and both stage paths, survive
+LibraryFile deletion, and do not expire. Startup recovery examines bounded batches,
+hashes outside write transactions, and rechecks the files under admission before
+registration or cleanup. It never republishes private stages. Proven untouched
+intent is abandoned; proven output/backup can finish registration and cleanup;
+changed or unproven evidence remains reserved for review. A lost commit response
+never permits deleting a registered output. Downgrade refuses retained completed
+or unresolved conversion evidence. Bulk utilities and other mutation entry points
+still require coordinated lifecycles before paired background writers activate.
+
 ### Source Catalog Checkpoints
 
 `series_catalog_checkpoints` records complete issue-catalog progress separately

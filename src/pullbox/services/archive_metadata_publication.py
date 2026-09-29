@@ -269,6 +269,7 @@ async def record_archive_publication(
     elapsed time is never permission to let another writer take over.
     """
     from pullbox.services.import_archive_publication import require_import_archive_owner
+    from pullbox.services.library_conversion_recovery import require_no_library_conversion
 
     _clean_session(session)
     encoded = _encode(plan)
@@ -276,6 +277,9 @@ async def record_archive_publication(
     try:
         async with metadata_write_scope(session):
             await lock_file_mutation_admission(session)
+            await require_no_library_conversion(
+                session, plan.target.path, plan.stage_path, include_descendants=False
+            )
             await _lock_binding(session, plan)
             existing = await load_archive_publication(session, operation_id)
             if existing:

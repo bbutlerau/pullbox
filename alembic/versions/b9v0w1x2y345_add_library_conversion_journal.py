@@ -1,0 +1,47 @@
+"""Retain original, output and backup evidence for Library conversion recovery."""
+
+import sqlalchemy as sa
+
+from alembic import op
+
+revision = "b9v0w1x2y345"
+down_revision = "a8u9v0w1x234"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "library_conversions",
+        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+        sa.Column("operation_id", sa.String(36), nullable=False, unique=True),
+        sa.Column(
+            "library_file_id", sa.Integer(), sa.ForeignKey("library_files.id", ondelete="SET NULL")
+        ),
+        sa.Column("active", sa.Boolean(), nullable=False),
+        sa.Column("state", sa.String(10), nullable=False),
+        sa.Column("plan_json", sa.Text(), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        sa.CheckConstraint(
+            "state IN ('intended','registered','complete','abandoned','review')",
+            name="ck_library_conversion_state",
+        ),
+        sa.CheckConstraint(
+            "length(plan_json) BETWEEN 2 AND 65536", name="ck_library_conversion_plan_size"
+        ),
+    )
+    op.create_index("ix_library_conversions_active", "library_conversions", ["active"])
+
+
+def downgrade() -> None:
+    table = sa.table("library_conversions", sa.column("state"))
+    if op.get_bind().scalar(
+        sa.select(sa.func.count()).select_from(table).where(table.c.state != "abandoned")
+    ):
+        raise RuntimeError("Resolve retained library conversion evidence before downgrading.")
+    op.drop_table("library_conversions")

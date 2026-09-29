@@ -612,6 +612,16 @@ literal filename characters. Conversion, deletion, bulk utility writers and
 other mutation routes have not yet joined this contract. This does not authorize
 paired-writer activation or claim crash recovery for arbitrary legacy renames.
 
+Library browser conversion now prepares output and an independent original backup
+in private, interruptible workers, records durable intent, publishes exclusively,
+and updates the existing registration before deleting the original. Recovery runs
+before startup file writers and never guesses ownership from a filename or removes
+unproven output after an ambiguous commit. Same-root and cross-filesystem trash use
+the same staged protocol. This retains the existing conversion content behavior;
+the paired renderer is not activated by this lifecycle change. Bulk conversion,
+deletion and other writers still need to join coordination before paired background
+metadata writing can be enabled.
+
 The existing import/cache consumers have not yet migrated to this registry.
 Metron has token settings, bounded transport and
 series/issue/arc adapter operations; GCD execution remains unimplemented, and
