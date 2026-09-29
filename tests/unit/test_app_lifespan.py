@@ -202,6 +202,10 @@ def patched_lifespan(monkeypatch: pytest.MonkeyPatch, tmp_path):
         _LIFESPAN_EVENTS.append("conversion_recovery_completed")
         return 1
 
+    async def recover_removals(_session: object) -> int:
+        _LIFESPAN_EVENTS.append("removal_recovery_completed")
+        return 1
+
     def session_factory() -> _FakeSession:
         return _FakeSession()
 
@@ -241,6 +245,10 @@ def patched_lifespan(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setattr(app, "_run_debug_logging_expiry_enforcer", neverending_debug_enforcer)
     monkeypatch.setattr(app, "get_event_bus", lambda: event_bus)
     monkeypatch.setattr(app, "get_session_factory", lambda: session_factory)
+    monkeypatch.setattr(
+        "pullbox.services.library_removal.recover_library_removals",
+        recover_removals,
+    )
     monkeypatch.setattr(
         "pullbox.services.library_conversion_recovery.recover_library_conversions",
         recover_conversions,
@@ -403,6 +411,9 @@ async def test_import_recovery_completes_before_scheduler_can_start(
     async with patched_lifespan.app.lifespan(FastAPI()):
         assert "import_recovery_completed" in _LIFESPAN_EVENTS
         assert "scheduler_started" in _LIFESPAN_EVENTS
+    assert _LIFESPAN_EVENTS.index("removal_recovery_completed") < _LIFESPAN_EVENTS.index(
+        "conversion_recovery_completed"
+    )
     assert _LIFESPAN_EVENTS.index("conversion_recovery_completed") < _LIFESPAN_EVENTS.index(
         "import_recovery_completed"
     )

@@ -297,6 +297,12 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         logger.warning("library_path_reconciliation_failed", exc_info=True)
 
+    # Restore uncommitted removals before conversion recovery or background writers.
+    from pullbox.services.library_removal import recover_library_removals
+
+    async with get_session_factory()() as session:
+        await recover_library_removals(session)
+
     # Retained conversion intent must be reconciled before background file writers.
     from pullbox.services.library_conversion_recovery import recover_library_conversions
 

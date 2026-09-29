@@ -61,6 +61,7 @@ from pullbox.models.library import (
     MatchConfidence,
 )
 from pullbox.models.library_conversion import LibraryConversion
+from pullbox.models.library_removal import LibraryRemoval
 from pullbox.models.matching_suggestion import MatchingSuggestion, SuggestionStatus
 from pullbox.models.metadata_baseline import (
     IssueMetadataBaseline,
@@ -200,6 +201,7 @@ __all__ = [
     "JobType",
     "LibraryConversion",
     "LibraryFile",
+    "LibraryRemoval",
     "LibraryRoot",
     "LibraryRootPolicy",
     "LibraryRootPolicySource",

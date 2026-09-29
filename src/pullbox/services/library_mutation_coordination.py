@@ -59,7 +59,9 @@ async def require_no_archive_publication(
     """
     from pullbox.services.archive_metadata_publication import ArchivePublicationPlan
     from pullbox.services.library_conversion_recovery import require_no_library_conversion
+    from pullbox.services.library_removal import require_no_library_removal
 
+    await require_no_library_removal(session, *paths, include_descendants=include_descendants)
     await require_no_library_conversion(session, *paths, include_descendants=include_descendants)
 
     targets = {variant for path in paths for variant in (path.absolute(), path.resolve())}
