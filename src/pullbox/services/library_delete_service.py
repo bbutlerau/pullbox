@@ -203,7 +203,10 @@ async def build_delete_context(
     file_clause = (
         LibraryFile.file_path == prefix
         if kind == "file"
-        else or_(LibraryFile.file_path == prefix, LibraryFile.file_path.like(f"{prefix}/%"))
+        else or_(
+            LibraryFile.file_path == prefix,
+            LibraryFile.file_path.startswith(f"{prefix}/", autoescape=True),
+        )
     )
     tracked_file_count = int(
         (await session.execute(select(func.count(LibraryFile.id)).where(file_clause))).scalar_one()
@@ -216,7 +219,10 @@ async def build_delete_context(
             (
                 await session.execute(
                     select(func.count(Series.id)).where(
-                        or_(Series.path == prefix, Series.path.like(f"{prefix}/%"))
+                        or_(
+                            Series.path == prefix,
+                            Series.path.startswith(f"{prefix}/", autoescape=True),
+                        )
                     )
                 )
             ).scalar_one()
@@ -297,7 +303,10 @@ async def delete_library_entry(
     file_clause = (
         LibraryFile.file_path == prefix
         if kind == "file"
-        else or_(LibraryFile.file_path == prefix, LibraryFile.file_path.like(f"{prefix}/%"))
+        else or_(
+            LibraryFile.file_path == prefix,
+            LibraryFile.file_path.startswith(f"{prefix}/", autoescape=True),
+        )
     )
     tracked_files = list(
         (
@@ -317,7 +326,10 @@ async def delete_library_entry(
             (
                 await session.execute(
                     select(Series).where(
-                        or_(Series.path == prefix, Series.path.like(f"{prefix}/%"))
+                        or_(
+                            Series.path == prefix,
+                            Series.path.startswith(f"{prefix}/", autoescape=True),
+                        )
                     )
                 )
             )
