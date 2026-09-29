@@ -589,8 +589,12 @@ import and placement action. Finalization acknowledges that owner and records a
 successor reference without replacing original ownership evidence. Import rollback
 accepts only a finalized, action-bound successor whose registered owner and actual
 bytes still match. Active publications and later reassignment remain protected.
-Shared mutation coordination, cancelled-owner settlement, restart/worker
-orchestration and no-op archive-write avoidance remain required.
+Startup/enrichment and rollback orchestration now recover retained import-owned
+publications before using the legacy writer or removing artifacts. Stopped owners
+receive a separate settled receipt and file accounting, not a stale canonical
+update; unresolved reservations block legacy enrichment. Recovery never repeats
+a filesystem replacement. Shared mutation coordination across other writers,
+paired enrichment-worker activation and no-op archive-write avoidance remain required.
 
 The existing import/cache consumers have not yet migrated to this registry.
 Metron has token settings, bounded transport and

@@ -436,7 +436,7 @@ async def reconcile_archive_publication(
             receipt.revision,
         ):
             raise ArchivePublicationError("publication_changed")
-        if row.state is PublicationState.FINALIZED:
+        if row.state in {PublicationState.FINALIZED, PublicationState.SETTLED}:
             return receipt
         _directories_unchanged(receipt.plan)
         if _fingerprint(receipt.plan.target.path) != inspection.fingerprint:

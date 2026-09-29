@@ -498,7 +498,8 @@ reservation and evidence survive. There is no age-based lease takeover.
 Services use caller-owned transactions and the shared SQLite write/savepoint
 boundary. Import-owned publication first locks its job, imported file and action;
 publication then locks source policies, series, issue, root, file, then the
-journal row. Recovery only locks the journal row. Large file hashing, rendering
+journal row. Generic filesystem classification only locks the journal row;
+import-owner recovery uses the full owner/binding lock order. Large file hashing, rendering
 and staging stay outside write transactions; only the short, offloaded atomic
 publication and directory-sync boundary retains the lock. An intent must commit
 before publication. A failed post-rename transaction leaves evidence for later
@@ -534,9 +535,23 @@ It never replaces the original destination signature or source/naming evidence.
 Import rollback rejects active publications, unverified successor pointers and
 reassigned registrations. A successor must be finalized for that exact unchanged
 action, and its verified fingerprint/digest must still match the actual archive.
-The original source remains subject to the existing rollback policy. Shared
-mutation fencing, cancelled-owner settlement and restart/worker integration are
-still required before the background writer switches to paired publication.
+The original source remains subject to the existing rollback policy.
+
+A stopped owner may receive a `settled` receipt for a proven published successor.
+It updates only registered file accounting and the import's successor reference,
+marking enrichment cancelled without applying canonical snapshots or baselines.
+The immutable original placement proof and exact current registration must still
+match. Settled receipts release reservations and survive rollback; downgrade
+refuses to discard them. A proven untouched intent can instead be abandoned.
+Changed or unproven files retain reservations and cannot fall through to legacy
+enrichment. Neither recovery path writes an archive.
+
+The recovery task owns a clean session and commits bounded keyset reads before
+inspection/hashing, then commits each recovered receipt independently. It rejects
+pending caller edits and nested transactions. Startup/enrichment and rollback
+orchestration invoke it under the existing process-local import lane. Shared
+mutation fencing across all other writers and paired enrichment-worker activation
+remain required; the process-local lane is not a cross-process filesystem lock.
 
 ### Source Catalog Checkpoints
 

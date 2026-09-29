@@ -34,6 +34,16 @@ _ENRICHMENT = "comicinfo_enrichment"
 _SUCCESSOR = "metadata_publication"
 
 
+def import_archive_owner_stopped(job: ImportJob) -> bool:
+    """Only durable stop/rollback controls permit non-canonical settlement."""
+    return job.control_request is ImportControlRequest.CANCEL or job.status in {
+        ImportJobStatus.CANCELLING,
+        ImportJobStatus.CANCELLED,
+        ImportJobStatus.ROLLING_BACK,
+        ImportJobStatus.ROLLED_BACK,
+    }
+
+
 def _digest(value: object) -> str:
     try:
         encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
@@ -85,6 +95,7 @@ async def _owner_snapshot(
     job_id: int,
     imported_file_id: int,
     action_id: int,
+    stopped: bool = False,
 ) -> ImportArchiveOwner:
     job = await session.get(ImportJob, job_id, populate_existing=True)
     file = await session.get(ImportedFile, imported_file_id, populate_existing=True)
@@ -97,9 +108,17 @@ async def _owner_snapshot(
         or action is None
         or library_file is None
         or library_file.storage_mode is not LibraryFileStorageMode.MANAGED
+        or library_file.issue_id != bound.metadata.issues[0].local_id
+        or library_file.library_root_id != bound.library_root_id
+        or library_file.file_path != str(plan.target.path)
+        or library_file.file_name != plan.target.path.name
         or _digest(library_file.source_signature) != _digest(_signature(plan))
-        or job.status is not ImportJobStatus.COMPLETED
-        or job.control_request is not ImportControlRequest.NONE
+        or (
+            not import_archive_owner_stopped(job)
+            if stopped
+            else job.status is not ImportJobStatus.COMPLETED
+            or job.control_request is not ImportControlRequest.NONE
+        )
         or file.import_job_id != job.id
         or action.import_job_id != job.id
         or file.status is not ImportedFileStatus.IMPORTED
@@ -195,6 +214,8 @@ async def require_import_archive_owner(session: AsyncSession, plan: ArchivePubli
 async def acknowledge_import_archive_publication(
     session: AsyncSession,
     receipt: ArchivePublicationReceipt,
+    *,
+    cancelled: bool = False,
 ) -> None:
     """Caller already holds owner locks and verified the immutable owner snapshot."""
     owner = receipt.plan.import_owner
@@ -206,7 +227,7 @@ async def acknowledge_import_archive_publication(
     action.payload = {**action.payload, _SUCCESSOR: str(receipt.operation_id)}
     details = dict(file.diagnostics[_ENRICHMENT])
     details.update(
-        status="complete",
+        status="cancelled" if cancelled else "complete",
         publication_id=str(receipt.operation_id),
         completed_at=datetime.now(UTC).isoformat(),
     )
@@ -266,7 +287,7 @@ async def import_rollback_signature(
             .where(ArchiveMetadataPublication.operation_id == str(operation_id))
             .with_for_update()
         )
-        if row is None or row.state is not PublicationState.FINALIZED:
+        if row is None or row.state not in {PublicationState.FINALIZED, PublicationState.SETTLED}:
             raise ArchivePublicationError("import_owner_successor_invalid")
         receipt = _receipt(row)
         owner = receipt.plan.import_owner

@@ -192,7 +192,10 @@ async def rollback_import_job(
     progress_callback: ProgressCallback | None = None,
 ) -> bool:
     """Rollback durable import actions in reverse execution order."""
+    from pullbox.tasks.import_archive_recovery import recover_import_archive_publications
+
     async with comicinfo_enrichment_gate():
+        await recover_import_archive_publications(session, job_id=job_id)
         return await _rollback_import_job_while_enrichment_fenced(
             session,
             job_id,

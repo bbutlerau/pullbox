@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -11,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from sqlalchemy import or_
 from sqlalchemy import select as sa_select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import joinedload
@@ -20,7 +23,14 @@ from pullbox.core.sqlite_lock import (
     is_sqlite_locked_error,
     sqlite_lock_retry_delay,
 )
-from pullbox.models.import_job import ImportedFile, ImportedFileStatus, ImportJob, ImportJobStatus
+from pullbox.models.archive_metadata_publication import ArchiveMetadataPublication
+from pullbox.models.import_job import (
+    ImportControlRequest,
+    ImportedFile,
+    ImportedFileStatus,
+    ImportJob,
+    ImportJobStatus,
+)
 from pullbox.models.issue import Issue
 from pullbox.models.library import LibraryFile
 from pullbox.models.series import Series
@@ -120,6 +130,10 @@ async def run_pending_import_comicinfo_enrichment(
     prefetch_issue_metadata: ImportComicInfoPrefetch | None = None,
 ) -> int:
     """Refresh deferred ComicInfo metadata for all completed jobs with pending rows."""
+    from pullbox.tasks.import_archive_recovery import recover_import_archive_publications
+
+    async with comicinfo_enrichment_gate(), session_factory() as session:
+        await recover_import_archive_publications(session)
     pending_job_ids = await _load_pending_import_job_ids(session_factory)
     for job_id in pending_job_ids:
         await run_import_comicinfo_enrichment(
@@ -167,6 +181,10 @@ async def _run_import_comicinfo_enrichment_while_fenced(
     prefetch_issue_metadata: ImportComicInfoPrefetch | None = None,
 ) -> None:
     """Run one job while holding the process-local filesystem mutation fence."""
+    from pullbox.tasks.import_archive_recovery import recover_import_archive_publications
+
+    async with session_factory() as session:
+        await recover_import_archive_publications(session, job_id=job_id)
     if not await _import_job_is_completed(session_factory, job_id=job_id):
         return
     pending_ids = await _load_pending_imported_file_ids(session_factory, job_id=job_id)
@@ -241,7 +259,11 @@ async def _import_job_is_completed(
 ) -> bool:
     """Read durable job state at a filesystem safe boundary."""
     async with session_factory() as session:
-        status = await session.scalar(sa_select(ImportJob.status).where(ImportJob.id == job_id))
+        status = await session.scalar(
+            sa_select(ImportJob.status).where(
+                ImportJob.id == job_id, ImportJob.control_request == ImportControlRequest.NONE
+            )
+        )
         await session.rollback()
     return status is ImportJobStatus.COMPLETED
 
@@ -257,6 +279,7 @@ async def _load_pending_imported_file_ids(
             .join(ImportJob, ImportedFile.import_job_id == ImportJob.id)
             .where(ImportedFile.import_job_id == job_id)
             .where(ImportJob.status == ImportJobStatus.COMPLETED)
+            .where(ImportJob.control_request == ImportControlRequest.NONE)
             .where(ImportedFile.status == ImportedFileStatus.IMPORTED)
         )
         ids: list[int] = []
@@ -279,6 +302,7 @@ async def _load_pending_issue_cv_ids(
             .join(ImportJob, ImportedFile.import_job_id == ImportJob.id)
             .where(ImportedFile.import_job_id == job_id)
             .where(ImportJob.status == ImportJobStatus.COMPLETED)
+            .where(ImportJob.control_request == ImportControlRequest.NONE)
             .where(ImportedFile.status == ImportedFileStatus.IMPORTED)
             .order_by(ImportedFile.id)
         )
@@ -310,6 +334,7 @@ async def _load_pending_import_job_ids(
             sa_select(ImportedFile.import_job_id, ImportedFile.diagnostics)
             .join(ImportJob, ImportedFile.import_job_id == ImportJob.id)
             .where(ImportJob.status == ImportJobStatus.COMPLETED)
+            .where(ImportJob.control_request == ImportControlRequest.NONE)
             .where(ImportedFile.status == ImportedFileStatus.IMPORTED)
             .order_by(ImportedFile.import_job_id)
         )
@@ -389,7 +414,10 @@ async def _prepare_pending_imported_file(
         return None
     assert imported_file is not None
     job_status = await session.scalar(
-        sa_select(ImportJob.status).where(ImportJob.id == imported_file.import_job_id)
+        sa_select(ImportJob.status).where(
+            ImportJob.id == imported_file.import_job_id,
+            ImportJob.control_request == ImportControlRequest.NONE,
+        )
     )
     if job_status is not ImportJobStatus.COMPLETED:
         return None
@@ -410,6 +438,25 @@ async def _prepare_pending_imported_file(
     library_file = await session.get(LibraryFile, int(library_file_id))
     if library_file is None:
         raise ValueError(f"Library file {library_file_id} no longer exists")
+
+    reserved = await session.scalar(
+        sa_select(ArchiveMetadataPublication.id)
+        .where(
+            or_(
+                ArchiveMetadataPublication.active_file_id == library_file.id,
+                ArchiveMetadataPublication.active_path_key
+                == hashlib.sha256(os.fsencode(library_file.file_path)).hexdigest(),
+            )
+        )
+        .limit(1)
+    )
+    if reserved is not None:
+        logger.warning(
+            "import_comicinfo_publication_pending",
+            imported_file_id=imported_file_id,
+            publication_id=reserved,
+        )
+        return None
 
     recorded_issue_id = _recorded_positive_int(details, "issue_id")
     expected_issue_id = imported_file.matched_issue_id or recorded_issue_id
