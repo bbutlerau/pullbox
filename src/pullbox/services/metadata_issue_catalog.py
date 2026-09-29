@@ -12,6 +12,7 @@ from pullbox.models.issue import IssueStatus
 from pullbox.services.metadata_assembly import assemble_metadata
 from pullbox.services.metadata_baselines import MetadataBaselineWrite, save_metadata_baselines
 from pullbox.services.metadata_credits import write_issue_credits
+from pullbox.services.metadata_entity_values import apply_issue_metadata_values
 from pullbox.services.metadata_identity_attachment import attach_verified_identities
 from pullbox.services.metadata_identity_review import record_identity_observation
 from pullbox.services.metadata_series_adoption import (
@@ -130,10 +131,7 @@ async def apply_issue_batch(
                     metadata_source=_metadata_label(source),
                 )
                 session.add(issue)
-            value = snapshot.values
-            issue.title, issue.description = value.title, value.description
-            issue.release_date, issue.store_date = value.cover_date, value.store_date
-            issue.page_count, issue.cover_url = value.page_count, value.image_url
+            apply_issue_metadata_values(issue, snapshot.values)
             pending.append((issue, existing, metadata, snapshot))
         await session.flush()
         await attach_verified_identities(

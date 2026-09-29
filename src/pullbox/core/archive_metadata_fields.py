@@ -13,6 +13,31 @@ COMICINFO_ROLES = {
     "Translator": "translator",
 }
 
+ARCHIVE_FORMATS = {
+    "standard": "Single Issue",
+    "tpb": "Trade Paperback",
+    "one_shot": "One-Shot",
+    "annual": "Annual",
+    "hardcover": "Hardcover",
+    "omnibus": "Omnibus",
+    "graphic_novel": "Graphic Novel",
+}
+COMICINFO_ONLY_FORMATS = frozenset({"special", "compendium", "deluxe", "volume"})
+
+
+def archive_format_label(value: str | None) -> str | None:
+    if value in COMICINFO_ONLY_FORMATS:
+        return value.title()
+    return ARCHIVE_FORMATS.get(value, value) if value is not None else None
+
+
+def canonical_archive_format(value: str) -> str:
+    """Normalize only the exact reversible labels our writer emits."""
+    for canonical in (*ARCHIVE_FORMATS, *COMICINFO_ONLY_FORMATS):
+        if archive_format_label(canonical) == value:
+            return canonical
+    return value
+
 
 def comicinfo_credits(credits: tuple[MetadataCredit, ...]) -> tuple[MetadataCredit, ...]:
     """Project supported roles, without losing rich roles in the canonical record."""

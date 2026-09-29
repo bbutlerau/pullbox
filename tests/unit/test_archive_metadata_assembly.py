@@ -98,6 +98,48 @@ def test_series_archive_values_flow_through_the_same_assembler():
     assert origin(result, "title").embedded_documents == ("ComicInfo.xml", "MetronInfo.xml")
 
 
+@pytest.mark.parametrize(
+    ("canonical", "label"),
+    [
+        ("standard", "Single Issue"),
+        ("tpb", "Trade Paperback"),
+        ("one_shot", "One-Shot"),
+        ("annual", "Annual"),
+        ("hardcover", "Hardcover"),
+        ("omnibus", "Omnibus"),
+        ("graphic_novel", "Graphic Novel"),
+        ("special", "Special"),
+        ("compendium", "Compendium"),
+        ("deluxe", "Deluxe"),
+        ("volume", "Volume"),
+    ],
+)
+def test_written_format_labels_round_trip_without_false_disagreement(canonical, label):
+    archive = embedded(f"<Format>{label}</Format>", None)
+    result = assemble_metadata(
+        Kind.SERIES,
+        (PARENT,),
+        [],
+        [],
+        now=NOW,
+        archive=archive,
+        current=MetadataValues(series_type=canonical),
+    )
+    assert archive.series.series_type == canonical
+    assert result.values.series_type == canonical
+    assert not any("series_type" in reason for reason in result.diagnostics)
+    adopted = assemble_metadata(Kind.SERIES, (PARENT,), [], [], now=NOW, archive=archive)
+    assert adopted.values.series_type == canonical
+    assert origin(adopted, "series_type").embedded_documents == ("ComicInfo.xml",)
+
+
+def test_unknown_formats_and_real_format_conflicts_are_not_normalized_away():
+    archive = embedded("<Format>Unknown custom format</Format>", None)
+    assert archive.series.series_type == "Unknown custom format"
+    conflict = embedded("<Format>Annual</Format>", "<Series><Format>Single Issue</Format></Series>")
+    assert any(item.field == "series_type" for item in conflict.differences)
+
+
 @pytest.mark.parametrize("cleared", ["My title", "", None])
 def test_edits_and_clears_survive_archive_adoption_and_subsequent_provider_refresh(cleared):
     before = assemble(candidates=[candidate()])

@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from xml.etree import ElementTree as ET
 
 from pullbox.core.archive_metadata import ArchiveMetadataFiles, MetadataFile
+from pullbox.core.archive_metadata_fields import (
+    COMICINFO_ONLY_FORMATS as _COMICINFO_ONLY_FORMATS,
+)
 from pullbox.core.archive_metadata_fields import COMICINFO_ROLES, comicinfo_credits
+from pullbox.core.archive_metadata_fields import archive_format_label as _format_text
 from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.metadata_identity import (
     ExternalIdentityRef,
@@ -32,24 +36,6 @@ _SOURCES = {
     IdentityNamespace.METRON: "Metron",
     IdentityNamespace.GCD: "Grand Comics Database",
 }
-_FORMATS = {
-    "standard": "Single Issue",
-    "tpb": "Trade Paperback",
-    "one_shot": "One-Shot",
-    "annual": "Annual",
-    "hardcover": "Hardcover",
-    "omnibus": "Omnibus",
-    "graphic_novel": "Graphic Novel",
-}
-_COMICINFO_ONLY_FORMATS = frozenset({"special", "compendium", "deluxe", "volume"})
-
-
-def _format_text(value: str | None) -> str | None:
-    if value in _COMICINFO_ONLY_FORMATS:
-        return value.title()
-    return _FORMATS.get(value, value) if value is not None else None
-
-
 _SERIES_PATHS = {
     "title": ("Series", "Name"),
     "sort_title": (None, "SortName"),

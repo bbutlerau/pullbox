@@ -13,6 +13,7 @@ class PublicationState(StrEnum):
     PUBLISHED = "published"
     ABANDONED = "abandoned"
     REVIEW = "review"
+    FINALIZED = "finalized"
 
 
 class ArchiveMetadataPublication(Base, IdentityMixin, TimestampMixin):
@@ -23,8 +24,9 @@ class ArchiveMetadataPublication(Base, IdentityMixin, TimestampMixin):
             "length(plan_json) BETWEEN 2 AND 4194304", name="ck_archive_publication_size"
         ),
         CheckConstraint(
-            "(state = 'abandoned' AND active_file_id IS NULL AND active_path_key IS NULL) OR "
-            "(state <> 'abandoned' AND active_path_key IS NOT NULL)",
+            "(state IN ('abandoned','finalized') AND active_file_id IS NULL AND "
+            "active_path_key IS NULL) OR "
+            "(state NOT IN ('abandoned','finalized') AND active_path_key IS NOT NULL)",
             name="ck_archive_publication_reservation",
         ),
     )

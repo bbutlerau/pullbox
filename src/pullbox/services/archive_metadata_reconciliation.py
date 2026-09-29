@@ -9,7 +9,11 @@ from xml.etree import ElementTree
 from pydantic import ValidationError
 
 from pullbox.core.archive_metadata import ArchiveMetadataFiles, MetadataFile
-from pullbox.core.archive_metadata_fields import COMICINFO_ROLES, comicinfo_credits
+from pullbox.core.archive_metadata_fields import (
+    COMICINFO_ROLES,
+    canonical_archive_format,
+    comicinfo_credits,
+)
 from pullbox.core.comicinfo_sanitizer import references_stale_retailer
 from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.metadata_identity import (
@@ -148,6 +152,8 @@ def _values(
         try:
             if name == "issue_number_text" and isinstance(value, str):
                 value = normalize_issue_number_text(value)
+            elif name == "series_type" and isinstance(value, str):
+                value = canonical_archive_format(value)
             normalized = MetadataValues.model_validate({name: value})
         except (ValidationError, ValueError):
             diagnostics.append(ArchiveMetadataDiagnostic(document, "invalid_field", locator))
@@ -316,6 +322,7 @@ class _ComicInfoReader:
                 "title": (self.read_field("Series"), "Series"),
                 "publisher": (self.read_field("Publisher"), "Publisher"),
                 "language": (self.read_field("LanguageISO"), "LanguageISO"),
+                "series_type": (self.read_field("Format"), "Format"),
             },
             document,
             self.diagnostics,

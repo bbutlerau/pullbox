@@ -571,6 +571,19 @@ stays active. Production callers remain unchanged pending finalization, rollback
 shared mutation coordination and restart orchestration. Existing legacy writers
 and external filesystem programs are not fenced by this new journal.
 
+`services/archive_metadata_finalization.py` completes a proven publication in a
+caller-owned transaction. It revalidates identity, policy, user values, baseline
+revisions and output evidence before applying one canonical snapshot to entity
+values, credits, baselines and file state. The shared descriptive projection is
+also used by catalog refresh; finalization never fabricates a catalog refresh or
+changes import naming/source evidence. Completed receipts release reservations,
+survive file deletion and replay without changing later edits. Failure or
+cancellation retains recoverable publication state. Known writer format labels
+normalize through a shared reversible mapping when read back; unknown formats and
+real disagreements remain intact. File timestamps retain the same stat conversion
+used by registration. Production owner rollback, shared mutation coordination,
+restart orchestration and no-op archive-write avoidance remain required.
+
 The existing import/cache consumers have not yet migrated to this registry.
 Metron has token settings, bounded transport and
 series/issue/arc adapter operations; GCD execution remains unimplemented, and

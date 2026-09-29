@@ -506,6 +506,20 @@ reserved pending coherent canonical/file-state finalization. Downgrade refuses
 to discard any intended, published or review record; only abandoned-only history
 may be removed. No existing archive is backfilled or mutated by the migration.
 
+Finalization uses the same policy/parent/issue/root/file/journal lock order and
+requires a published receipt, independently inspected output and an unchanged
+database binding. Canonical entity values, descriptive credits, baselines and
+LibraryFile size/timestamp/hash commit together with the finalized marker and
+reservation release. Unchanged snapshots do not advance their baselines. File
+checks run off-thread before and after DB writes; finalization does not rewrite
+archives. Naming/source ownership evidence and catalog lifecycle timestamps are
+not repurposed. A completed replay reports historical completion without
+reapplying values or claiming present ownership. Finalized receipts survive file
+deletion and block downgrade to the old state contract. Stale, interrupted or
+failed finalization retains the published reservation; caught errors still roll
+back the nested write. Production workflow rollback and restart integration remain
+required before existing writers switch to this boundary.
+
 ### Source Catalog Checkpoints
 
 `series_catalog_checkpoints` records complete issue-catalog progress separately

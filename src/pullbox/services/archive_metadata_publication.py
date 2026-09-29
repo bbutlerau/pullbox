@@ -329,8 +329,8 @@ async def publish_archive_publication(
     Only stat/rename/directory-sync operations occur in the short offloaded file
     boundary, never archive reads or hashes. Cancellation joins it before releasing
     the DB lock. Commit failure leaves intent for evidence-based recovery. The
-    reservation remains until canonical DB finalization is implemented. Existing
-    writers must not switch to this primitive before that integration.
+    reservation remains until separate canonical DB finalization commits. Existing
+    writers still require workflow ownership and rollback integration.
     """
     _clean_session(session)
     if (
@@ -425,6 +425,8 @@ async def reconcile_archive_publication(
             receipt.revision,
         ):
             raise ArchivePublicationError("publication_changed")
+        if row.state is PublicationState.FINALIZED:
+            return receipt
         _directories_unchanged(receipt.plan)
         if _fingerprint(receipt.plan.target.path) != inspection.fingerprint:
             raise ArchivePublicationError("inspection_changed")

@@ -42,13 +42,15 @@ from pullbox.utilities.executors.archive_metadata_staging import stage_cbz_metad
 
 
 @asynccontextmanager
-async def prepared(factory, tmp_path):
+async def prepared(factory, tmp_path, *, comicinfo=None, staged_mtime_ns=None):
     root_path = tmp_path / "comics"
     root_path.mkdir()
     path = root_path / "example.cbz"
     with ZipFile(path, "w") as archive:
         archive.writestr("page.jpg", b"page bytes")
-        archive.writestr("ComicInfo.xml", "<ComicInfo><Number>50-X</Number></ComicInfo>")
+        archive.writestr(
+            "ComicInfo.xml", comicinfo or "<ComicInfo><Number>50-X</Number></ComicInfo>"
+        )
     path.chmod(0o640)
     async with factory.begin() as session:
         root = LibraryRoot(name="Managed", path=str(root_path))
@@ -98,6 +100,20 @@ async def prepared(factory, tmp_path):
     async with stage_cbz_metadata_interruptible(
         path, root_path, series, issue, max_uncompressed_bytes=1000000
     ) as staged:
+        if staged_mtime_ns is not None:
+            os.utime(staged.path, ns=(staged_mtime_ns, staged_mtime_ns))
+            info = staged.path.stat()
+            staged = replace(
+                staged,
+                output_fingerprint=(
+                    info.st_dev,
+                    info.st_ino,
+                    info.st_size,
+                    info.st_mtime_ns,
+                    info.st_ctime_ns,
+                    info.st_mode,
+                ),
+            )
         plan = await prepare_archive_publication(target, staged, series, issue)
         assert plan is not None, "A verified stage needs durable pre-publication evidence"
         yield path, staged, plan
@@ -376,11 +392,16 @@ def revision(connection):
 
 
 async def test_migration_round_trip_matches_model_without_backfill(identity_probe_db):
+    from tests.integration.metadata_identity.test_archive_finalization_migration import (
+        revision as completion_revision,
+    )
+
     engine, _, _ = identity_probe_db
     table = ArchiveMetadataPublication.__table__
     async with engine.begin() as connection:
         await connection.run_sync(table.drop)
         await connection.run_sync(lambda conn: revision(conn).upgrade())
+        await connection.run_sync(lambda conn: completion_revision(conn).upgrade())
 
         def compare(conn):
             expected = MetaData()
@@ -399,11 +420,13 @@ async def test_migration_round_trip_matches_model_without_backfill(identity_prob
 
         assert await connection.run_sync(compare) == []
         assert not (await connection.execute(table.select())).all()
+        await connection.run_sync(lambda conn: completion_revision(conn).downgrade())
         await connection.run_sync(lambda conn: revision(conn).downgrade())
         assert table.name not in await connection.run_sync(
             lambda conn: inspect(conn).get_table_names()
         )
         await connection.run_sync(lambda conn: revision(conn).upgrade())
+        await connection.run_sync(lambda conn: completion_revision(conn).upgrade())
 
 
 @pytest.mark.parametrize("state", ["intended", "published", "review"])

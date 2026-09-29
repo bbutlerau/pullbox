@@ -17,7 +17,7 @@ from pullbox.core.exceptions import ValidationError
 from pullbox.core.metadata_identity import MetadataEntityKind, MetadataSource
 from pullbox.models import Issue, Series
 from pullbox.models.metadata_source import MetadataSourceConfig
-from pullbox.models.series import IssueCatalogState, SeriesStatus, SeriesType
+from pullbox.models.series import IssueCatalogState
 from pullbox.schemas.metadata_snapshot import FieldOrigin, MetadataSnapshot, field_domain
 from pullbox.schemas.metadata_sources import (
     MetadataDomain,
@@ -31,6 +31,7 @@ from pullbox.services.metadata_assembly import assemble_metadata
 from pullbox.services.metadata_baselines import MetadataBaselineWrite, save_metadata_baselines
 from pullbox.services.metadata_catalog_checkpoints import save_full_catalog_checkpoint
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
+from pullbox.services.metadata_entity_values import apply_series_metadata_values
 from pullbox.services.metadata_issue_catalog import (
     IssueCatalogConflictError,
     SourceIssueBatch,
@@ -380,24 +381,7 @@ async def _apply(
 ) -> SeriesCatalogRefresh:
     series = await session.get(Series, state.series.local_id)
     assert series is not None
-    values = snapshot.values
-    series.title = values.title or series.title
-    series.sort_title = values.sort_title or series.sort_title
-    series.description, series.year_start, series.year_end = (
-        values.description,
-        values.year_start,
-        values.year_end,
-    )
-    series.cover_url = values.image_url
-    series.publisher_id = (
-        await MetadataService._ensure_publisher(session, values.publisher)
-        if values.publisher
-        else None
-    )
-    if values.series_type is not None:
-        series.series_type = SeriesType(values.series_type)
-    if values.status is not None:
-        series.status = SeriesStatus(values.status)
+    await apply_series_metadata_values(session, series, snapshot.values)
     created = await apply_issue_batch(
         session,
         state,
