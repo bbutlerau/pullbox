@@ -505,10 +505,24 @@ creating provider identities or canonical membership. Unknown extensions and
 unrepresentable values stop for review instead of disappearing. Output passes the
 offline XSD and a shared-value cross-check before either document is returned.
 This pure renderer makes no provider/database calls or archive-file mutations;
-the offline validator loads only its bundled schema resource. The single
-archive rewrite/conversion path, canonical rich-field/membership expansion,
+the offline validator loads only its bundled schema resource. Production
+archive rewrite/conversion integration, canonical rich-field/membership expansion,
 production consumer migration and managed-root authorization remain required;
 legacy writers have not switched to this boundary yet.
+
+`services/archive_metadata_writing.py` provides the coordinated CBZ publication
+primitive for independently authorized callers. It reads both XML members from
+one source ZIP session, renders the pair, streams approved entries into one
+same-directory temporary archive, verifies its manifest and payload CRCs, and
+publishes without overwriting an existing destination. Explicit same-path
+refresh uses atomic replacement after closing the source handle. Source/staging
+identity checks reject detected changes; invoking workflows still own per-file
+serialization, binding, managed-root authorization, rollback journals and
+interruptible process cleanup. Cooperative cancellation is checked through
+streaming, verification and immediately before publication, never after a
+successful commit point. Reference-only/keep-in-place callers are not authorized
+by this primitive. Production caller migration and single-construction non-ZIP
+conversion remain outstanding.
 
 The existing import/cache consumers have not yet migrated to this registry.
 Metron has token settings, bounded transport and
