@@ -323,6 +323,7 @@ class _ComicInfoReader:
                 "publisher": (self.read_field("Publisher"), "Publisher"),
                 "language": (self.read_field("LanguageISO"), "LanguageISO"),
                 "series_type": (self.read_field("Format"), "Format"),
+                "issue_count": (self.integer("Count", 0, 1000000), "Count"),
             },
             document,
             self.diagnostics,

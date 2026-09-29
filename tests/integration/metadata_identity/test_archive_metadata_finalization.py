@@ -61,11 +61,16 @@ async def finish(factory, receipt, inspection):
         return result
 
 
+@pytest.mark.parametrize(
+    "comicinfo",
+    [XML, XML.replace("<Volume>2</Volume>", "")],
+    ids=["preserved-volume", "canonical-fields-only"],
+)
 async def test_finalization_adopts_canonical_values_and_file_evidence_together(
-    identity_probe_db, tmp_path
+    identity_probe_db, tmp_path, comicinfo
 ):
     _, factory, _ = identity_probe_db
-    async with prepared(factory, tmp_path, comicinfo=XML) as (path, _, plan):
+    async with prepared(factory, tmp_path, comicinfo=comicinfo) as (path, _, plan):
         binding = plan.target.binding
         async with factory.begin() as session:
             file = await session.get(LibraryFile, binding.library_file_id)

@@ -72,6 +72,44 @@ def test_agreement_and_complementary_values_feed_one_shared_view():
     assert not result.requires_review
 
 
+@pytest.mark.parametrize("count", [0, 1, 12, 1000000])
+@pytest.mark.parametrize("with_metron", [False, True])
+def test_comicinfo_issue_count_is_shared_metadata_not_unmapped_content(count, with_metron):
+    metron = None
+    if with_metron:
+        # MetronInfo permits positive counts only; the writer omits a zero count.
+        metron = mi().replace(
+            "</Series>", f"<IssueCount>{count}</IssueCount></Series>" if count else "</Series>"
+        )
+    result = reconcile_archive_metadata(files(ci(f"<Count>{count}</Count>"), metron))
+    assert result.comicinfo.series.issue_count == count
+    assert result.series.issue_count == count
+    assert not result.requires_review
+
+
+def test_comicinfo_and_metron_issue_count_disagreement_remains_reviewable():
+    metron = mi().replace("</Series>", "<IssueCount>13</IssueCount></Series>")
+    result = reconcile_archive_metadata(files(ci("<Count>12</Count>"), metron))
+    assert result.series.issue_count is None
+    assert [
+        (item.entity, item.field, item.comicinfo, item.metroninfo) for item in result.differences
+    ] == [("series", "issue_count", 12, 13)]
+    assert result.requires_review
+
+
+@pytest.mark.parametrize("count", ["-1", "1000001", "12.5", "unknown", "9" * 11])
+def test_invalid_comicinfo_issue_count_is_not_adopted(count):
+    result = reconcile_archive_metadata(files(ci(f"<Count>{count}</Count>")))
+    assert result.comicinfo.series.issue_count is None
+    assert ("ComicInfo.xml", "invalid_field", "Count") in codes(result)
+
+
+def test_duplicate_comicinfo_issue_counts_are_ambiguous():
+    result = reconcile_archive_metadata(files(ci("<Count>12</Count><Count>13</Count>")))
+    assert result.comicinfo.series.issue_count is None
+    assert ("ComicInfo.xml", "ambiguous_field", "Count") in codes(result)
+
+
 @pytest.mark.parametrize(
     "kind,notes,ids",
     [

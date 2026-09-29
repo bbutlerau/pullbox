@@ -581,7 +581,10 @@ survive file deletion and replay without changing later edits. Failure or
 cancellation retains recoverable publication state. Known writer format labels
 normalize through a shared reversible mapping when read back; unknown formats and
 real disagreements remain intact. File timestamps retain the same stat conversion
-used by registration. Production owner rollback, shared mutation coordination,
+used by registration. ComicInfo Count participates in bounded canonical issue-count
+comparison, including zero when MetronInfo omits it; malformed, repeated and
+disagreeing counts remain reviewable rather than silently falling back. Production
+owner rollback, shared mutation coordination,
 restart orchestration and no-op archive-write avoidance remain required.
 
 The existing import/cache consumers have not yet migrated to this registry.
