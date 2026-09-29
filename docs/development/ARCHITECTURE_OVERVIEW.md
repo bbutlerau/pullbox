@@ -512,7 +512,7 @@ legacy writers have not switched to this boundary yet.
 
 `services/archive_metadata_writing.py` provides the coordinated CBZ publication
 primitive for independently authorized callers. It reads both XML members from
-one source ZIP session, renders the pair, streams approved entries into one
+one source archive session, renders the pair, streams approved entries into one
 same-directory temporary archive, verifies its manifest and payload CRCs, and
 publishes without overwriting an existing destination. Explicit same-path
 refresh uses atomic replacement after closing the source handle. Source/staging
@@ -521,8 +521,14 @@ serialization, binding, managed-root authorization, rollback journals and
 interruptible process cleanup. Cooperative cancellation is checked through
 streaming, verification and immediately before publication, never after a
 successful commit point. Reference-only/keep-in-place callers are not authorized
-by this primitive. Production caller migration and single-construction non-ZIP
-conversion remain outstanding.
+by this primitive. `core/metadata_archive_source.py` also accepts RAR, 7z and TAR
+sources without an intermediate CBZ. RAR/TAR members are streamed; solid 7z is
+decompressed once into bounded, private numbered spools under the owner's staging
+directory, never archive-supplied filesystem paths. Special/encrypted/split
+members and unsafe or oversized payloads fail closed. Cancellation checks cover
+extraction, copying and verification. Production conversion caller migration,
+cross-filesystem publication/trash recovery and paired PDF conversion remain
+outstanding; legacy converters have not switched to this boundary.
 
 `utilities/executors/archive_metadata_staging.py` hands paired CBZ work to the
 interruptible archive worker without giving it a final library destination.

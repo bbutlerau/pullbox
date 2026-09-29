@@ -1,4 +1,4 @@
-"""Private paired-metadata staging for journal-owning workflows."""
+"""Private paired CBZ output from ZIP/RAR/7z/TAR for journal-owning workflows."""
 
 import os
 import shutil

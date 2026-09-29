@@ -176,6 +176,14 @@ def _read_members[T](
 
 def read_open_zip_metadata(archive: zipfile.ZipFile) -> ArchiveMetadataFiles:
     """Reuse an already-open ZIP inspection without reopening or extracting it."""
+    return read_open_metadata_members(archive.infolist(), lambda member: archive.open(member, "r"))
+
+
+def read_open_metadata_members(
+    members: Sequence[zipfile.ZipInfo],
+    open_member: Callable[[zipfile.ZipInfo], AbstractContextManager[IO[bytes]]],
+) -> ArchiveMetadataFiles:
+    """Read both documents from validated, normalized archive member descriptors."""
     candidates = [
         _Candidate(
             member,
@@ -185,11 +193,9 @@ def read_open_zip_metadata(archive: zipfile.ZipFile) -> ArchiveMetadataFiles:
             not member.is_dir()
             and (S_IFMT(member.external_attr >> 16) == 0 or S_ISREG(member.external_attr >> 16)),
         )
-        for member in archive.infolist()
+        for member in members
     ]
-    return _read_members(
-        candidates, lambda member: archive.open(member, "r"), (zipfile.BadZipFile,)
-    )
+    return _read_members(candidates, open_member, (zipfile.BadZipFile,))
 
 
 def _read_rar(path: Path, max_solid_scan_bytes: int) -> ArchiveMetadataFiles:

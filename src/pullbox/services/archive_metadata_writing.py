@@ -11,13 +11,14 @@ from typing import BinaryIO
 
 import structlog
 
-from pullbox.core.archive_metadata import read_open_zip_metadata
+from pullbox.core.archive_metadata import read_open_metadata_members
 from pullbox.core.file_publication import publish_file_without_overwrite
 from pullbox.core.file_safety import (
     DANGEROUS_EXTENSIONS,
     FileSafetyError,
     has_archive_member_path_traversal,
 )
+from pullbox.core.metadata_archive_source import MetadataArchiveSource, open_metadata_archive
 from pullbox.core.metadata_identity import ExternalIdentityRef
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot
 from pullbox.services.archive_metadata_rendering import render_archive_metadata
@@ -82,10 +83,21 @@ def write_cbz_metadata(
     )
     with os.fdopen(fd, "rb") as source_stream:
         _check_source(source_path, source_stream, before)
-        with zipfile.ZipFile(source_stream, "r") as source:
-            entries = source.infolist()
-            _validate_members(entries, max_uncompressed_bytes, block_dangerous)
-            files = read_open_zip_metadata(source)
+        with open_metadata_archive(
+            source_stream,
+            source_path,
+            limit=max_uncompressed_bytes,
+            scratch_parent=target_path.parent,
+            validate=lambda entries: _validate_members(
+                entries, max_uncompressed_bytes, block_dangerous
+            ),
+            check_cancelled=lambda: _check_cancelled(check_cancelled),
+            progress=lambda current, total: _progress(
+                progress_callback, check_cancelled, "extracting", current, total
+            ),
+        ) as source:
+            entries = source.entries
+            files = read_open_metadata_members(entries, source.open)
             pair = render_archive_metadata(
                 series,
                 issue,
@@ -264,7 +276,7 @@ def _progress(
 
 
 def _construct(
-    source: zipfile.ZipFile,
+    source: MetadataArchiveSource,
     stream: BinaryIO,
     members: list[zipfile.ZipInfo],
     metadata: dict[str, bytes],
