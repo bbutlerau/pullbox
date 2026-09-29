@@ -21,6 +21,10 @@ from pullbox.services.archive_metadata_publication import (
     _stat_fingerprint,
     load_archive_publication,
 )
+from pullbox.services.import_archive_publication import (
+    acknowledge_import_archive_publication,
+    require_import_archive_owner,
+)
 from pullbox.services.metadata_baselines import MetadataBaselineWrite, save_metadata_baselines
 from pullbox.services.metadata_credits import write_issue_credits
 from pullbox.services.metadata_entity_values import (
@@ -85,6 +89,7 @@ async def finalize_archive_publication(
         if current.state is not PublicationState.PUBLISHED:
             raise ArchivePublicationError("publication_not_published")
         plan = receipt.plan
+        await require_import_archive_owner(session, plan)
         await revalidate_archive_metadata_target(session, plan.target)
         modified_at = await _file_work(lambda stop: _check_output(receipt, inspection))
         bound = plan.target.binding.metadata
@@ -115,6 +120,7 @@ async def finalize_archive_publication(
         file.file_modified_at = modified_at
         file.file_hash = plan.output_digest
         file.has_comicinfo = True
+        await acknowledge_import_archive_publication(session, receipt)
         await session.flush()
         await _file_work(lambda stop: _check_output(receipt, inspection))
         row.state = PublicationState.FINALIZED

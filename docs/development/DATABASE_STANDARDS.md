@@ -496,7 +496,8 @@ links preserve the immutable intent when the library row is deleted; the path
 reservation and evidence survive. There is no age-based lease takeover.
 
 Services use caller-owned transactions and the shared SQLite write/savepoint
-boundary. Publication locks source policies, series, issue, root, file, then the
+boundary. Import-owned publication first locks its job, imported file and action;
+publication then locks source policies, series, issue, root, file, then the
 journal row. Recovery only locks the journal row. Large file hashing, rendering
 and staging stay outside write transactions; only the short, offloaded atomic
 publication and directory-sync boundary retains the lock. An intent must commit
@@ -519,6 +520,23 @@ deletion and block downgrade to the old state contract. Stale, interrupted or
 failed finalization retains the published reservation; caught errors still roll
 back the nested write. Production workflow rollback and restart integration remain
 required before existing writers switch to this boundary.
+
+An optional versioned-plan import owner binds deferred enrichment to its exact
+completed import record and managed placement action. Bounded digests retain the
+original action and pending-work snapshot; legacy journal JSON without an owner
+remains readable. Owner cancellation, rollback, deletion or changed evidence
+cannot authorize record, publication or finalization. Completed replay remains
+historical even after the owner is deleted.
+
+Finalization stores the successor publication reference on the import action and
+acknowledges deferred enrichment in the same transaction as canonical/file state.
+It never replaces the original destination signature or source/naming evidence.
+Import rollback rejects active publications, unverified successor pointers and
+reassigned registrations. A successor must be finalized for that exact unchanged
+action, and its verified fingerprint/digest must still match the actual archive.
+The original source remains subject to the existing rollback policy. Shared
+mutation fencing, cancelled-owner settlement and restart/worker integration are
+still required before the background writer switches to paired publication.
 
 ### Source Catalog Checkpoints
 

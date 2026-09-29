@@ -583,9 +583,14 @@ normalize through a shared reversible mapping when read back; unknown formats an
 real disagreements remain intact. File timestamps retain the same stat conversion
 used by registration. ComicInfo Count participates in bounded canonical issue-count
 comparison, including zero when MetronInfo omits it; malformed, repeated and
-disagreeing counts remain reviewable rather than silently falling back. Production
-owner rollback, shared mutation coordination,
-restart orchestration and no-op archive-write avoidance remain required.
+disagreeing counts remain reviewable rather than silently falling back.
+Import-owner binding now connects publication/finalization to the exact pending
+import and placement action. Finalization acknowledges that owner and records a
+successor reference without replacing original ownership evidence. Import rollback
+accepts only a finalized, action-bound successor whose registered owner and actual
+bytes still match. Active publications and later reassignment remain protected.
+Shared mutation coordination, cancelled-owner settlement, restart/worker
+orchestration and no-op archive-write avoidance remain required.
 
 The existing import/cache consumers have not yet migrated to this registry.
 Metron has token settings, bounded transport and

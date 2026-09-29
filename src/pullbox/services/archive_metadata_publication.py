@@ -22,6 +22,7 @@ from pullbox.core.metadata_identity import MetadataEntityKind
 from pullbox.models import Issue, LibraryFile, LibraryRoot, Series
 from pullbox.models.archive_metadata_publication import ArchiveMetadataPublication, PublicationState
 from pullbox.models.metadata_source import MetadataSourceConfig
+from pullbox.schemas.archive_publication_owner import ImportArchiveOwner
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot
 from pullbox.services.archive_metadata_binding import (
     ArchiveMetadataTarget,
@@ -57,6 +58,7 @@ class ArchivePublicationPlan(BaseModel):
     output_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
     series: MetadataSnapshot
     issue: MetadataSnapshot
+    import_owner: ImportArchiveOwner | None = None
 
 
 @dataclass(frozen=True)
@@ -239,6 +241,9 @@ async def load_archive_publication(
 
 
 async def _lock_binding(session: AsyncSession, plan: ArchivePublicationPlan) -> None:
+    from pullbox.services.import_archive_publication import lock_import_archive_owner
+
+    await lock_import_archive_owner(session, plan.import_owner)
     bound = plan.target.binding
     await session.execute(
         select(MetadataSourceConfig.id)
@@ -262,6 +267,8 @@ async def record_archive_publication(
     Reservations do not expire. Recovery needs the same row lock as publication;
     elapsed time is never permission to let another writer take over.
     """
+    from pullbox.services.import_archive_publication import require_import_archive_owner
+
     _clean_session(session)
     encoded = _encode(plan)
     path_key = hashlib.sha256(os.fsencode(plan.target.path)).hexdigest()
@@ -286,6 +293,7 @@ async def record_archive_publication(
             )
             if busy:
                 raise ArchivePublicationError("publication_busy")
+            await require_import_archive_owner(session, plan)
             await revalidate_archive_metadata_target(session, plan.target)
             row = ArchiveMetadataPublication(
                 operation_id=str(operation_id),
@@ -332,6 +340,8 @@ async def publish_archive_publication(
     reservation remains until separate canonical DB finalization commits. Existing
     writers still require workflow ownership and rollback integration.
     """
+    from pullbox.services.import_archive_publication import require_import_archive_owner
+
     _clean_session(session)
     if (
         session.info.get(f"archive_intent:{operation_id}") is session.sync_session.get_transaction()
@@ -347,6 +357,7 @@ async def publish_archive_publication(
         if row.state is not PublicationState.INTENDED:
             raise ArchivePublicationError("publication_not_intended")
         plan = _receipt(row).plan
+        await require_import_archive_owner(session, plan)
         await revalidate_archive_metadata_target(session, plan.target)
         await _file_work(lambda stop: _publish_files(plan, stop))
         row.state = PublicationState.PUBLISHED

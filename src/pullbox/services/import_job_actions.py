@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, TypedDict
 
+import structlog
 from sqlalchemy import false, or_
 from sqlalchemy import func as sa_func
 from sqlalchemy import insert as sa_insert
@@ -72,6 +73,7 @@ if TYPE_CHECKING:
 
 
 _ACTION_SEQUENCE_CACHE_KEY = "pullbox.import_action_last_sequence"
+logger = structlog.get_logger(__name__)
 _ACTION_INSERT_BATCH_SIZE = 200
 _STORY_ARC_MANAGED_PLACEMENT_ACTION = "story_arc_managed_placement_requested"
 _STORY_ARC_PLACEMENT_PHASE = "story_arc_placements"
@@ -810,6 +812,28 @@ async def rollback_action(
     elif action_type == "story_arc_created":
         await _rollback_created_story_arc(session, action, payload)
     elif action_type == "library_file_registered":
+        from pullbox.services.archive_metadata_publication import ArchivePublicationError
+        from pullbox.services.import_archive_publication import import_rollback_signature
+
+        if action.status is ImportJobActionStatus.ROLLED_BACK:
+            return
+        try:
+            rollback_signature = await import_rollback_signature(session, action)
+        except ArchivePublicationError as exc:
+            logger.warning(
+                "import_archive_rollback_preserved",
+                action_id=action.id,
+                job_id=action.import_job_id,
+                reason=exc.code,
+            )
+            action.status = ImportJobActionStatus.ROLLBACK_FAILED
+            action.error_message = (
+                "Archive metadata publication is pending or its import ownership changed. "
+                "Pullbox preserved the file for recovery."
+            )
+            action.rolled_back_at = None
+            await session.flush()
+            return
         library_file_id = int(payload.get("library_file_id") or 0)
         destination_path = Path(str(payload.get("destination_path") or ""))
         original_source_path = Path(str(payload.get("original_source_path") or ""))
@@ -859,7 +883,7 @@ async def rollback_action(
             and not _managed_destination_matches_rollback_action(
                 destination_path,
                 library_file=library_file,
-                expected_signature=payload.get("destination_signature"),
+                expected_signature=rollback_signature,
             )
         ):
             action.status = ImportJobActionStatus.ROLLBACK_FAILED
