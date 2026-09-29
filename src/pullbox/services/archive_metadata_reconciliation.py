@@ -9,6 +9,7 @@ from xml.etree import ElementTree
 from pydantic import ValidationError
 
 from pullbox.core.archive_metadata import ArchiveMetadataFiles, MetadataFile
+from pullbox.core.archive_metadata_fields import COMICINFO_ROLES, comicinfo_credits
 from pullbox.core.comicinfo_sanitizer import references_stale_retailer
 from pullbox.core.issue_numbers import normalize_issue_number_text
 from pullbox.core.metadata_identity import (
@@ -24,15 +25,7 @@ from pullbox.core.metadata_xml import MetadataXmlError, parse_metadata_xml
 from pullbox.core.metroninfo import MetronInfoData, parse_metroninfo
 from pullbox.schemas.metadata_snapshot import MetadataValues
 
-_CI_ROLES = {
-    "Writer": "writer",
-    "Penciller": "penciller",
-    "Inker": "inker",
-    "Colorist": "colorist",
-    "Letterer": "letterer",
-    "CoverArtist": "cover",
-    "Editor": "editor",
-}
+_CI_ROLES = COMICINFO_ROLES
 _CV_HOSTS = frozenset(
     {"comicvine.gamespot.com", "www.comicvine.gamespot.com", "comicvine.com", "www.comicvine.com"}
 )
@@ -128,6 +121,14 @@ def _shared_values(
     values: dict[str, object] = {}
     for name in MetadataValues.model_fields:
         left, right = getattr(comic, name), getattr(metron, name)
+        if (
+            name == "credits"
+            and comic.credits is not None
+            and metron.credits is not None
+            and comic.credits == comicinfo_credits(metron.credits)
+        ):
+            values[name] = metron.credits
+            continue
         if left is not None and right is not None and left != right:
             differences.append(ArchiveMetadataDifference(entity, name, left, right))
         else:

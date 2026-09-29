@@ -491,7 +491,24 @@ a bounded, defused document with the bundled, pinned MetronInfo 1.1 XSD through
 cannot trigger network or filesystem access. Validation errors expose fixed
 codes, not XML payloads. The schema, MIT license and provenance ship in the
 Python package. This gate checks representation, not identity or write authority;
-canonical paired rendering and archive integration are still required.
+archive integration and ownership authorization are still required.
+
+`services/archive_metadata_rendering.py` renders both XML documents together from
+independently bound canonical series/issue snapshots. It preserves supported
+schema-specific metadata and refuses unassembled local changes, conflicting exact
+IDs, unverified identity promotion, ambiguous primary sources, and resource-ID
+reinterpretation. Explicit edits may replace descriptive values; provider refresh
+requires an unchanged managed baseline. Shared credit comparisons project only
+ComicInfo-supported roles while retaining richer Metron roles. Partial dates are
+not expanded into invented days. Existing arc names/order are coordinated without
+creating provider identities or canonical membership. Unknown extensions and
+unrepresentable values stop for review instead of disappearing. Output passes the
+offline XSD and a shared-value cross-check before either document is returned.
+This pure renderer makes no provider/database calls or archive-file mutations;
+the offline validator loads only its bundled schema resource. The single
+archive rewrite/conversion path, canonical rich-field/membership expansion,
+production consumer migration and managed-root authorization remain required;
+legacy writers have not switched to this boundary yet.
 
 The existing import/cache consumers have not yet migrated to this registry.
 Metron has token settings, bounded transport and

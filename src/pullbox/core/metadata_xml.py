@@ -25,7 +25,9 @@ class MetadataXmlError(ValueError):
         self.code = code
 
 
-def parse_metadata_xml(payload: bytes | str, *, root_name: str) -> ElementTree.Element:
+def parse_metadata_xml(
+    payload: bytes | str, *, root_name: str, preserve_misc: bool = False
+) -> ElementTree.Element:
     if len(payload) > MAX_METADATA_XML_BYTES:
         raise MetadataXmlError("too_large")
     try:
@@ -49,12 +51,25 @@ def parse_metadata_xml(payload: bytes | str, *, root_name: str) -> ElementTree.E
         root: ElementTree.Element | None = None
         iterator = DefusedElementTree.iterparse(
             stream,
-            events=("start", "end"),
+            events=("start", "end", "comment", "pi"),
+            parser=DefusedElementTree.DefusedXMLParser(
+                target=ElementTree.TreeBuilder(
+                    insert_comments=preserve_misc, insert_pis=preserve_misc
+                ),
+                forbid_dtd=True,
+                forbid_entities=True,
+                forbid_external=True,
+            ),
             forbid_dtd=True,
             forbid_entities=True,
             forbid_external=True,
         )
         for event, node in iterator:
+            if event in {"comment", "pi"}:
+                nodes += 1
+                if nodes > MAX_METADATA_XML_NODES:
+                    raise MetadataXmlError("complexity_limit")
+                continue
             if event == "start":
                 if root is None:
                     root = node
