@@ -107,6 +107,28 @@ def _make_service(
 
 
 @pytest.mark.asyncio
+async def test_unqualified_paired_writer_is_not_enabled_by_default(monkeypatch) -> None:
+    monkeypatch.delenv("PULLBOX_METADATA_PAIRED_IMPORT_WRITER_ENABLED", raising=False)
+    get_settings.cache_clear()
+    service = _make_service()
+    factory = MagicMock()
+    try:
+        with (
+            patch("pullbox.services.import_service.schedule_import_comicinfo_enrichment") as queue,
+            patch(
+                "pullbox.services.import_service.run_pending_import_comicinfo_enrichment",
+                new_callable=AsyncMock,
+            ) as recover,
+        ):
+            service.schedule_comicinfo_enrichment(factory, job_id=1)
+            await service.recover_pending_comicinfo_enrichment(factory)
+        assert queue.call_args.kwargs["metadata_writer"] is None
+        assert recover.call_args.kwargs["metadata_writer"] is None
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("state", "schedule_sync", "schedule_enrichment"),
     [

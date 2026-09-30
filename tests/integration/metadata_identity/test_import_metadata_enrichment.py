@@ -30,6 +30,8 @@ from pullbox.schemas.metadata_snapshot import MetadataSnapshot, MetadataValues
 from pullbox.services.import_service import ImportService
 from tests.integration.metadata_identity.test_import_archive_publication import owned, rollback
 
+pytestmark = pytest.mark.usefixtures("paired_import_writer_setting")
+
 
 def import_service():
     service = ImportService(MagicMock(), MagicMock(), MagicMock())

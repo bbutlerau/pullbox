@@ -775,7 +775,11 @@ class ImportService(
             apply_comicinfo=self._apply_comicinfo_to_imported_artifact,
             log_event=self._log_event,
             prefetch_issue_metadata=self._metadata_service.prefetch_issue_metadata_batch,
-            metadata_writer=partial(write_imported_archive_metadata, session_factory),
+            metadata_writer=(
+                partial(write_imported_archive_metadata, session_factory)
+                if get_settings().metadata_paired_import_writer_enabled
+                else None
+            ),
         )
 
     def schedule_story_arc_sync(self) -> None:
@@ -799,7 +803,11 @@ class ImportService(
             apply_comicinfo=self._apply_comicinfo_to_imported_artifact,
             log_event=self._log_event,
             prefetch_issue_metadata=self._metadata_service.prefetch_issue_metadata_batch,
-            metadata_writer=partial(write_imported_archive_metadata, session_factory),
+            metadata_writer=(
+                partial(write_imported_archive_metadata, session_factory)
+                if get_settings().metadata_paired_import_writer_enabled
+                else None
+            ),
         )
 
     async def recover_pending_catalog_hydration(

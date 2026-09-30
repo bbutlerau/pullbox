@@ -1701,6 +1701,7 @@ class TestImportExecutionAutoflushDiscipline:
         assert library_file.has_comicinfo is True
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("paired_import_writer_setting")
     @pytest.mark.parametrize("has_comicvine_id", [True, False])
     async def test_import_marks_deferred_comicinfo_enrichment_after_file_placement(
         self,
@@ -3408,10 +3409,13 @@ class TestMoveToLibraryPassedThrough:
         assert (comic.read_bytes(), comic.stat().st_mtime_ns, comic.stat().st_mode) == before
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("paired_import_writer_setting", [False, True], indirect=True)
     async def test_import_execution_defers_cbz_metadata_without_nested_normalization(
         self,
         db_session: AsyncSession,
+        paired_import_writer_setting: bool,
     ) -> None:
+        paired_enabled = paired_import_writer_setting
         job, _imp_series, _imp_files, series, _issues = await _setup_full_scenario(
             db_session, num_issues=1
         )
@@ -3432,10 +3436,11 @@ class TestMoveToLibraryPassedThrough:
 
         call_kwargs = mock_register.call_args_list[0].kwargs
         assert call_kwargs.get("normalize_to_cbz") is False
-        assert call_kwargs.get("update_embedded_comicinfo_from_match") is False
-        assert call_kwargs.get("comicinfo_payload") is None
-        await db_session.refresh(_imp_files[0])
-        assert _imp_files[0].diagnostics["comicinfo_enrichment"]["status"] == "pending"
+        assert call_kwargs.get("update_embedded_comicinfo_from_match") is (not paired_enabled)
+        if paired_enabled:
+            assert call_kwargs.get("comicinfo_payload") is None
+            await db_session.refresh(_imp_files[0])
+            assert _imp_files[0].diagnostics["comicinfo_enrichment"]["status"] == "pending"
 
     @pytest.mark.asyncio
     async def test_import_execution_skips_embedded_metadata_when_pdf_safety_fallback_triggers(

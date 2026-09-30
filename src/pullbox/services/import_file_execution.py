@@ -17,6 +17,7 @@ from sqlalchemy import select as sa_select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import joinedload
 
+from pullbox.config import get_settings
 from pullbox.core.exceptions import (
     ConfigurationError,
     ImportDestinationValidationError,
@@ -1271,7 +1272,8 @@ async def process_import_series_files(
                     getattr(prepared, "skip_embedded_comicinfo", False)
                 )
                 defer_paired_metadata = (
-                    defer_comicinfo_enrichment
+                    get_settings().metadata_paired_import_writer_enabled
+                    and defer_comicinfo_enrichment
                     and effective_embedded_comicinfo
                     and move_to_library
                     and Path(prepared.registration_source).suffix.casefold() in {".cbz", ".zip"}

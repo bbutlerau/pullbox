@@ -12,6 +12,8 @@ from pullbox.services.import_metadata_follow_up import retry_import_metadata_wri
 from tests.integration.metadata_identity.test_import_archive_publication import owned, publish
 from tests.integration.metadata_identity.test_import_metadata_enrichment import import_service
 
+pytestmark = pytest.mark.usefixtures("paired_import_writer_setting")
+
 
 async def fail_for_root(factory, plan, ids):
     async with factory.begin() as session:

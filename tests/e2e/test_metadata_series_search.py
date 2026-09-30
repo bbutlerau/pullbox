@@ -66,6 +66,26 @@ def metron_search(monkeypatch):
     return calls
 
 
+def test_source_switch_does_not_name_the_previous_provider_while_loading(
+    authed_page, seeded_server, metron_search
+):
+    page = authed_page
+    page.goto(f"{seeded_server}/series/add?q=Swamp+Thing&source=comicvine_api")
+    pending = []
+    page.route("**/series/add?**source=metron_api**", lambda route: pending.append(route))
+    try:
+        page.get_by_test_id("add-series-source-select").get_by_role("button").click()
+        page.get_by_role("option", name="Metron", exact=True).click()
+        loader = page.locator("#add-series-results-loading")
+        expect(loader).to_be_visible()
+        expect(loader).to_contain_text("Searching metadata sources")
+        expect(loader).not_to_contain_text("ComicVine API")
+    finally:
+        for route in pending:
+            route.abort()
+        page.unroute("**/series/add?**source=metron_api**")
+
+
 @pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 1280), ("light", 320)])
 def test_source_picker_pagination_and_result_action(
     authed_page, seeded_server, monkeypatch, metron_search, theme, width, browser_name
@@ -73,7 +93,7 @@ def test_source_picker_pagination_and_result_action(
     page = authed_page
     page.set_viewport_size({"width": width, "height": 900})
     page.emulate_media(reduced_motion="reduce")
-    query = f"Search example {theme} {width}"
+    query = f"Search example {browser_name} {theme} {width}"
     page.goto(f"{seeded_server}/series/add?q={query}&sort=title")
     page.evaluate("theme => applyTheme(theme)", theme)
     expect(page.get_by_test_id("add-series-result-card")).to_have_count(20)

@@ -58,6 +58,19 @@ def _configure_worker_runtime_environment() -> None:
 _configure_worker_runtime_environment()
 
 
+@pytest.fixture
+def paired_import_writer_setting(monkeypatch, request):
+    from pullbox.config import get_settings
+
+    enabled = getattr(request, "param", True)
+    monkeypatch.setenv("PULLBOX_METADATA_PAIRED_IMPORT_WRITER_ENABLED", str(enabled))
+    get_settings.cache_clear()
+    try:
+        yield enabled
+    finally:
+        get_settings.cache_clear()
+
+
 # ── Event loop isolation ─────────────────────────────────────────────
 # The e2e tests run a live uvicorn server in a daemon thread. That
 # thread's event loop can leak into the main thread's C-level
