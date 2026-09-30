@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from pullbox.providers.metadata.gcd_local_database import GcdSnapshot
     from pullbox.services.metadata_account_admission import MetadataAccountAdmission
 
 
@@ -46,6 +47,7 @@ class SourceRuntime:
     account_admission: MetadataAccountAdmission | None = field(
         default=None, repr=False, compare=False
     )
+    gcd_snapshot: GcdSnapshot | None = field(default=None, repr=False)
 
 
 def default_policy(source: MetadataSource) -> SourcePolicyRead:
@@ -208,6 +210,7 @@ async def load_source_runtime(
     session: AsyncSession, *, gcd_api_enabled: bool
 ) -> list[SourceRuntime]:
     """Load configuration only. Disabled and flagged sources never decrypt secrets."""
+    from pullbox.services.gcd_local_activation import active_snapshot
     from pullbox.services.metadata_account_admission import source_account_admission
 
     admission = source_account_admission(session, gcd_api_enabled=gcd_api_enabled)
@@ -221,6 +224,7 @@ async def load_source_runtime(
         elif not policy.enabled:
             status = status or SourceStatus.DISABLED
         credential = None
+        gcd_snapshot = None
         if status is None:
             try:
                 if policy.source is MetadataSource.COMICVINE_API:
@@ -233,9 +237,14 @@ async def load_source_runtime(
                         raise ValueError("Source credential is not encrypted")
                     token = decrypt_secret(encrypted) if encrypted else ""
                     credential = SecretStr(token) if token else None
+                elif policy.source is MetadataSource.GCD_LOCAL:
+                    gcd_snapshot = await active_snapshot(session)
+                    if gcd_snapshot is None or gcd_snapshot.path != policy.settings.database_path:
+                        status = SourceStatus.UNCONFIGURED
+                        gcd_snapshot = None
             except ValueError:
                 status = SourceStatus.INVALID_CONFIG
-        result.append(SourceRuntime(policy, credential, status, admission))
+        result.append(SourceRuntime(policy, credential, status, admission, gcd_snapshot))
     return result
 
 

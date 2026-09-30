@@ -33,6 +33,12 @@ async def test_metadata_settings_has_seeded_shared_order_and_preserves_existing_
     assert 'data-testid="metadata-source-health"' in response.text
     assert 'data-testid="metron-access"' in response.text
     assert 'id="metron-token"' in response.text
+    assert 'data-testid="gcd-local-access"' in response.text
+    assert 'id="gcd-local-path"' in response.text
+    assert "Validate and enable GCD" in response.text
+    assert "Read-only" in response.text
+    assert 'href="https://www.comics.org/"' in response.text
+    assert "licensed separately from Pullbox" in response.text
     assert 'for="metron-token"' in response.text
     assert "Save Metron settings" in response.text
     assert "Remove saved token" in response.text

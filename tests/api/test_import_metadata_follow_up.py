@@ -2,12 +2,15 @@
 
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from pullbox.models.import_job import ImportedFile, ImportJobAction
 from tests.api.test_import_completed_cleanup_api import _csrf_header_for
 from tests.integration.metadata_identity.test_import_archive_publication import owned
 from tests.integration.metadata_identity.test_import_metadata_retry import fail_for_root
 
 pytest_plugins = ["conftest_security"]
+pytestmark = pytest.mark.usefixtures("paired_import_writer_setting")
 
 
 async def test_followup_retry_commits_before_scheduling_and_never_reimports(

@@ -28,6 +28,7 @@ def discovery_cache_key(
     *,
     catalog_generation: str | None,
     gcd_api_enabled: bool,
+    gcd_generation: str | None = None,
 ) -> str:
     request = query.model_dump(mode="json")
     request["query"] = " ".join(query.query.split()).casefold()
@@ -57,6 +58,7 @@ def discovery_cache_key(
             for item in sorted(runtime, key=lambda item: item.policy.source)
         ],
         "catalog_generation": catalog_generation,
+        "gcd_generation": gcd_generation,
         "gcd_api_enabled": gcd_api_enabled,
     }
     # This digest identifies public search/configuration snapshots, not credentials.

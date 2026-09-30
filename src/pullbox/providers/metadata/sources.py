@@ -10,6 +10,7 @@ from pullbox.config import get_settings
 from pullbox.core.metadata_identity import ExternalIdentityRef, MetadataEntityKind, MetadataSource
 from pullbox.providers.metadata import comicvine_normalization as normalize
 from pullbox.providers.metadata.comicvine import ComicVineError, ComicVineProvider
+from pullbox.providers.metadata.gcd_local import GcdLocalSource
 from pullbox.providers.metadata.metron import MetronSource
 from pullbox.schemas.metadata_sources import (
     MetadataFetch,
@@ -500,6 +501,18 @@ def _metron(runtime: SourceRuntime) -> MetronSource:
 def metadata_sources() -> dict[MetadataSource, SourceRegistration]:
     return {
         **comicvine_sources(),
+        MetadataSource.GCD_LOCAL: SourceRegistration(
+            frozenset(
+                {
+                    SourceCapability.SERIES_SEARCH,
+                    SourceCapability.SERIES_DETAILS,
+                    SourceCapability.ISSUE_LIST,
+                    SourceCapability.ISSUE_DETAILS,
+                    SourceCapability.OFFLINE,
+                }
+            ),
+            lambda runtime: GcdLocalSource(runtime.gcd_snapshot),
+        ),
         MetadataSource.METRON_API: SourceRegistration(
             frozenset(
                 {

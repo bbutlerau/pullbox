@@ -4,12 +4,13 @@ from datetime import UTC, datetime
 from typing import Literal
 
 import structlog
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from pullbox.api.deps import AuthenticatedUser, DbSession, InteractiveOperatorUser, Settings
 from pullbox.core.exceptions import ConfigurationError
 from pullbox.core.metadata_identity import MetadataSource
 from pullbox.models.library import LibraryRoot
+from pullbox.providers.metadata.gcd_local import GcdLocalSource
 from pullbox.schemas.metadata_sources import (
     DeferredMetadataRead,
     MetadataFetch,
@@ -34,8 +35,9 @@ from pullbox.schemas.metadata_sources import (
     StoryArcPreviewRead,
 )
 from pullbox.schemas.pagination import PaginatedResponse
+from pullbox.services.gcd_local_activation import activate_snapshot, validate_for_request
 from pullbox.services.metadata_arc_preview import preview_source_arc
-from pullbox.services.metadata_discovery import MetadataSourceRegistry
+from pullbox.services.metadata_discovery import MetadataSourceError, MetadataSourceRegistry
 from pullbox.services.metadata_read_cache import source_read_cache
 from pullbox.services.metadata_series_artwork import representative_series_cover
 from pullbox.services.metadata_series_preview import preview_series_folder, preview_source_series
@@ -234,24 +236,43 @@ async def save_priorities(
 async def save_source(
     source: MetadataSource,
     body: SourcePolicyWrite,
+    request: Request,
     session: DbSession,
     user: InteractiveOperatorUser,
     settings: Settings,
 ) -> SourcePolicyRead:
+    user_id = user.id
     try:
+        candidate = None
+        if source is MetadataSource.GCD_LOCAL and body.enabled:
+            await _require_source_revision(session, source, body.revision)
+            await session.rollback()
+            candidate = await validate_for_request(
+                body.settings.database_path, request.is_disconnected
+            )
+            # Prove the semantic joins, not just table names, before activation.
+            await GcdLocalSource(candidate).check()
         result = await save_source_policy(
             session, source, body, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled
         )
+        if candidate is not None:
+            await activate_snapshot(session, candidate)
     except SourceConfigurationConflictError as exc:
         raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    except MetadataSourceError as exc:
+        raise HTTPException(
+            400,
+            "The GCD database could not pass its catalog read check. "
+            "Validate a current official dump.",
+        ) from exc
     logger.info(
         "metadata_source_policy_updated",
         source=source.value,
         revision=result.revision,
         enabled=result.enabled,
-        user_id=user.id,
+        user_id=user_id,
     )
     return result
 

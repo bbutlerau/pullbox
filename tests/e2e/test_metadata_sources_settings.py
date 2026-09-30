@@ -10,6 +10,40 @@ pytestmark = pytest.mark.e2e
 
 
 @pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 320)])
+def test_gcd_settings_validate_real_dump_and_preserve_invalid_draft(
+    authed_page, seeded_server, tmp_path, theme, width
+):
+    from tests.api.test_gcd_local import gcd_dump
+
+    page = authed_page
+    page.set_viewport_size({"width": width, "height": 1000})
+    SettingsPage(page, seeded_server).goto("metadata")
+    page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
+    card = page.get_by_test_id("gcd-local-access")
+    field = card.get_by_label("GCD SQLite database")
+    field.fill(str(gcd_dump(tmp_path / "gcd.db")))
+    card.evaluate("node => { node.keepThisCard = true; }")
+    with page.expect_response("**/api/v1/metadata/sources/gcd_local") as result:
+        card.get_by_role("button", name="Validate and enable GCD", exact=True).click()
+    assert result.value.status == 200
+    expect(card.get_by_role("status")).to_contain_text("GCD is enabled")
+    expect(card.get_by_role("button", name="Disable GCD", exact=True)).to_be_enabled()
+    field.fill(str(tmp_path / "missing.db"))
+    card.get_by_role("button", name="Validate and enable GCD", exact=True).click()
+    expect(card.get_by_role("alert")).to_contain_text("cannot be read")
+    expect(field).to_have_value(str(tmp_path / "missing.db"))
+    assert card.evaluate("node => node.keepThisCard")
+    card.get_by_role("button", name="Load saved GCD settings", exact=True).click()
+    expect(field).to_have_value(str(tmp_path / "gcd.db"))
+    assert card.evaluate("node => node.scrollWidth <= node.clientWidth + 1")
+    assert_no_axe_violations(
+        page, name=f"gcd-settings-{theme}-{width}", include=["[data-testid='gcd-local-access']"]
+    )
+    card.get_by_role("button", name="Disable GCD", exact=True).click()
+    expect(card.get_by_role("status")).to_contain_text("GCD is disabled")
+
+
+@pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 320)])
 def test_account_hold_and_deferred_work_keep_draft_and_allow_paged_review(
     authed_page, seeded_server, theme, width
 ):

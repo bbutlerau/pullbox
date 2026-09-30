@@ -13,6 +13,7 @@ from pullbox.core.metadata_identity_state import IdentityVerificationState
 from pullbox.core.naming import format_series_folder
 from pullbox.models.metadata_identity import SeriesExternalIdentity
 from pullbox.models.series import Series
+from pullbox.providers.metadata.gcd_local import GcdLocalSource
 from pullbox.providers.metadata.sources import catalog_search_cache_token
 from pullbox.schemas.metadata_sources import (
     ProviderSeriesRead,
@@ -126,6 +127,22 @@ async def search_snapshot(
     )
     generation = None
     cacheable = True
+    gcd_runtime = next(
+        (
+            item
+            for item in runtime
+            if item.policy.source is MetadataSource.GCD_LOCAL
+            and item.policy.enabled
+            and (query.sources is None or item.policy.source in query.sources)
+        ),
+        None,
+    )
+    gcd_generation = None
+    if gcd_runtime is not None:
+        try:
+            gcd_generation = await GcdLocalSource(gcd_runtime.gcd_snapshot).cache_token()
+        except MetadataSourceError:
+            gcd_generation, cacheable = "unreadable", False
     if local_selected:
         try:
             async with asyncio.timeout(8):
@@ -141,7 +158,7 @@ async def search_snapshot(
             if query.search_mode == "preview"
             else await registry.discover_all(query)
         )
-        if cacheable and local_selected:
+        if generation != "unreadable" and local_selected:
             try:
                 async with asyncio.timeout(8):
                     changed = await catalog_search_cache_token() != generation
@@ -170,11 +187,39 @@ async def search_snapshot(
                     else outcome
                     for outcome in result.sources
                 ]
+        if gcd_runtime is not None and gcd_generation != "unreadable":
+            try:
+                changed = (
+                    await GcdLocalSource(gcd_runtime.gcd_snapshot).cache_token() != gcd_generation
+                )
+            except MetadataSourceError:
+                changed = True
+            if changed:
+                result = result.model_copy(deep=True)
+                result.results = [
+                    row for row in result.results if row.source is not MetadataSource.GCD_LOCAL
+                ]
+                for row in result.results:
+                    row.also_from = [
+                        source for source in row.also_from if source is not MetadataSource.GCD_LOCAL
+                    ]
+                result.sources = [
+                    SourceOutcome(
+                        source=outcome.source, status=SourceStatus.INVALID_CONFIG, truncated=True
+                    )
+                    if outcome.source is MetadataSource.GCD_LOCAL
+                    else outcome
+                    for outcome in result.sources
+                ]
         return result
 
     return await cache.get(
         discovery_cache_key(
-            query, runtime, catalog_generation=generation, gcd_api_enabled=gcd_api_enabled
+            query,
+            runtime,
+            catalog_generation=generation,
+            gcd_api_enabled=gcd_api_enabled,
+            gcd_generation=gcd_generation,
         ),
         load,
         cache_result=cacheable,

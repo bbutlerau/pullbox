@@ -102,3 +102,42 @@ async def test_unreadable_catalog_does_not_bypass_search_admission(monkeypatch):
     finally:
         release.set()
         await first
+
+
+async def test_gcd_search_cache_reuses_reads_but_never_hides_replaced_dump(tmp_path, monkeypatch):
+    from pullbox.providers.metadata.gcd_local_database import validate_candidate
+    from pullbox.schemas.metadata_sources import SourceSettings
+    from tests.api.test_gcd_local import gcd_dump
+
+    path = gcd_dump(tmp_path / "gcd.db")
+    snapshot = await validate_candidate(str(path))
+    runtime = [
+        SourceRuntime(
+            default_policy(Source.GCD_LOCAL).model_copy(
+                update={
+                    "enabled": True,
+                    "settings": SourceSettings(database_path=str(path)),
+                    "revision": 1,
+                }
+            ),
+            gcd_snapshot=snapshot,
+        )
+    ]
+    original = search.MetadataSourceRegistry.discover
+    calls = []
+
+    async def counted(self, query):
+        calls.append(query)
+        return await original(self, query)
+
+    monkeypatch.setattr(search.MetadataSourceRegistry, "discover", counted)
+    cache = MetadataSearchCache()
+    query = SeriesDiscoveryQuery(query="Swamp Thing", sources=[Source.GCD_LOCAL])
+    for _ in range(2):
+        result = await search.search_snapshot(query, runtime, cache, gcd_api_enabled=False)
+        assert result.results[0].external_id == "2999"
+    assert len(calls) == 1
+    path.touch()
+    result = await search.search_snapshot(query, runtime, cache, gcd_api_enabled=False)
+    assert result.results == []
+    assert result.sources[0].status is SourceStatus.INVALID_CONFIG

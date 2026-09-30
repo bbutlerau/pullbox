@@ -182,7 +182,7 @@ async def fetch_source_series_bundle(
                 if page == 1:
                     profile = with_representative_cover(profile, current.results)
                 for issue in current.results:
-                    if source is MetadataSource.COMICVINE_LOCAL and (
+                    if source in {MetadataSource.COMICVINE_LOCAL, MetadataSource.GCD_LOCAL} and (
                         profile.source_updated_at is None
                         or issue.source_updated_at != profile.source_updated_at
                     ):

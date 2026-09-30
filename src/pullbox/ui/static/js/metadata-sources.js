@@ -1,3 +1,59 @@
+function gcdLocalSettings(seed, csrf) {
+  return {
+    gcdBase: seed, gcdPath: seed?.settings?.database_path || '', gcdBusy: false,
+    gcdError: '', gcdMessage: '', gcdController: null, gcdAlive: true,
+    destroy() { this.gcdAlive = false; this.gcdController?.abort(); },
+    cancelGcd() { this.gcdController?.abort(); },
+    async reloadGcd() {
+      if (this.gcdBusy) return;
+      this.gcdBusy = true;
+      try {
+        const response = await fetch('/api/v1/metadata/sources');
+        if (!response.ok) throw new Error('load');
+        const data = await response.json();
+        if (!this.gcdAlive) return;
+        this.gcdBase = data.find(item => item.source === 'gcd_local');
+        this.gcdPath = this.gcdBase?.settings?.database_path || '';
+        this.gcdError = ''; this.gcdMessage = '';
+      } catch (_) {
+        if (this.gcdAlive) this.gcdError = 'Could not load GCD settings. Your draft is kept; retry.';
+      } finally { this.gcdBusy = false; }
+    },
+    async saveGcd(enabled) {
+      if (this.gcdBusy) return;
+      const base = this.gcdBase;
+      this.gcdBusy = true; this.gcdError = ''; this.gcdMessage = '';
+      this.gcdController = new AbortController();
+      const timeout = setTimeout(() => this.gcdController?.abort(), 310000);
+      try {
+        const response = await fetch('/api/v1/metadata/sources/gcd_local', {
+          method: 'PUT', signal: this.gcdController.signal,
+          headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrf},
+          body: JSON.stringify({revision: base.revision, enabled, priority: base.priority,
+            domain_priorities: base.domain_priorities,
+            settings: enabled ? {database_path: this.gcdPath.trim()} : base.settings}),
+        });
+        const data = await response.json();
+        if (!this.gcdAlive) return;
+        if (!response.ok) {
+          this.gcdError = response.status === 409
+            ? 'GCD settings changed in another session. Load saved GCD settings before retrying.'
+            : typeof data.detail === 'string' ? data.detail : 'GCD validation failed. Check the dump and retry.';
+          return;
+        }
+        this.gcdBase = data;
+        this.gcdPath = data.settings.database_path || '';
+        this.gcdMessage = enabled ? 'GCD is enabled. You can search, preview and add series.' : 'GCD is disabled. The database and its saved path are unchanged.';
+        window.dispatchEvent(new CustomEvent('metadata-credentials-updated'));
+      } catch (_) {
+        if (this.gcdAlive) this.gcdError = 'Validation stopped or the connection was lost. Load saved GCD settings to confirm the current source before retrying.';
+      } finally {
+        clearTimeout(timeout); this.gcdController = null; this.gcdBusy = false;
+      }
+    },
+  };
+}
+
 function metadataSourceSettings(seed, csrf) {
   const clone = value => JSON.parse(JSON.stringify(value));
   const labels = {
