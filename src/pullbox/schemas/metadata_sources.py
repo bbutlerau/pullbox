@@ -278,6 +278,10 @@ class SeriesIssuePageQuery(SeriesPreviewQuery):
     source_revision: int = Field(ge=0, lt=2**63, strict=True)
 
 
+class SeriesIssuePageRead(MetadataFetch[MetadataPage[ProviderIssueRead]]):
+    series_cover_url: str | None = None
+
+
 class SeriesPreviewRead(BaseModel):
     source: MetadataSource
     external_id: str

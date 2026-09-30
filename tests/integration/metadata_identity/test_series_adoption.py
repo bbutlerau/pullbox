@@ -32,6 +32,7 @@ from pullbox.services.metadata_series_adoption import (
 )
 from tests.integration.metadata_identity.test_attachment_service import _request
 from tests.unit.test_metadata_discovery import row
+from tests.unit.test_metadata_series_adoption_fetch import CatalogAdapter, fetch
 from tests.unit.test_metadata_source_reads import issue_row
 
 
@@ -112,6 +113,23 @@ async def test_new_add_returns_canonical_snapshots_matching_persisted_metadata(i
             assert item.values.title == issue.title
             assert item.values.cover_date == issue.release_date
             assert item.values.issue_number_text == issue.issue_number_text
+
+
+async def test_representative_metron_cover_survives_add_and_session_reload(identity_probe_db):
+    _, factory, _ = identity_probe_db
+    adapter = CatalogAdapter(1)
+    page = await adapter.issues("42")
+    cover = "https://static.metron.cloud/media/issue/first.jpg"
+    page.data.results[0].image_url = cover
+    adapter.pages[1] = page
+    data = replace(await fetch(adapter), source_revision=1)
+    async with factory.begin() as session:
+        result = await adopt_source_series_bundle(session, data)
+        assert result.snapshot.values.image_url == cover
+        series_id = result.series.id
+    async with factory() as session:
+        assert (await session.get(Series, series_id)).cover_url == cover
+        assert (await session.scalar(select(Issue))).cover_url == cover
 
 
 async def test_add_filters_unsafe_artwork_before_database_write(identity_probe_db):

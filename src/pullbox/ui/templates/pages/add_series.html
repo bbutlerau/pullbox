@@ -152,7 +152,12 @@
       x-transition:leave-start="opacity-100 scale-100"
       x-transition:leave-end="opacity-0 scale-95"
     >
-      <div class="modal-header">
+      <div class="modal-header gap-4">
+        <div class="add-series-result-cover shrink-0" aria-hidden="true">
+          <img :src="selectedCoverUrl || null" :alt="selectedTitle" class="h-full w-full object-cover"
+            data-testid="add-series-preview-cover" x-show="selectedCoverUrl" x-cloak
+            @error="selectedCoverUrl = ''">
+        </div>
         <div class="min-w-0 flex-1 space-y-1">
           <h3 id="add-series-dialog-title" class="add-series-modal-title" x-text="selectedTitle + (selectedYear ? ' (' + selectedYear + ')' : '')"></h3>
           <p class="add-series-modal-subtitle">
@@ -257,6 +262,68 @@
 
 {% block scripts %}
 <script>
+function safeSeriesCoverUrl(value) {
+  if (typeof value !== 'string' || value.length > 4096 || /[\s\x00-\x1f]/.test(value)) return '';
+  try {
+    const url = new URL(value);
+    const path = decodeURIComponent(url.pathname);
+    if (url.protocol !== 'https:' || (url.port && url.port !== '443') ||
+        url.username || url.password || url.search || url.hash ||
+        path.split('/').includes('..') || /[\\\x00-\x1f]/.test(path)) return '';
+    const metron = ['metron.cloud', 'static.metron.cloud'].includes(url.hostname);
+    return (metron ? path.startsWith('/media/') :
+      ['comicvine.gamespot.com', 'comicvine.com'].includes(url.hostname) ||
+      url.hostname.endsWith('.cbsistatic.com')) ? value : '';
+  } catch (_) { return ''; }
+}
+
+function metronSeriesCover() {
+  return {
+    coverUrl: '', coverLoaded: false, coverState: 'pending',
+    coverDisposed: false, coverController: null, coverObserver: null,
+    init() {
+      this.coverObserver = new IntersectionObserver(entries => {
+        if (entries.some(entry => entry.isIntersecting)) {
+          this.coverObserver.disconnect();
+          this.queueSeriesCover(this);
+        }
+      });
+      this.coverObserver.observe(this.$el);
+    },
+    destroy() {
+      this.coverDisposed = true;
+      this.coverObserver?.disconnect();
+      this.coverController?.abort();
+    },
+    async loadCover() {
+      if (this.coverDisposed || !this.$el.isConnected) return;
+      const controller = new AbortController();
+      this.coverController = controller;
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      this.coverState = 'loading';
+      try {
+        const response = await fetch('/api/v1/metadata/series/issues', {
+          method: 'POST', signal: controller.signal,
+          headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': readCsrfTokenFromBody() },
+          body: JSON.stringify({
+            source: 'metron_api', external_id: this.$el.dataset.coverSeriesId,
+            source_revision: Number(this.$el.dataset.coverSourceRevision), page: 1,
+          }),
+        });
+        if (!response.ok || this.coverDisposed) return;
+        const data = await response.json();
+        if (this.coverDisposed || !this.$el.isConnected) return;
+        if (data.status === 'ok') this.coverUrl = safeSeriesCoverUrl(data.series_cover_url);
+      } catch (_) {
+        // Artwork is optional; a failed lookup must never interrupt search or Add.
+      } finally {
+        clearTimeout(timeout);
+        if (!this.coverDisposed && !this.coverUrl) this.coverState = 'unavailable';
+      }
+    },
+  };
+}
+
 function addSeries() {
   return {
     showModal: false,
@@ -281,6 +348,8 @@ function addSeries() {
     selectedFolderPreview: '',
     libraryRootId: {{ (roots[0].id if roots else 'null') }},
     folderPreview: '',
+    coverQueue: [],
+    coverWorker: false,
     rootPaths: {
       {% for root in roots %}
       {{ root.id }}: {{ root.path | tojson }},
@@ -294,8 +363,25 @@ function addSeries() {
       }[this.selectedSource] || 'Metadata source';
     },
 
+    queueSeriesCover(cover) {
+      this.coverQueue = this.coverQueue.filter(item => !item.coverDisposed && item.$el.isConnected);
+      if (this.coverQueue.length < 20) this.coverQueue.push(cover);
+      this.processSeriesCovers();
+    },
+
+    async processSeriesCovers() {
+      if (this.coverWorker || this.disposed || this.showModal) return;
+      this.coverWorker = true;
+      try {
+        while (this.coverQueue.length && !this.disposed && !this.showModal) {
+          await this.coverQueue.shift().loadCover();
+        }
+      } finally { this.coverWorker = false; }
+    },
+
     destroy() {
       this.disposed = true;
+      this.coverQueue = [];
       this.previewSequence++;
       this.previewController?.abort();
     },
@@ -310,6 +396,7 @@ function addSeries() {
       const trigger = this.trigger?.isConnected && this.trigger !== document.body
         ? this.trigger : document.querySelector('[data-testid="add-series-search-input"]');
       trigger?.focus({ preventScroll: true });
+      this.processSeriesCovers();
     },
 
     trapFocus(event) {
@@ -374,6 +461,7 @@ function addSeries() {
         this.selectedPublisher = profile.publisher || '';
         this.selectedYear = profile.year_start || null;
         this.selectedIssueCount = profile.issue_count ?? null;
+        this.selectedCoverUrl = safeSeriesCoverUrl(profile.image_url);
         if (data.issues?.status !== 'ok' || !data.issues.data ||
             !Number.isSafeInteger(data.issues.data.total) || data.issues.data.total < 0) {
           throw new Error(this.previewFailure(data.issues?.status, data.issues?.retry_after_seconds));
@@ -466,7 +554,8 @@ function selectResult(payload, sourceEl = null) {
         publisher: sourceEl?.dataset.seriesPublisher || '',
         year: sourceEl?.dataset.seriesYear ? Number(sourceEl.dataset.seriesYear) : null,
         issueCount: sourceEl?.dataset.seriesIssueCount ? Number(sourceEl.dataset.seriesIssueCount) : null,
-        coverUrl: sourceEl?.dataset.seriesCoverUrl || '',
+        coverUrl: sourceEl?.closest('[data-testid="add-series-result-card"]')
+          ?.querySelector('[data-metadata-series-cover]')?.getAttribute('src') || sourceEl?.dataset.seriesCoverUrl || '',
         description: sourceEl?.dataset.seriesDescription || '',
         folderPreview: sourceEl?.dataset.seriesFolderPreview || '',
       }
@@ -481,7 +570,7 @@ function selectResult(payload, sourceEl = null) {
   component.selectedPublisher = resolvedPayload.publisher || '';
   component.selectedYear = resolvedPayload.year || null;
   component.selectedIssueCount = resolvedPayload.issueCount || null;
-  component.selectedCoverUrl = resolvedPayload.coverUrl || '';
+  component.selectedCoverUrl = safeSeriesCoverUrl(resolvedPayload.coverUrl);
   component.selectedDescription = resolvedPayload.description || '';
   component.selectedFolderPreview = resolvedPayload.folderPreview || '';
   component.addError = '';

@@ -687,6 +687,9 @@ async def load_add_series_search_context(
         runtime = await load_source_runtime(
             session, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled
         )
+        base_context["search_source_revisions"] = {
+            item.policy.source.value: item.policy.revision for item in runtime
+        }
         naming_config = await _system_config_values(
             session,
             (

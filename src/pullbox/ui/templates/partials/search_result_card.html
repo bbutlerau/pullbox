@@ -17,7 +17,9 @@
 {% set card_testid = "import-collection-cv-result-" ~ result_id if result_card_is_import_override else "import-orphaned-cv-result-" ~ result_id if result_card_is_orphaned else "add-series-result-card" %}
 {% call(slot) comicvine_result_card(r.dom_id if result_card_is_add else "cv-result-" ~ result_id, card_testid, is_static=result_card_is_add and result_already_added) %}
 {% if slot == "cover" %}
-  {{ comicvine_result_cover(r.cover_url, result_title, href=library_href, link_testid="add-series-existing-cover-link" if library_href else none) }}
+  {{ comicvine_result_cover(r.cover_url, result_title, href=library_href, link_testid="add-series-existing-cover-link" if library_href else none,
+    metron_id=result_id if result_card_is_add and r.source == 'metron_api' and not r.cover_url else none,
+    source_revision=(search_source_revisions|default({})).get(r.source) if result_card_is_add else none) }}
 {% elif slot == "details" %}
         <h3 data-testid="add-series-result-title" class="add-series-result-title">
           {% if library_href %}

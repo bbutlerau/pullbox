@@ -76,6 +76,17 @@ async def test_fetch_all_pages_not_just_preview(count):
     assert adapter.closed == len(adapter.calls)
 
 
+async def test_add_uses_first_page_representative_cover_without_extra_requests():
+    adapter = CatalogAdapter(101)
+    first = await adapter.issues("42", page=1)
+    first.data.results[0].image_url = "https://static.metron.cloud/media/issue/first.jpg"
+    adapter.pages[1] = first
+    adapter.calls.clear()
+    result = await fetch(adapter)
+    assert result.series.image_url == first.data.results[0].image_url
+    assert adapter.calls == [("series", "42"), ("issues", "42", 1), ("issues", "42", 2)]
+
+
 async def test_source_revision_changed_before_fetch_makes_no_requests():
     adapter = CatalogAdapter()
     instance = registry(adapter)

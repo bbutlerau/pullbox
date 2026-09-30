@@ -19,11 +19,13 @@ from pullbox.schemas.metadata_sources import (
     SeriesDiscoveryQuery,
     SeriesDiscoveryRead,
     SeriesIssuePageQuery,
+    SeriesIssuePageRead,
     SeriesPreviewRead,
     SourceDescriptor,
     SourcePolicyRead,
     SourcePolicyWrite,
     SourcePriorityWrite,
+    SourceStatus,
     SourceTestRead,
     StoryArcDiscoveryQuery,
     StoryArcDiscoveryRead,
@@ -35,6 +37,7 @@ from pullbox.schemas.pagination import PaginatedResponse
 from pullbox.services.metadata_arc_preview import preview_source_arc
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
 from pullbox.services.metadata_read_cache import source_read_cache
+from pullbox.services.metadata_series_artwork import representative_series_cover
 from pullbox.services.metadata_series_preview import preview_series_folder, preview_source_series
 from pullbox.services.metadata_source_status import deferred_work, source_status
 from pullbox.services.metadata_sources import (
@@ -161,10 +164,10 @@ async def preview_series(
     return result
 
 
-@router.post("/series/issues", response_model=MetadataFetch[MetadataPage[ProviderIssueRead]])
+@router.post("/series/issues", response_model=SeriesIssuePageRead)
 async def series_issues(
     body: SeriesIssuePageQuery, session: DbSession, _user: AuthenticatedUser, settings: Settings
-) -> MetadataFetch[MetadataPage[ProviderIssueRead]]:
+) -> SeriesIssuePageRead:
     runtime = await load_source_runtime(
         session, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled
     )
@@ -180,7 +183,14 @@ async def series_issues(
         read_cache=source_read_cache(session),
     ).issues(body.source, body.external_id, page=body.page)
     await _require_source_revision(session, body.source, body.source_revision)
-    return result
+    return SeriesIssuePageRead(
+        **result.model_dump(),
+        series_cover_url=representative_series_cover(
+            body.source, body.external_id, result.data.results
+        )
+        if body.page == 1 and result.status is SourceStatus.OK and result.data is not None
+        else None,
+    )
 
 
 @router.get("/sources", response_model=list[SourceDescriptor])

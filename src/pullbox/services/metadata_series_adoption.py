@@ -52,6 +52,7 @@ from pullbox.services.metadata_credits import write_issue_credits
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
 from pullbox.services.metadata_identity_attachment import attach_verified_identities
 from pullbox.services.metadata_identity_review import record_identity_observation
+from pullbox.services.metadata_series_artwork import with_representative_cover
 from pullbox.services.metadata_service import MetadataService, classify_issue_metadata
 from pullbox.services.metadata_source_reads import source_id
 from pullbox.services.metadata_sources import read_source_policies
@@ -178,6 +179,8 @@ async def fetch_source_series_bundle(
                     raise SeriesAdoptionError(
                         "The issue catalog exceeds the interactive add limit."
                     )
+                if page == 1:
+                    profile = with_representative_cover(profile, current.results)
                 for issue in current.results:
                     if source is MetadataSource.COMICVINE_LOCAL and (
                         profile.source_updated_at is None

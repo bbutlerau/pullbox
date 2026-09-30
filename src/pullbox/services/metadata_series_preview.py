@@ -18,6 +18,7 @@ from pullbox.schemas.metadata_sources import (
     SourceStatus,
 )
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
+from pullbox.services.metadata_series_artwork import with_representative_cover
 from pullbox.services.metadata_source_reads import source_id
 
 
@@ -64,6 +65,10 @@ async def preview_source_series(
             preview.series = await registry.series(source, identifier)
             if preview.series.status is SourceStatus.OK:
                 preview.issues = await registry.issues(source, identifier)
+                if preview.series.data is not None and preview.issues.data is not None:
+                    preview.series.data = with_representative_cover(
+                        preview.series.data, preview.issues.data.results
+                    )
     except TimeoutError:
         if preview.series.status is SourceStatus.NOT_QUERIED:
             preview.series = MetadataFetch(status=SourceStatus.TIMEOUT)

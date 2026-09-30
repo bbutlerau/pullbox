@@ -583,7 +583,22 @@ async def test_metron_preview_works_without_comicvine_identity_or_library_writes
     assert result.status_code == 200
     assert result.json()["series"]["data"]["cross_identities"] == []
     assert result.json()["series"]["data"]["title"] == "Metron-only series"
+    cover = "https://static.metron.cloud/media/issue/fixture.jpg"
+    assert result.json()["series"]["data"]["image_url"] == cover
     assert result.json()["issues"]["data"]["results"][0]["issue_number_text"] == "50-x"
+    assert calls == ["/api/series/8/", "/api/series/8/issue_list/"]
+    for _ in range(2):
+        artwork = await authenticated_client.post(
+            "/api/v1/metadata/series/issues",
+            json={
+                "source": "metron_api",
+                "external_id": "8",
+                "source_revision": saved.json()["revision"],
+            },
+            headers=csrf(authenticated_client),
+        )
+        assert artwork.status_code == 200
+        assert artwork.json()["series_cover_url"] == cover
     assert calls == ["/api/series/8/", "/api/series/8/issue_list/"]
     assert "synthetic-preview-token" not in result.text
     async with sec_db() as session:

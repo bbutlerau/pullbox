@@ -1,8 +1,10 @@
 """Real Add Series controls retain selection, focus and exact provider identity."""
 
+import io
 from unittest.mock import AsyncMock
 
 import pytest
+from PIL import Image
 from playwright.sync_api import expect
 
 from pullbox.core.metadata_identity import MetadataSource as Source
@@ -84,6 +86,111 @@ def test_source_switch_does_not_name_the_previous_provider_while_loading(
         for route in pending:
             route.abort()
         page.unroute("**/series/add?**source=metron_api**")
+
+
+@pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 1280), ("light", 320)])
+def test_metron_covers_load_after_results_and_continue_into_preview(
+    authed_page, seeded_server, metron_search, browser_name, theme, width
+):
+    page = authed_page
+    page.set_viewport_size({"width": width, "height": 900})
+    cover = "https://static.metron.cloud/media/issue/search-cover.png"
+    pixel = io.BytesIO()
+    Image.new("RGB", (1, 1), "blue").save(pixel, format="PNG")
+    page.route(cover, lambda route: route.fulfill(content_type="image/png", body=pixel.getvalue()))
+    calls, held = [], []
+
+    def artwork(route):
+        calls.append(route.request.post_data_json)
+        if len(calls) == 1:
+            held.append(route)
+        else:
+            route.fulfill(
+                json={
+                    "status": "ok",
+                    "series_cover_url": cover if calls[-1]["external_id"] == "1" else None,
+                }
+            )
+
+    result = preview(identifier="1")
+    result["series"]["data"]["image_url"] = cover
+    page.route("**/api/v1/metadata/series/issues", artwork)
+    page.route("**/api/v1/metadata/series/preview", lambda route: route.fulfill(json=result))
+    page.goto(
+        f"{seeded_server}/series/add?q=Artwork+{browser_name}+{theme}+{width}&source=metron_api&sort=title"
+    )
+    page.evaluate("theme => applyTheme(theme)", theme)
+    cards = page.get_by_test_id("add-series-result-card")
+    expect(cards).to_have_count(20)
+    first = cards.first
+    try:
+        expect(page.locator('[data-cover-state="loading"]')).to_have_count(1)
+        assert len(calls) == 1
+        assert calls[0] == {
+            "source": "metron_api",
+            "external_id": calls[0]["external_id"],
+            "source_revision": 0,
+            "page": 1,
+        }
+        expect(page.get_by_test_id("add-series-search-input")).to_be_enabled()
+        held.pop().fulfill(json={"status": "ok", "series_cover_url": cover})
+        image = first.locator("[data-metadata-series-cover]")
+        expect(image).to_be_visible()
+        expect(image).to_have_attribute("src", cover)
+        page.wait_for_function(
+            "document.querySelector('[data-metadata-series-cover]').naturalWidth === 1"
+        )
+        first.get_by_role("button", name="Add", exact=True).click()
+        dialog = page.get_by_test_id("add-series-dialog")
+        expect(dialog.get_by_test_id("add-series-preview-cover")).to_have_attribute("src", cover)
+        expect(dialog.get_by_role("button", name="Add series", exact=True)).to_be_enabled()
+        assert dialog.evaluate("""el => {
+            const cover = el.querySelector('.add-series-result-cover').getBoundingClientRect();
+            const title = el.querySelector('#add-series-dialog-title').getBoundingClientRect();
+            return title.left - cover.right >= 12 && el.scrollWidth <= el.clientWidth + 1;
+        }""")
+        assert_no_axe_violations(
+            page, name=f"metron-cover-{theme}-{width}", include=["#add-series-app"]
+        )
+        dialog.screenshot(
+            path=f"output/playwright/metron-cover-{browser_name}-{theme}-{width}.png",
+            animations="disabled",
+        )
+        assert all(call["page"] == 1 for call in calls)
+        assert len(calls) < 20
+    finally:
+        for route in held:
+            route.abort()
+        page.unroute("**/api/v1/metadata/series/issues")
+
+
+@pytest.mark.parametrize("outcome", ["missing", "unsafe", "unavailable"])
+def test_optional_cover_failure_keeps_placeholder_and_add_usable(
+    authed_page, seeded_server, metron_search, browser_name, outcome
+):
+    page = authed_page
+    page.set_viewport_size({"width": 1280, "height": 900})
+    page.route(
+        "**/api/v1/metadata/series/issues",
+        lambda route: route.fulfill(
+            status=503 if outcome == "unavailable" else 200,
+            json={
+                "status": "ok",
+                "series_cover_url": "https://127.0.0.1/private" if outcome == "unsafe" else None,
+            },
+        ),
+    )
+    page.route(
+        "**/api/v1/metadata/series/preview",
+        lambda route: route.fulfill(json=preview(identifier="1")),
+    )
+    page.goto(f"{seeded_server}/series/add?q=Cover+{outcome}+{browser_name}&source=metron_api")
+    first = page.get_by_test_id("add-series-result-card").first
+    expect(first.locator("[data-cover-state]")).to_have_attribute("data-cover-state", "unavailable")
+    expect(first.locator(".add-series-result-cover-empty")).to_be_visible()
+    assert first.locator("[data-metadata-series-cover]").get_attribute("src") is None
+    first.get_by_role("button", name="Add", exact=True).click()
+    expect(page.get_by_role("button", name="Add series", exact=True)).to_be_enabled()
 
 
 @pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 1280), ("light", 320)])
