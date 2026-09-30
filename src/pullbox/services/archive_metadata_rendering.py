@@ -82,7 +82,7 @@ def render_archive_metadata(
     for current, previous in ((series, previous_series), (issue, previous_issue)):
         if previous is not None and (
             previous.entity_kind != current.entity_kind
-            or set(previous.identities) != set(current.identities)
+            or not set(previous.identities) <= set(current.identities)
         ):
             raise ArchiveMetadataRenderError("invalid_baseline")
     archive = reconcile_archive_metadata(files)

@@ -4,7 +4,7 @@ import sqlite3
 import threading
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, call
+from unittest.mock import ANY, AsyncMock, call
 
 import pytest
 from sqlalchemy import select
@@ -52,12 +52,17 @@ async def test_comicinfo_prefetch_chunks_provider_batches(
     monkeypatch.setattr(
         enrichment_module,
         "_load_pending_imported_file_ids",
-        AsyncMock(return_value=[]),
+        AsyncMock(return_value=[11, 12, 13]),
     )
     monkeypatch.setattr(
         enrichment_module,
         "_load_pending_issue_cv_ids",
-        AsyncMock(return_value=[101, 102, 103]),
+        AsyncMock(side_effect=[[101, 102], [103]]),
+    )
+    monkeypatch.setattr(
+        enrichment_module,
+        "_prepare_pending_imported_file_with_retry",
+        AsyncMock(return_value=None),
     )
     monkeypatch.setattr(enrichment_module, "wait_for_comicinfo_turn", AsyncMock())
 
@@ -73,6 +78,10 @@ async def test_comicinfo_prefetch_chunks_provider_batches(
     assert prefetch_issue_metadata.await_args_list == [
         call([101, 102]),
         call([103]),
+    ]
+    assert enrichment_module._load_pending_issue_cv_ids.await_args_list == [
+        call(ANY, job_id=7, imported_file_ids=[11, 12]),
+        call(ANY, job_id=7, imported_file_ids=[13]),
     ]
 
 

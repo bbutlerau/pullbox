@@ -18,6 +18,7 @@ from pullbox.models.import_job import (
 from pullbox.models.series import IssueCatalogState, Series
 from pullbox.models.story_arc import ImportedStoryArcStatus
 from pullbox.models.story_arc_import import ImportedStoryArc
+from pullbox.services.import_metadata_follow_up import failed_metadata_write_filter
 from pullbox.ui.import_orphaned_routes import load_import_orphaned_context
 from pullbox.ui.import_results_context import load_import_results_context
 
@@ -113,6 +114,12 @@ def _follow_up_job_filter() -> ColumnElement[bool]:
         misplaced_files,
         unresolved_story_arcs,
         failed_metadata,
+        select(ImportedFile.id)
+        .where(
+            ImportedFile.import_job_id == ImportJob.id,
+            failed_metadata_write_filter(),
+        )
+        .exists(),
     )
 
 

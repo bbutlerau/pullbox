@@ -3,6 +3,7 @@
 import asyncio
 import os
 import stat
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +21,7 @@ from pullbox.core.metadata_identity_state import IdentityVerificationState
 from pullbox.models import Issue, LibraryFile, LibraryRoot
 from pullbox.models.library import FileFormat, LibraryFileStorageMode
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot
+from pullbox.schemas.metadata_sources import ProviderIssueRead
 from pullbox.services.archive_metadata_reconciliation import ArchiveMetadataReconciliation
 from pullbox.services.metadata_assembly import assemble_metadata
 from pullbox.services.metadata_series_refresh_state import (
@@ -99,7 +101,10 @@ async def read_archive_metadata_binding(
     ):
         raise ArchiveMetadataBindingError("issue_changed")
     try:
-        metadata = await read_series_refresh_state(session, series_id, issue_ids=(file.issue_id,))
+        # Writing one verified issue does not require the entire catalog to be complete.
+        metadata = await read_series_refresh_state(
+            session, series_id, issue_ids=(file.issue_id,), allow_partial_catalog=True
+        )
         for entity in (metadata.series, metadata.issues[0]):
             _require_verified(entity)
         if not {ref.namespace for ref in metadata.issues[0].identities} <= {
@@ -244,16 +249,20 @@ def assemble_bound_archive_metadata(
     archive: ArchiveMetadataReconciliation,
     *,
     now: datetime,
+    issue_candidates: Sequence[ProviderIssueRead] = (),
 ) -> tuple[MetadataSnapshot, MetadataSnapshot]:
     """Combine DB values and local evidence without granting embedded IDs ownership."""
     try:
-        return _assemble(binding.metadata, archive, now)
+        return _assemble(binding.metadata, archive, now, issue_candidates)
     except ValueError:
         raise ArchiveMetadataBindingError("metadata_requires_review") from None
 
 
 def _assemble(
-    metadata: SeriesRefreshState, archive: ArchiveMetadataReconciliation | None, now: datetime
+    metadata: SeriesRefreshState,
+    archive: ArchiveMetadataReconciliation | None,
+    now: datetime,
+    issue_candidates: Sequence[ProviderIssueRead] = (),
 ) -> tuple[MetadataSnapshot, MetadataSnapshot]:
     series, issue = metadata.series, metadata.issues[0]
     return (
@@ -271,7 +280,7 @@ def _assemble(
         assemble_metadata(
             MetadataEntityKind.ISSUE,
             issue.identities,
-            (),
+            issue_candidates,
             metadata.policies,
             now=now,
             current=issue.values,

@@ -1270,6 +1270,15 @@ async def process_import_series_files(
                 effective_embedded_comicinfo = update_embedded_comicinfo_from_match and not bool(
                     getattr(prepared, "skip_embedded_comicinfo", False)
                 )
+                defer_paired_metadata = (
+                    defer_comicinfo_enrichment
+                    and effective_embedded_comicinfo
+                    and move_to_library
+                    and Path(prepared.registration_source).suffix.casefold() in {".cbz", ".zip"}
+                )
+                if defer_paired_metadata:
+                    # Copy unchanged first; the owned background job reconciles both XML files.
+                    effective_embedded_comicinfo = False
                 preparation_warning = getattr(prepared, "preparation_warning", None)
                 if preparation_warning:
                     await log_event(
@@ -1424,7 +1433,7 @@ async def process_import_series_files(
             imp_file.matched_issue_id = resolved_issue.id
             imp_file.library_file_id = library_file.id
             imp_file.status = ImportedFileStatus.IMPORTED
-            comicinfo_enrichment_deferred = (
+            comicinfo_enrichment_deferred = defer_paired_metadata or (
                 bool(defer_comicinfo_enrichment)
                 and comicinfo_payload is not None
                 and resolved_issue.comicvine_id is not None
@@ -1464,7 +1473,7 @@ async def process_import_series_files(
                     unit="steps",
                     live_only=True,
                 )
-            await record_action(
+            placement_action = await record_action(
                 session,
                 current_job,
                 phase="import",
@@ -1515,6 +1524,13 @@ async def process_import_series_files(
                     ),
                 },
             )
+            if comicinfo_enrichment_deferred and isinstance(placement_action.id, int):
+                diagnostics = dict(imp_file.diagnostics)
+                diagnostics[_COMICINFO_ENRICHMENT_DIAGNOSTIC_KEY] = {
+                    **diagnostics[_COMICINFO_ENRICHMENT_DIAGNOSTIC_KEY],
+                    "action_id": placement_action.id,
+                }
+                imp_file.diagnostics = diagnostics
 
             await log_event(
                 session,

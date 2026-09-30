@@ -1,0 +1,39 @@
+{% from "components/pagination.html" import pagination %}
+{% from "components/settings_shell.html" import inline_alert %}
+<div class="section-body space-y-3" data-testid="import-metadata-write-files">
+  {% if metadata_error %}
+    {% call inline_alert(tone="error", icon="warning") %}<span role="alert">{{ metadata_error }}</span>{% endcall %}
+  {% elif metadata_message %}
+    <p class="text-sm text-pb-text" role="status">{{ metadata_message }}</p>
+  {% endif %}
+  <p class="text-sm text-pb-text-dim">{{ metadata_total }} failed metadata {{ 'write' if metadata_total == 1 else 'writes' }} remaining. A retry updates metadata only; it does not move files or approve a different issue match.</p>
+  {% for file in metadata_files %}
+    {% set details = file.diagnostics.get('comicinfo_enrichment', {}) %}
+    {% set code = details.get('error', '') %}
+    <article class="rounded-xl border border-pb-border p-4 space-y-2" data-testid="metadata-write-{{ file.id }}">
+      <h4 class="text-sm font-medium text-pb-text break-all">{{ file.file_name }}</h4>
+      <p class="text-sm text-pb-text-dim">
+        {% if code in ['reference_only', 'root_not_managed', 'readonly_source', 'source_unavailable'] %}
+          Check library-root access and write permissions. Files kept in place remain protected; don't enable managed writes on a shared library unless you intend Pullbox to modify it.
+        {% elif code in ['metadata_conflict', 'metadata_requires_review', 'identity_requires_review', 'parent_identity_missing'] %}
+          The saved identities or embedded metadata need review. Open the issue and check its match and archive metadata before retrying. Retry does not override conflicting metadata.
+        {% elif code in ['source_changed', 'issue_changed', 'binding_changed', 'import_owner_changed'] %}
+          This file or its registration changed. Rescan the series to reconcile the current file before retrying. Pullbox will not replace a changed file using the old import's permission.
+        {% else %}
+          Download the import log for the failure details, correct the reported problem, then retry. The comic remains registered in your library.
+        {% endif %}
+      </p>
+      <div class="flex flex-wrap justify-end gap-2">
+        {% if file.matched_issue_id %}<a class="btn-ghost btn-sm" href="/issues/{{ file.matched_issue_id }}">Open issue</a>{% endif %}
+        <button type="button" class="btn-primary btn-sm"
+                hx-post="/import/{{ job.id }}/files/{{ file.id }}/retry-metadata?page={{ metadata_page }}"
+                hx-target="#import-metadata-write-files" hx-swap="innerHTML" hx-disabled-elt="this"
+                {% if not metadata_retry_allowed %}disabled{% endif %}>Retry metadata</button>
+      </div>
+    </article>
+  {% endfor %}
+  {% if metadata_pages > 1 %}
+    {{ pagination(metadata_page, metadata_pages, '/import/' ~ job.id ~ '/metadata-writes', hx_target='#import-metadata-write-files', hx_swap='innerHTML', hx_select='', hx_push_url='false', id_prefix='metadata-writes-') }}
+  {% endif %}
+</div>
+<h3 id="import-metadata-write-heading" class="section-title-plain" hx-swap-oob="true">{% if metadata_total %}{{ metadata_total }} {{ 'file needs' if metadata_total == 1 else 'files need' }} a metadata retry{% else %}No failed metadata writes remaining{% endif %}</h3>

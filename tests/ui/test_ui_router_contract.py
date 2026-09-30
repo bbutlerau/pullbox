@@ -153,6 +153,18 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "apply_file_assignment",
             "apply_file_assignment",
         ),
+        (
+            "/import/{job_id}/metadata-writes",
+            ("GET",),
+            "import_metadata_write_follow_up",
+            "import_metadata_write_follow_up",
+        ),
+        (
+            "/import/{job_id}/files/{file_id}/retry-metadata",
+            ("POST",),
+            "import_retry_metadata_write",
+            "import_retry_metadata_write",
+        ),
         ("/import", ("GET",), "import_page", "import_page"),
         (
             "/import/{job_id}/progress-partial",

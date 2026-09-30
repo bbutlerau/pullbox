@@ -113,6 +113,33 @@ def test_multiple_verified_ids_require_explicit_or_existing_primary():
     )
 
 
+def test_added_verified_identity_preserves_prior_baseline_and_local_clear():
+    old_series, old_issue = snapshots(description="Old summary")
+    series = old_series.model_copy(update={"identities": (CV_SERIES, METRON_SERIES)})
+    issue = old_issue.model_copy(
+        update={
+            "identities": (CV_ISSUE, METRON_ISSUE),
+            "values": old_issue.values.model_copy(update={"description": None}),
+            "origins": (origin("description", user=True),),
+        }
+    )
+    pair = render_archive_metadata(
+        series,
+        issue,
+        files("<ComicInfo><Summary>Old summary</Summary></ComicInfo>"),
+        primary_identity=CV_ISSUE,
+        previous_series=old_series,
+        previous_issue=old_issue,
+    )
+    assert ET.fromstring(pair.comicinfo).findtext("Summary") is None
+    assert parse_metroninfo(pair.metroninfo).summary is None
+    assert {e.identity for e in parse_metroninfo(pair.metroninfo).evidence} == {
+        CV_SERIES,
+        CV_ISSUE,
+        METRON_ISSUE,
+    }
+
+
 @pytest.mark.parametrize("primary", [CV_SERIES, METRON_ISSUE])
 def test_primary_identity_must_be_a_verified_issue(primary):
     with pytest.raises(ArchiveMetadataRenderError, match="invalid_primary_identity"):

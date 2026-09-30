@@ -99,9 +99,15 @@ def _baseline(payload: str | None, kind: MetadataEntityKind) -> MetadataSnapshot
 
 
 async def read_series_refresh_state(
-    session: AsyncSession, series_id: int, *, issue_ids: tuple[int, ...] | None = None
+    session: AsyncSession,
+    series_id: int,
+    *,
+    issue_ids: tuple[int, ...] | None = None,
+    allow_partial_catalog: bool = False,
 ) -> SeriesRefreshState:
     """Capture a catalog or a bounded exact subset using the same value mapping."""
+    if allow_partial_catalog and issue_ids is None:
+        raise ValueError("Partial catalog reads require an exact bounded issue selection.")
     if issue_ids is not None and (
         not issue_ids
         or len(issue_ids) > 200
@@ -133,7 +139,7 @@ async def read_series_refresh_state(
     if row is None:
         raise NotFoundError("Series", series_id)
     series, publisher, revision, payload = row
-    if series.issue_catalog_state is IssueCatalogState.HYDRATING:
+    if series.issue_catalog_state is IssueCatalogState.HYDRATING and not allow_partial_catalog:
         raise ValueError("Initial metadata sync is already in progress.")
     baseline = _baseline(payload, MetadataEntityKind.SERIES)
     values = baseline.values.model_dump() if baseline else {}

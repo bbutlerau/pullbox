@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import inspect
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +18,7 @@ from sqlalchemy import select as sa_select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import joinedload
 
+from pullbox.core.metadata_identity import MetadataSource
 from pullbox.core.sqlite_lock import (
     SQLITE_LOCK_RETRY_ATTEMPTS,
     is_sqlite_locked_error,
@@ -37,19 +38,24 @@ from pullbox.models.series import Series
 from pullbox.services.import_comicinfo_metadata import is_retryable_provider_error
 from pullbox.services.import_metadata_priority import wait_for_comicinfo_turn
 from pullbox.services.import_metadata_progress import track_import_metadata_progress
+from pullbox.services.metadata_sources import read_source_policies
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from pullbox.providers.base import IssueMetadata
 
 logger = structlog.get_logger(__name__)
 
 COMICINFO_ENRICHMENT_DIAGNOSTIC_KEY = "comicinfo_enrichment"
 COMICVINE_BULK_BATCH_SIZE = 5_000
+COMICINFO_FILE_BATCH_SIZE = 200
 
 ImportComicInfoBuildPayload = Callable[..., Awaitable[dict[str, Any]]]
 ImportComicInfoApply = Callable[[Path, dict[str, Any]], Any]
 ImportComicInfoLogEvent = Callable[..., Awaitable[None]]
-ImportComicInfoPrefetch = Callable[[list[int]], Awaitable[Any]]
+type ImportComicInfoPrefetch = Callable[[list[int]], Awaitable[dict[int, IssueMetadata]]]
+type ImportMetadataWriter = Callable[[int, Mapping[int, IssueMetadata]], Awaitable[bool]]
 
 comicinfo_enrichment_tasks: set[asyncio.Task[None]] = set()
 _comicinfo_enrichment_semaphore: asyncio.Semaphore | None = None
@@ -94,6 +100,7 @@ def schedule_import_comicinfo_enrichment(
     apply_comicinfo: ImportComicInfoApply,
     log_event: ImportComicInfoLogEvent,
     prefetch_issue_metadata: ImportComicInfoPrefetch | None = None,
+    metadata_writer: ImportMetadataWriter | None = None,
 ) -> None:
     """Queue deferred issue metadata and ComicInfo rewrites after Step 4 completes."""
     if session_factory is None:
@@ -108,6 +115,7 @@ def schedule_import_comicinfo_enrichment(
                 apply_comicinfo=apply_comicinfo,
                 log_event=log_event,
                 prefetch_issue_metadata=prefetch_issue_metadata,
+                metadata_writer=metadata_writer,
             )
         except Exception as exc:
             logger.warning(
@@ -128,6 +136,7 @@ async def run_pending_import_comicinfo_enrichment(
     apply_comicinfo: ImportComicInfoApply,
     log_event: ImportComicInfoLogEvent,
     prefetch_issue_metadata: ImportComicInfoPrefetch | None = None,
+    metadata_writer: ImportMetadataWriter | None = None,
 ) -> int:
     """Refresh deferred ComicInfo metadata for all completed jobs with pending rows."""
     from pullbox.tasks.import_archive_recovery import recover_import_archive_publications
@@ -143,6 +152,7 @@ async def run_pending_import_comicinfo_enrichment(
             apply_comicinfo=apply_comicinfo,
             log_event=log_event,
             prefetch_issue_metadata=prefetch_issue_metadata,
+            metadata_writer=metadata_writer,
         )
     return len(pending_job_ids)
 
@@ -155,6 +165,7 @@ async def run_import_comicinfo_enrichment(
     apply_comicinfo: ImportComicInfoApply,
     log_event: ImportComicInfoLogEvent,
     prefetch_issue_metadata: ImportComicInfoPrefetch | None = None,
+    metadata_writer: ImportMetadataWriter | None = None,
 ) -> None:
     """Refresh deferred ComicInfo metadata for imported files in one import job."""
     async with (
@@ -168,6 +179,7 @@ async def run_import_comicinfo_enrichment(
             apply_comicinfo=apply_comicinfo,
             log_event=log_event,
             prefetch_issue_metadata=prefetch_issue_metadata,
+            metadata_writer=metadata_writer,
         )
 
 
@@ -179,6 +191,7 @@ async def _run_import_comicinfo_enrichment_while_fenced(
     apply_comicinfo: ImportComicInfoApply,
     log_event: ImportComicInfoLogEvent,
     prefetch_issue_metadata: ImportComicInfoPrefetch | None = None,
+    metadata_writer: ImportMetadataWriter | None = None,
 ) -> None:
     """Run one job while holding the process-local filesystem mutation fence."""
     from pullbox.tasks.import_archive_recovery import recover_import_archive_publications
@@ -188,24 +201,17 @@ async def _run_import_comicinfo_enrichment_while_fenced(
     if not await _import_job_is_completed(session_factory, job_id=job_id):
         return
     pending_ids = await _load_pending_imported_file_ids(session_factory, job_id=job_id)
-    if prefetch_issue_metadata is not None:
-        issue_cv_ids = await _load_pending_issue_cv_ids(session_factory, job_id=job_id)
-        if issue_cv_ids:
-            for start in range(0, len(issue_cv_ids), COMICVINE_BULK_BATCH_SIZE):
-                batch = issue_cv_ids[start : start + COMICVINE_BULK_BATCH_SIZE]
-                await wait_for_comicinfo_turn()
-                try:
-                    await prefetch_issue_metadata(batch)
-                except Exception as exc:
-                    logger.warning(
-                        "import_comicinfo_metadata_batch_prefetch_failed",
-                        job_id=job_id,
-                        issue_count=len(batch),
-                        error=str(exc),
-                    )
-    for imported_file_id in pending_ids:
+    async for imported_file_id, prefetched in _enrichment_inputs(
+        session_factory,
+        job_id=job_id,
+        pending_ids=pending_ids,
+        prefetch=prefetch_issue_metadata,
+        paired=metadata_writer is not None,
+    ):
         await wait_for_comicinfo_turn()
         try:
+            if metadata_writer is not None and await metadata_writer(imported_file_id, prefetched):
+                continue
             prepared = await _prepare_pending_imported_file_with_retry(
                 session_factory,
                 imported_file_id=imported_file_id,
@@ -235,6 +241,10 @@ async def _run_import_comicinfo_enrichment_while_fenced(
                 log_event=log_event,
             )
         except Exception as exc:
+            if metadata_writer is not None and not await _import_job_is_completed(
+                session_factory, job_id=job_id
+            ):
+                return
             if is_retryable_provider_error(exc):
                 logger.warning(
                     "import_comicinfo_enrichment_deferred_for_provider",
@@ -250,6 +260,50 @@ async def _run_import_comicinfo_enrichment_while_fenced(
                 error=str(exc),
                 log_event=log_event,
             )
+
+
+async def _enrichment_inputs(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    job_id: int,
+    pending_ids: list[int],
+    prefetch: ImportComicInfoPrefetch | None,
+    paired: bool,
+) -> AsyncIterator[tuple[int, Mapping[int, IssueMetadata]]]:
+    """Consume each bounded batch before fetching more full provider metadata."""
+    size = min(COMICINFO_FILE_BATCH_SIZE, COMICVINE_BULK_BATCH_SIZE)
+    for start in range(0, len(pending_ids), size):
+        if not await _import_job_is_completed(session_factory, job_id=job_id):
+            return
+        file_ids = pending_ids[start : start + size]
+        enabled = True
+        if paired:
+            async with session_factory() as session:
+                enabled = any(
+                    policy.source is MetadataSource.COMICVINE_API and policy.enabled
+                    for policy in await read_source_policies(session)
+                )
+        metadata: dict[int, IssueMetadata] = {}
+        if prefetch is not None and enabled:
+            provider_ids = await _load_pending_issue_cv_ids(
+                session_factory, job_id=job_id, imported_file_ids=file_ids
+            )
+            if provider_ids:
+                await wait_for_comicinfo_turn()
+                try:
+                    metadata = await prefetch(provider_ids)
+                except Exception as exc:
+                    logger.warning(
+                        "import_comicinfo_metadata_batch_prefetch_failed",
+                        job_id=job_id,
+                        issue_count=len(provider_ids),
+                        error=str(exc),
+                    )
+                    if paired:
+                        # Do not report a sparse paired write as complete after a failed fetch.
+                        return
+        for file_id in file_ids:
+            yield file_id, metadata
 
 
 async def _import_job_is_completed(
@@ -294,6 +348,7 @@ async def _load_pending_issue_cv_ids(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     job_id: int,
+    imported_file_ids: list[int],
 ) -> list[int]:
     """Load unique provider issue IDs already recorded in pending diagnostics."""
     async with session_factory() as session:
@@ -301,6 +356,7 @@ async def _load_pending_issue_cv_ids(
             sa_select(ImportedFile.diagnostics)
             .join(ImportJob, ImportedFile.import_job_id == ImportJob.id)
             .where(ImportedFile.import_job_id == job_id)
+            .where(ImportedFile.id.in_(imported_file_ids))
             .where(ImportJob.status == ImportJobStatus.COMPLETED)
             .where(ImportJob.control_request == ImportControlRequest.NONE)
             .where(ImportedFile.status == ImportedFileStatus.IMPORTED)
@@ -613,6 +669,24 @@ async def _mark_pending_file_failed(
                 imported_file = await session.get(ImportedFile, imported_file_id)
                 if imported_file is None:
                     return True
+                active_publication = await session.scalar(
+                    sa_select(ArchiveMetadataPublication.id)
+                    .where(
+                        ArchiveMetadataPublication.active_file_id == imported_file.library_file_id,
+                        ArchiveMetadataPublication.active_path_key.is_not(None),
+                    )
+                    .limit(1)
+                )
+                if active_publication is not None:
+                    # Pending diagnostics are part of the immutable owner evidence.
+                    # Changing them would prevent restart from settling publication.
+                    logger.warning(
+                        "import_metadata_publication_needs_recovery",
+                        job_id=job_id,
+                        imported_file_id=imported_file_id,
+                        publication_id=active_publication,
+                    )
+                    return False
                 _set_comicinfo_enrichment_status(
                     imported_file,
                     status="failed",

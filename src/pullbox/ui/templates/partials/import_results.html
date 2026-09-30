@@ -512,6 +512,24 @@
   </section>
   {% endif %}
 
+  {% if archive_metadata_failed_count|default(0) > 0 %}
+  <section data-testid="import-follow-up-archive-metadata" class="section-card overflow-hidden">
+    <div class="section-header">
+      <div class="section-header-copy">
+        <p class="section-eyebrow">Archive metadata</p>
+        <h3 id="import-metadata-write-heading" class="section-title-plain">{{ archive_metadata_failed_count }} {{ 'file needs' if archive_metadata_failed_count == 1 else 'files need' }} a metadata retry</h3>
+        <p class="section-copy">These comics were imported, but their embedded metadata could not be updated. Review the problem before retrying; you don't need to import them again.</p>
+      </div>
+      <div class="section-header-actions">
+        <button type="button" class="btn-ghost btn-sm"
+                hx-get="/import/{{ job.id }}/metadata-writes"
+                hx-target="#import-metadata-write-files" hx-swap="innerHTML">Review files</button>
+      </div>
+    </div>
+    <div id="import-metadata-write-files"></div>
+  </section>
+  {% endif %}
+
   {% if failed_series %}
   <div class="section-card overflow-hidden">
     <div class="section-header">
