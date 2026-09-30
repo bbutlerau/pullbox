@@ -69,7 +69,7 @@ function seriesMetadataLinks(seriesId) {
         });
         if (this.disposed || generation !== this.generation) return;
         var outcome = data.sources.find(item => item.source === this.source);
-        if (!outcome || outcome.status !== "ok") throw new Error("This provider is unavailable. Check Metadata settings or try again later.");
+        if (!outcome || (outcome.status !== "ok" && outcome.status !== "empty")) throw new Error("This provider is unavailable. Check Metadata settings or try again later.");
         this.results = data.results;
         this.offset = offset || 0;
         this.nextOffset = outcome.next_offset;

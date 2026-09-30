@@ -42,7 +42,7 @@
                   <button type="button" class="btn-ghost btn-sm shrink-0" @click="preview(result)" :disabled="busy" :aria-label="'Review ' + result.title">Review</button>
                 </article>
               </template>
-              <p x-show="searched && !results.length" class="text-sm text-pb-text-sec">No matches found. Try another title or provider.</p>
+              <p x-show="searched && !results.length" role="status" class="text-sm text-pb-text-sec">No matches found. Try a shorter title or another provider.</p>
             </div>
             <div class="flex items-center justify-between gap-2" x-show="searched && (offset > 0 || nextOffset !== null)">
               <button type="button" class="btn-ghost btn-sm" @click="search(offset - 10)" :disabled="busy || offset === 0">Previous</button>

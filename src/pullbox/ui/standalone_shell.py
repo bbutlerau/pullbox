@@ -23,6 +23,7 @@ _MAIN_SHELL_ASSET_PATHS = (
     _STATIC_DIR / "js" / "story-arc-detail.js",
     _STATIC_DIR / "js" / "series-rescan.js",
     _STATIC_DIR / "js" / "metadata-sources.js",
+    _STATIC_DIR / "js" / "series-metadata-links.js",
 )
 
 
