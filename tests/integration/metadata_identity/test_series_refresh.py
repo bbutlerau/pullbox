@@ -30,6 +30,133 @@ from tests.integration.metadata_identity.test_series_adoption import (  # noqa: 
 from tests.unit.test_metadata_source_reads import ReadAdapter, registry
 
 
+async def test_linked_metron_enriches_gcd_series_without_taking_over_issues(
+    identity_probe_db, tmp_path
+):
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from pullbox.core.metadata_identity import (
+        ExactIdentityEvidence,
+        ExternalIdentityRef,
+        IdentityEvidenceKind,
+    )
+    from pullbox.core.metadata_identity_events import IdentityEventEvidence, IdentityEventRequest
+    from pullbox.core.metadata_identity_state import IdentityVerificationAction as Action
+    from pullbox.models.library import LibraryFile, LibraryRoot
+    from pullbox.models.reader import IssueReaderState
+    from pullbox.models.user import User
+    from pullbox.schemas.metadata_sources import SourceCapability
+    from pullbox.services.metadata_discovery import MetadataSourceRegistry
+    from pullbox.services.metadata_identity_attachment import attach_verified_identities
+    from tests.unit.test_metadata_discovery import registration, runtime
+
+    _, factory, _ = identity_probe_db
+    native = bundle(numbers=("1", "2"))
+    generation = datetime(2026, 9, 29, tzinfo=UTC)
+    gcd = replace(
+        native,
+        series=native.series.model_copy(
+            update={
+                "source": Source.GCD_LOCAL,
+                "identity_namespace": Namespace.GCD,
+                "description": None,
+                "image_url": None,
+                "source_updated_at": generation,
+            }
+        ),
+        issues=tuple(
+            item.model_copy(
+                update={
+                    "source": Source.GCD_LOCAL,
+                    "identity_namespace": Namespace.GCD,
+                    "source_updated_at": generation,
+                }
+            )
+            for item in native.issues
+        ),
+    )
+    cover = "https://static.metron.cloud/media/issue/enriched.jpg"
+    artifact = tmp_path / "kept.cbz"
+    artifact.write_bytes(b"unchanged comic archive")
+    native.series.description = "Metron description"
+    native.issues[0].image_url = cover
+    async with factory.begin() as session:
+        adopted = await adopt_source_series_bundle(session, gcd)
+        series_id = adopted.series.id
+        adopted.series.path = "/reference/untouched"
+        adopted.series.title = "My title"
+        first = await session.scalar(select(Issue).order_by(Issue.id))
+        first.status = IssueStatus.OWNED
+        issue_id = first.id
+        root = LibraryRoot(name="Reference", path=str(tmp_path))
+        user = User(username="reader", password_hash="not-a-live-account")
+        session.add_all([root, user])
+        await session.flush()
+        session.add(
+            LibraryFile(
+                issue_id=issue_id,
+                library_root_id=root.id,
+                file_path=str(artifact),
+                file_name=artifact.name,
+                file_format="cbz",
+                file_size=artifact.stat().st_size,
+                file_modified_at=generation,
+                storage_mode="referenced",
+            )
+        )
+        session.add(
+            IssueReaderState(user_id=user.id, issue_id=issue_id, last_page_index=17, page_count=24)
+        )
+        identity = ExternalIdentityRef(Namespace.METRON, Kind.SERIES, "42")
+        await attach_verified_identities(
+            session,
+            [
+                IdentityEventRequest(
+                    uuid4(),
+                    series_id,
+                    Action.VERIFY,
+                    IdentityEventEvidence(
+                        ExactIdentityEvidence(
+                            identity, IdentityEvidenceKind.PROVIDER_RESULT, Source.METRON_API
+                        ),
+                        "a" * 64,
+                        source_identity=identity,
+                    ),
+                )
+            ],
+        )
+    async with factory() as session:
+        adapters = {
+            source: RefreshAdapter(data, session=session)
+            for source, data in ((Source.GCD_LOCAL, gcd), (Source.METRON_API, native))
+        }
+        sources = MetadataSourceRegistry(
+            [runtime(source, revision=1) for source in adapters],
+            factories={
+                source: registration(adapter, capabilities=list(SourceCapability))
+                for source, adapter in adapters.items()
+            },
+        )
+        result = await refresh_series_from_sources(session, series_id, registry=sources)
+        assert result.description == "Metron description"
+        assert result.cover_url == cover
+        assert result.title == "My title" and result.path == "/reference/untouched"
+        await session.commit()
+    async with factory() as session:
+        assert await session.scalar(select(func.count()).select_from(Issue)) == 2
+        assert (await session.get(Issue, issue_id)).status is IssueStatus.OWNED
+        assert set(await session.scalars(select(IssueExternalIdentity.identity_namespace))) == {
+            Namespace.GCD
+        }
+        assert await session.scalar(select(func.count()).select_from(Series)) == 1
+        file = await session.scalar(select(LibraryFile))
+        assert file.issue_id == issue_id and file.file_path == str(artifact)
+        assert file.storage_mode.value == "referenced"
+        assert (await session.scalar(select(IssueReaderState))).last_page_index == 17
+    assert artifact.read_bytes() == b"unchanged comic archive"
+
+
 class RefreshAdapter(ReadAdapter):
     def __init__(self, data, *, wait=None, session=None):
         super().__init__(wait=wait)
@@ -598,7 +725,8 @@ async def test_core_and_catalog_use_independent_configured_priorities(identity_p
         description = next(item for item in saved.snapshot.origins if item.field == "description")
         assert description.source is Source.METRON_API and description.domain is MetadataDomain.CORE
         await session.commit()
-    assert adapters[Source.METRON_API].calls == [("series", "42")]
+    # One bounded page can supply representative artwork without changing the catalog source.
+    assert adapters[Source.METRON_API].calls == [("series", "42"), ("issues", "42", 1)]
     assert adapters[Source.COMICVINE_API].calls == [("series", "500"), ("issues", "500", 1)]
 
 
@@ -642,3 +770,141 @@ async def test_failed_profile_is_not_retried_again_for_catalog_in_same_refresh(
                 session, series_id, registry=refresh_registry(adapter)
             )
     assert adapter.calls == [("series", "42")]
+
+
+@pytest.fixture
+async def comicvine_count_disagreement(identity_probe_db):
+    from datetime import UTC, datetime
+
+    from pullbox.schemas.metadata_sources import SourceCapability
+    from pullbox.services.metadata_discovery import MetadataSourceRegistry
+    from tests.unit.test_metadata_discovery import registration, runtime
+
+    _, factory, _ = identity_probe_db
+    data = bundle(numbers=("1", "2", "3", "4", "5"))
+    generation = datetime(2026, 9, 29, tzinfo=UTC)
+
+    def from_source(source):
+        return replace(
+            data,
+            series=data.series.model_copy(
+                update={
+                    "source": source,
+                    "identity_namespace": Namespace.COMICVINE,
+                    "source_updated_at": generation,
+                    "description": "Original description",
+                }
+            ),
+            issues=tuple(
+                issue.model_copy(
+                    update={
+                        "source": source,
+                        "identity_namespace": Namespace.COMICVINE,
+                        "source_updated_at": generation,
+                    }
+                )
+                for issue in data.issues
+            ),
+        )
+
+    api = from_source(Source.COMICVINE_API)
+    local = from_source(Source.COMICVINE_LOCAL)
+    async with factory.begin() as session:
+        adopted = await adopt_source_series_bundle(session, api)
+        series_id = adopted.series.id
+        adopted.series.path = "/reference/Civil War - Unmasked"
+        issues = list(await session.scalars(select(Issue).order_by(Issue.id)))
+        for issue in issues[:4]:
+            issue.status = IssueStatus.OWNED
+        issues[4].status = IssueStatus.DOWNLOADING
+        original = [(i.id, i.comicvine_id, i.issue_number_text, i.status) for i in issues]
+    local.series.issue_count = 3
+    api.series.description = local.series.description = "Updated description"
+    adapters = {
+        Source.COMICVINE_LOCAL: RefreshAdapter(local),
+        Source.COMICVINE_API: RefreshAdapter(api),
+    }
+    for source, adapter in adapters.items():
+        adapter.source = source
+    instance = MetadataSourceRegistry(
+        [runtime(source, revision=1) for source in adapters],
+        factories={
+            source: registration(adapter, capabilities=list(SourceCapability))
+            for source, adapter in adapters.items()
+        },
+    )
+    return factory, series_id, original, adapters, instance
+
+
+async def test_refresh_falls_back_from_stale_local_count_to_exact_api_catalog(
+    comicvine_count_disagreement,
+):
+    from pullbox.services.metadata_series_refresh import refresh_series_catalog_from_sources
+
+    factory, series_id, original, adapters, instance = comicvine_count_disagreement
+    async with factory() as session:
+        result = await refresh_series_catalog_from_sources(session, series_id, registry=instance)
+        assert result.series.description == "Updated description"
+        assert result.series.issue_count == 5
+        assert result.created_issue_ids == ()
+        assert result.series.path == "/reference/Civil War - Unmasked"
+        assert [(o.source, o.status) for o in result.outcomes] == [
+            (Source.COMICVINE_LOCAL, SourceStatus.INCOMPATIBLE_RESPONSE)
+        ]
+        await session.commit()
+    async with factory() as session:
+        issues = list(await session.scalars(select(Issue).order_by(Issue.id)))
+        assert [(i.id, i.comicvine_id, i.issue_number_text, i.status) for i in issues] == original
+        assert set(await session.scalars(select(IssueExternalIdentity.identity_namespace))) == {
+            Namespace.COMICVINE
+        }
+    assert ("issues", "42", 1) in adapters[Source.COMICVINE_API].calls
+
+
+@pytest.mark.parametrize("fallback", ["disabled", "rate_limited"])
+async def test_count_mismatch_without_consistent_fallback_is_actionable_and_atomic(
+    comicvine_count_disagreement, fallback
+):
+    factory, series_id, original, adapters, instance = comicvine_count_disagreement
+    if fallback == "disabled":
+        instance.runtime[Source.COMICVINE_API].policy.enabled = False
+    else:
+        from pullbox.services.metadata_discovery import MetadataSourceError
+
+        async def rate_limited(*args, **kwargs):
+            raise MetadataSourceError(SourceStatus.RATE_LIMITED, 300)
+
+        adapters[Source.COMICVINE_API].issues = rate_limited
+    async with factory() as session:
+        with pytest.raises(SeriesRefreshError, match="inconsistent issue counts"):
+            await refresh_series_from_sources(session, series_id, registry=instance)
+        await session.commit()
+    async with factory() as session:
+        assert (await session.get(Series, series_id)).description == "Original description"
+        assert (await load_metadata_baseline(session, Kind.SERIES, series_id)).revision == 1
+        issues = list(await session.scalars(select(Issue).order_by(Issue.id)))
+        assert [(i.id, i.comicvine_id, i.issue_number_text, i.status) for i in issues] == original
+
+
+@pytest.mark.parametrize("conflict", ["wrong_parent", "duplicate_id", "reassigned_issue"])
+async def test_actual_catalog_identity_conflict_never_uses_fallback(
+    comicvine_count_disagreement, conflict
+):
+    factory, series_id, original, adapters, instance = comicvine_count_disagreement
+    local = adapters[Source.COMICVINE_LOCAL].data
+    local.series.issue_count = 5
+    if conflict == "wrong_parent":
+        local.issues[0].series_external_id = "999"
+    elif conflict == "duplicate_id":
+        local.issues[0].external_id = local.issues[1].external_id
+    else:
+        local.issues[0].external_id = "999"
+    async with factory() as session:
+        with pytest.raises(SeriesRefreshError):
+            await refresh_series_from_sources(session, series_id, registry=instance)
+        await session.commit()
+    assert not any(call[0] == "issues" for call in adapters[Source.COMICVINE_API].calls)
+    async with factory() as session:
+        assert (await session.get(Series, series_id)).description == "Original description"
+        issues = list(await session.scalars(select(Issue).order_by(Issue.id)))
+        assert [(i.id, i.comicvine_id, i.issue_number_text, i.status) for i in issues] == original

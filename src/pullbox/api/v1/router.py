@@ -30,6 +30,7 @@ from pullbox.api.v1.metadata_sources import router as metadata_sources_router
 from pullbox.api.v1.reader import router as reader_router
 from pullbox.api.v1.search import router as search_router
 from pullbox.api.v1.series import router as series_router
+from pullbox.api.v1.series_metadata_links import router as series_metadata_links_router
 from pullbox.api.v1.series_rescan import router as series_rescan_router
 from pullbox.api.v1.story_arc_placements import router as story_arc_placements_router
 from pullbox.api.v1.story_arcs import router as story_arcs_router
@@ -53,6 +54,7 @@ v1_router.include_router(issues_router)
 v1_router.include_router(library_router)
 v1_router.include_router(metadata_identities_router)
 v1_router.include_router(metadata_sources_router)
+v1_router.include_router(series_metadata_links_router)
 v1_router.include_router(metadata_arc_catalog_router)
 v1_router.include_router(reader_router)
 v1_router.include_router(downloads_router)

@@ -84,6 +84,10 @@ class SeriesAdoptionError(ValueError):
         self.retry_after_seconds = retry_after_seconds
 
 
+class SeriesCatalogCountError(SeriesAdoptionError):
+    """Inconsistent counts make this source unusable, not an identity conflict."""
+
+
 @dataclass(frozen=True)
 class SourceIssueBatch:
     source: MetadataSource
@@ -174,7 +178,9 @@ async def fetch_source_series_bundle(
                 if current.total != total or (
                     profile.issue_count is not None and profile.issue_count != total
                 ):
-                    raise SeriesAdoptionError("The provider catalog count changed. Retry the add.")
+                    raise SeriesCatalogCountError(
+                        "The provider catalog count changed. Retry the add."
+                    )
                 if total > max_issues:
                     raise SeriesAdoptionError(
                         "The issue catalog exceeds the interactive add limit."

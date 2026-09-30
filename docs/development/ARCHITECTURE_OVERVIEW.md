@@ -310,6 +310,17 @@ pagination, and typed outcomes. Interactive discovery fans out with bounded
 concurrency; automatic discovery cascades and stops only when its caller's
 explicit satisfaction predicate succeeds. Search results do not attach identities.
 
+Series Details exposes existing provider links and an operator-only search,
+comparison, and confirmation flow. The link preview fetches the exact provider
+record outside a database transaction and saves an observation, not ownership.
+Confirmation reuses identity review with source-policy, local summary, and
+other-provider claim freshness checks. Conflicting provider crosswalks stop the
+preview. Linking never adds series/issues, rematches issues, or modifies files.
+The existing Refresh metadata action uses the verified links for enrichment;
+catalog refresh only considers namespaces already owning issues when a catalog
+exists. A newly linked Metron source can supply representative artwork from one
+bounded first issue page without adopting that page as issue membership.
+
 `/api/v1/metadata/sources` exposes operator-only configuration and connection
 checks; `/api/v1/metadata/search` requires authentication. Session writes use
 the existing CSRF contract. Database reads end before provider I/O, clients close

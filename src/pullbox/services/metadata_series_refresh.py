@@ -41,10 +41,12 @@ from pullbox.services.metadata_read_cache import source_read_cache
 from pullbox.services.metadata_refresh_snapshot import fetch_metadata_snapshot
 from pullbox.services.metadata_series_adoption import (
     SeriesAdoptionError,
+    SeriesCatalogCountError,
     SourceSeriesBundle,
     _validate_bundle,
     fetch_source_series_bundle,
 )
+from pullbox.services.metadata_series_artwork import with_representative_cover
 from pullbox.services.metadata_series_refresh_state import (
     SERIES_FIELDS,
     SeriesRefreshState,
@@ -215,6 +217,15 @@ async def refresh_series_catalog_from_sources(
                 if item.status not in {SourceStatus.OK, SourceStatus.NOT_QUERIED}
             }
             bundle = await _catalog(registry, before, profiles, failed)
+            profile = profiles.get(MetadataSource.METRON_API)
+            if (
+                profile is not None
+                and not profile.image_url
+                and bundle.series.source is not profile.source
+            ):
+                page = await registry.issues(profile.source, profile.external_id)
+                if page.status is SourceStatus.OK and page.data is not None:
+                    profiles[profile.source] = with_representative_cover(profile, page.data.results)
         profiles[bundle.series.source] = bundle.series
         snapshot = assemble_metadata(
             MetadataEntityKind.SERIES,
@@ -304,6 +315,10 @@ async def _catalog(
     failed: dict[MetadataSource, SourceOutcome],
 ) -> SourceSeriesBundle:
     known = {item.namespace: item.external_id for item in state.series.identities}
+    inconsistent_counts = False
+    catalog_namespaces = {
+        identity.namespace for issue in state.issues for identity in issue.identities
+    }
     sources = sorted(
         registry.runtime,
         key=lambda source: (
@@ -317,6 +332,8 @@ async def _catalog(
         if (
             source in failed
             or source.identity_namespace not in known
+            # A series link authorizes descriptive enrichment, not issue rematching.
+            or (catalog_namespaces and source.identity_namespace not in catalog_namespaces)
             or registry._unavailable(source, capability=SourceCapability.ISSUE_LIST)
         ):
             continue
@@ -330,6 +347,16 @@ async def _catalog(
             )
             _validate_bundle(bundle)
             return bundle
+        except SeriesCatalogCountError:
+            # Do not accept an incomplete catalog or mistake a stale summary for
+            # an identity dispute. Another eligible source must pass every check.
+            inconsistent_counts = True
+            failed[source] = SourceOutcome(source=source, status=SourceStatus.INCOMPATIBLE_RESPONSE)
+            logger.info(
+                "metadata_series_catalog_count_mismatch",
+                series_id=state.series.local_id,
+                source=source.value,
+            )
         except SeriesAdoptionError as exc:
             if exc.status is None or exc.status is SourceStatus.INCOMPATIBLE_RESPONSE:
                 raise SeriesRefreshError(
@@ -342,6 +369,13 @@ async def _catalog(
             failed[source] = SourceOutcome(
                 source=source, status=exc.status, retry_after_seconds=exc.retry_after_seconds
             )
+    if inconsistent_counts:
+        raise SeriesRefreshError(
+            "A metadata source reported inconsistent issue counts, and no configured source "
+            "could supply a complete catalog. Check source availability in Metadata settings "
+            "or retry later. Existing issue matches and files were kept.",
+            outcomes=tuple(failed.values()),
+        )
     raise SeriesRefreshError(
         "No configured source could supply a complete issue catalog. "
         "Check source status and retry.",
