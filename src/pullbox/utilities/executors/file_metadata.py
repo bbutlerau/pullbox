@@ -7,10 +7,12 @@ import re
 from typing import Any
 from uuid import UUID
 
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from pullbox.core.exceptions import JobCancelledError
 from pullbox.core.file_safety import get_archive_size_limit_bytes
+from pullbox.schemas.issue_file_metadata import FileMetadataReview
 from pullbox.services.issue_file_metadata import file_metadata_error, write_file_metadata
 from pullbox.services.operation_progress import (
     OperationItemProgress,
@@ -28,13 +30,18 @@ class FileMetadataExecutor(JobExecutor):
 
     def validate_config(self, job_config: dict[str, Any]) -> list[str]:
         if (
-            set(job_config) != {"issue_id", "review_key"}
+            set(job_config)
+            not in ({"issue_id", "review_key"}, {"issue_id", "review_key", "choices"})
             or type(job_config.get("issue_id")) is not int
             or job_config["issue_id"] <= 0
             or not isinstance(job_config.get("review_key"), str)
             or not re.fullmatch(r"[a-f0-9]{64}", job_config["review_key"])
         ):
             return ["Choose an issue and approve its current file metadata preview."]
+        try:
+            FileMetadataReview(choices=job_config.get("choices", {}))
+        except ValidationError:
+            return ["Review the metadata choices before writing."]
         return []
 
     async def build_job_context(self, session: Any, job_config: dict[str, Any]) -> dict[str, Any]:
@@ -128,6 +135,7 @@ class FileMetadataExecutor(JobExecutor):
                 check_control=check_control,
                 progress=progress,
                 job_id=job_id,
+                choices=FileMetadataReview(choices=job_config.get("choices", {})).choices,
             )
             return ProcessedItem(
                 item_data["id"],

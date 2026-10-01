@@ -421,6 +421,13 @@ def _render_credits(
 ) -> None:
     credits = issue.values.credits
     if credits is None:
+        if any(origin.field == "credits" and origin.user_override for origin in issue.origins):
+            existing = mi.find("Credits")
+            if existing is not None:
+                _assert_container_replaceable(existing, "credits")
+                mi.remove(existing)
+            for tag in COMICINFO_ROLES:
+                set_text(ci, tag, None)
         return
     if any(
         "," in credit.name

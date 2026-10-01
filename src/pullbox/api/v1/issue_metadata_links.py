@@ -8,7 +8,11 @@ from sqlalchemy import JSON, Text, cast, select, type_coerce
 from pullbox.api.deps import DbSession, InteractiveOperatorUser, Settings
 from pullbox.core.exceptions import ValidationError
 from pullbox.models.operation_progress import OperationProgress, OperationProgressType
-from pullbox.schemas.issue_file_metadata import FileMetadataApproval, FileMetadataPreview
+from pullbox.schemas.issue_file_metadata import (
+    FileMetadataApproval,
+    FileMetadataPreview,
+    FileMetadataReview,
+)
 from pullbox.schemas.issue_metadata_links import (
     IssueCandidatesQuery,
     IssueLinkPreview,
@@ -117,10 +121,15 @@ async def refresh(
 
 @router.post("/{issue_id}/file-metadata/preview", response_model=FileMetadataPreview)
 async def file_preview(
-    issue_id: LocalId, session: DbSession, _user: InteractiveOperatorUser
+    issue_id: LocalId,
+    session: DbSession,
+    _user: InteractiveOperatorUser,
+    body: FileMetadataReview | None = None,
 ) -> FileMetadataPreview:
     try:
-        return (await prepare_file_metadata(session, issue_id)).preview
+        return (
+            await prepare_file_metadata(session, issue_id, choices=body.choices if body else None)
+        ).preview
     except (ValueError, OSError) as exc:
         raise HTTPException(409, file_metadata_error(exc)) from exc
 
@@ -130,7 +139,9 @@ async def file_write(
     issue_id: LocalId, body: FileMetadataApproval, session: DbSession, user: InteractiveOperatorUser
 ) -> dict[str, str]:
     try:
-        prepared = await prepare_file_metadata(session, issue_id)
+        prepared = await prepare_file_metadata(session, issue_id, choices=body.choices)
+        if not prepared.preview.ready:
+            raise ArchivePublicationError("unresolved_conflicts")
         if prepared.preview.review_key != body.review_key:
             raise ArchivePublicationError("approval_changed")
         await ensure_no_active_import_file_mutation(session)
@@ -139,7 +150,7 @@ async def file_write(
             session,
             JobType.FILE_METADATA,
             f"Write metadata: {prepared.preview.file_name}",
-            {"issue_id": issue_id, "review_key": body.review_key},
+            {"issue_id": issue_id, "review_key": body.review_key, "choices": body.choices},
             created_by=user.username,
         )
         await session.commit()

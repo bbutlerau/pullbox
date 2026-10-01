@@ -278,3 +278,96 @@ async def test_utility_restart_settles_published_metadata_even_after_cancel(
                 JobState.CANCELLED if state is JobState.CANCELLING else JobState.COMPLETED
             )
         assert (path.read_bytes(), path.stat()) == before
+
+
+@pytest.mark.parametrize(
+    "choice,value", [("library", "Library summary"), ("ComicInfo.xml", "File summary")]
+)
+async def test_explicit_choice_writes_one_snapshot_on_both_databases(
+    identity_probe_db, tmp_path, choice, value
+):
+    from xml.etree import ElementTree as ET
+
+    _, factory, _ = identity_probe_db
+    xml = (
+        "<ComicInfo><Number>50-X</Number><Summary>File summary</Summary>"
+        "<Notes>Personal note</Notes></ComicInfo>"
+    )
+    async with prepared(factory, tmp_path, comicinfo=xml) as (path, _, plan):
+        issue_id = plan.target.binding.metadata.issues[0].local_id
+        async with factory.begin() as session:
+            await session.execute(
+                update(Issue).where(Issue.id == issue_id).values(description="Library summary")
+            )
+        choices = {"issue.description": choice}
+        async with factory() as session:
+            pending = await prepare_file_metadata(session, issue_id)
+            assert not pending.preview.ready
+            reviewed = await prepare_file_metadata(session, issue_id, choices=choices)
+            assert reviewed.preview.ready
+        manager = JobQueueManager(factory)
+        manager.register_executor(JobType.FILE_METADATA, FileMetadataExecutor)
+        async with factory.begin() as session:
+            job = await manager.create_job(
+                session,
+                JobType.FILE_METADATA,
+                "Chosen metadata",
+                {
+                    "issue_id": issue_id,
+                    "review_key": reviewed.preview.review_key,
+                    "choices": choices,
+                },
+            )
+            job_id = job.id
+        await manager.dispatch_next()
+        async with factory() as session:
+            job = await session.get(UtilityJob, job_id)
+            assert job.state == JobState.COMPLETED, job.error_message
+            assert (await session.get(Issue, issue_id)).description == value
+        with ZipFile(path) as archive:
+            assert archive.read("page.jpg") == b"page bytes"
+            for name in ("ComicInfo.xml", "MetronInfo.xml"):
+                assert ET.fromstring(archive.read(name)).findtext("Summary") == value
+            assert "Personal note" in ET.fromstring(archive.read("ComicInfo.xml")).findtext("Notes")
+        assert (await preview(factory, issue_id)).preview.unchanged
+
+
+@pytest.mark.parametrize("change", ["choices", "source", "metadata", "cancel"])
+async def test_conflict_approval_is_rechecked_before_staging(identity_probe_db, tmp_path, change):
+    _, factory, _ = identity_probe_db
+    async with prepared(
+        factory,
+        tmp_path,
+        comicinfo="<ComicInfo><Number>50-X</Number><Summary>File summary</Summary></ComicInfo>",
+    ) as (path, _, plan):
+        issue_id = plan.target.binding.metadata.issues[0].local_id
+        async with factory.begin() as session:
+            await session.execute(update(Issue).values(description="Library summary"))
+        choices = {"issue.description": "library"}
+        async with factory() as session:
+            reviewed = await prepare_file_metadata(session, issue_id, choices=choices)
+        if change == "choices":
+            choices["issue.description"] = "ComicInfo.xml"
+        elif change == "source":
+            path.touch()
+        elif change == "metadata":
+            async with factory.begin() as session:
+                await session.execute(update(Issue).values(description="New library summary"))
+        original = path.read_bytes(), path.stat()
+
+        async def control():
+            if change == "cancel":
+                raise JobCancelledError("Stop")
+
+        with pytest.raises((ValueError, JobCancelledError)):
+            await write_file_metadata(
+                factory,
+                issue_id,
+                reviewed.preview.review_key,
+                uuid4(),
+                limit=1000000,
+                check_control=control,
+                progress=noop,
+                choices=choices,
+            )
+        assert (path.read_bytes(), path.stat()) == original

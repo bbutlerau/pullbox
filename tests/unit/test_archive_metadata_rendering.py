@@ -97,6 +97,20 @@ def test_paired_core_output_uses_one_snapshot_and_validates_offline():
     assert "[cv_vol_id:42]" in ci.findtext("Notes")
 
 
+def test_explicit_credit_clear_cannot_discard_resource_ids():
+    series, issue = snapshots()
+    issue = issue.model_copy(update={"origins": (origin("credits", user=True),)})
+    incoming = files(
+        mi=metron(
+            '<IDS><ID source="Comic Vine" primary="true">7</ID></IDS>'
+            '<Credits><Credit><Creator id="88">Creator</Creator>'
+            "<Roles><Role>Writer</Role></Roles></Credit></Credits>"
+        )
+    )
+    with pytest.raises(ArchiveMetadataRenderError, match="resource_metadata_change"):
+        render_archive_metadata(series, issue, incoming)
+
+
 def test_multiple_verified_ids_require_explicit_or_existing_primary():
     series, issue = snapshots()
     series = series.model_copy(update={"identities": (CV_SERIES, METRON_SERIES)})

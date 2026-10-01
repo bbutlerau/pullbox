@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -22,7 +23,11 @@ from pullbox.core.archive_metadata import (
 from pullbox.models import LibraryFile
 from pullbox.models.archive_metadata_publication import PublicationState
 from pullbox.models.import_job import ImportedFile, ImportJob, ImportJobStatus
-from pullbox.schemas.issue_file_metadata import FileMetadataChange, FileMetadataPreview
+from pullbox.schemas.issue_file_metadata import (
+    FileMetadataChange,
+    FileMetadataChoices,
+    FileMetadataPreview,
+)
 from pullbox.services.archive_metadata_binding import (
     ArchiveMetadataBindingError,
     ArchiveMetadataTarget,
@@ -42,7 +47,11 @@ from pullbox.services.archive_metadata_publication import (
     record_archive_publication,
 )
 from pullbox.services.archive_metadata_reconciliation import reconcile_archive_metadata
-from pullbox.services.archive_metadata_rendering import render_archive_metadata
+from pullbox.services.archive_metadata_rendering import (
+    ArchiveMetadataRenderError,
+    render_archive_metadata,
+)
+from pullbox.services.issue_file_metadata_review import review_metadata_fields
 from pullbox.services.library_mutation_coordination import lock_file_mutation_admission
 from pullbox.utilities.executors.archive_metadata_staging import stage_cbz_metadata_interruptible
 from pullbox.utilities.import_guards import ensure_no_active_import_file_mutation
@@ -60,6 +69,10 @@ if TYPE_CHECKING:
 
 def file_metadata_error(exc: BaseException) -> str:
     code = getattr(exc, "code", "")
+    if code == "unresolved_conflicts":
+        return "Choose a value for each conflicting field and update the preview before writing."
+    if code in {"invalid_choice", "choices_changed"}:
+        return "The available metadata choices changed. Preview again and review each field."
     if code == "archive_unreadable":
         return "This comic archive cannot be read. Replace or repair it, then preview again."
     if code == "unreconciled_field":
@@ -123,7 +136,9 @@ class PreparedFileMetadata:
     preview: FileMetadataPreview
 
 
-async def prepare_file_metadata(session: AsyncSession, issue_id: int) -> PreparedFileMetadata:
+async def prepare_file_metadata(
+    session: AsyncSession, issue_id: int, *, choices: FileMetadataChoices | None = None
+) -> PreparedFileMetadata:
     """Release the clean read transaction before archive I/O; never fetch providers."""
     if session.new or session.dirty or session.deleted:
         raise ArchiveMetadataBindingError("pending_session_changes")
@@ -142,7 +157,7 @@ async def prepare_file_metadata(session: AsyncSession, issue_id: int) -> Prepare
         files = await asyncio.to_thread(
             read_archive_metadata, target.path, "cbz", max_solid_scan_bytes=MAX_METADATA_BYTES
         )
-        prepared = await asyncio.to_thread(_prepare, target, files)
+        prepared = await asyncio.to_thread(_prepare, target, files, choices or {})
     except (ArchiveError, BadZipFile) as exc:
         raise ArchiveMetadataBindingError("archive_unreadable") from exc
     await asyncio.to_thread(target.check_unchanged)
@@ -184,19 +199,56 @@ def _fields(payload: bytes | None) -> dict[str, str]:
     return result
 
 
-def _prepare(target: ArchiveMetadataTarget, files: ArchiveMetadataFiles) -> PreparedFileMetadata:
+def _prepare(
+    target: ArchiveMetadataTarget, files: ArchiveMetadataFiles, choices: FileMetadataChoices
+) -> PreparedFileMetadata:
     binding = target.binding
     archive = reconcile_archive_metadata(files)
     series, issue = assemble_bound_archive_metadata(binding, archive, now=datetime.now(UTC))
     primary = archive_primary_identity(binding, archive)
-    rendered = render_archive_metadata(
-        series,
-        issue,
-        files,
-        primary_identity=primary,
-        previous_series=binding.metadata.series.baseline,
-        previous_issue=binding.metadata.issues[0].baseline,
-    )
+    series, issue, conflicts = review_metadata_fields(binding, archive, series, issue, choices)
+    ready = all(item.selected is not None for item in conflicts)
+    evidence = TypeAdapter(ArchiveMetadataTarget).dump_json(target)
+    evidence += json.dumps(choices, sort_keys=True, separators=(",", ":")).encode()
+    try:
+        rendered = render_archive_metadata(
+            series,
+            issue,
+            files,
+            primary_identity=primary,
+            previous_series=binding.metadata.series.baseline,
+            previous_issue=binding.metadata.issues[0].baseline,
+        )
+    except ArchiveMetadataRenderError as exc:
+        # Only descriptive disagreements enter review; identity/schema guards still fail closed.
+        if (
+            ready
+            or exc.code != "unreconciled_field"
+            or not any(
+                item.key.split(".")[1] == exc.field for item in conflicts if item.selected is None
+            )
+        ):
+            raise
+        rendered = None
+    if not ready:
+        return PreparedFileMetadata(
+            target,
+            series,
+            issue,
+            primary,
+            FileMetadataPreview(
+                file_id=binding.library_file_id,
+                file_name=target.path.name,
+                changes=[],
+                review_key=hashlib.sha256(
+                    evidence + (files.comicinfo.payload or b"") + (files.metroninfo.payload or b"")
+                ).hexdigest(),
+                unchanged=False,
+                ready=False,
+                conflicts=conflicts,
+            ),
+        )
+    assert rendered is not None
     changes = []
     pairs = (
         ("ComicInfo.xml", files.comicinfo.payload, rendered.comicinfo),
@@ -221,7 +273,6 @@ def _prepare(target: ArchiveMetadataTarget, files: ArchiveMetadataFiles) -> Prep
                     document=name, field="Document", before=None, after="Add reconciled metadata"
                 ),
             )
-    evidence = TypeAdapter(ArchiveMetadataTarget).dump_json(target)
     review_key = hashlib.sha256(evidence + rendered.comicinfo + rendered.metroninfo).hexdigest()
     with ZipFile(target.path) as archive_file:
         canonical_names = {"ComicInfo.xml", "MetronInfo.xml"} <= set(archive_file.namelist())
@@ -237,6 +288,7 @@ def _prepare(target: ArchiveMetadataTarget, files: ArchiveMetadataFiles) -> Prep
             changes=changes[:200],
             review_key=review_key,
             unchanged=unchanged,
+            conflicts=conflicts,
         ),
     )
 
@@ -275,6 +327,7 @@ async def write_file_metadata(
     check_control: ControlCheck,
     progress: ProgressCallback,
     job_id: str | None = None,
+    choices: FileMetadataChoices | None = None,
 ) -> str:
     """Approval is checked again before staging and under the publication lock."""
     recovered = await recover_file_metadata(factory, operation)
@@ -284,7 +337,9 @@ async def write_file_metadata(
         raise ArchivePublicationError("approval_changed")
     await check_control()
     async with factory() as session:
-        prepared = await prepare_file_metadata(session, issue_id)
+        prepared = await prepare_file_metadata(session, issue_id, choices=choices)
+    if not prepared.preview.ready:
+        raise ArchivePublicationError("unresolved_conflicts")
     if prepared.preview.review_key != review_key:
         raise ArchivePublicationError("approval_changed")
     if prepared.preview.unchanged:

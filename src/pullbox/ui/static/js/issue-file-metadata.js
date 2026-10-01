@@ -2,7 +2,7 @@
 function issueFileMetadata(issueId) {
   var endpoint = "/api/v1/issues/" + issueId + "/file-metadata";
   return {
-    open: false, busy: false, error: "", preview: null, job: null,
+    open: false, busy: false, error: "", preview: null, job: null, choices: {}, choicesDirty: false,
     timer: null, disposed: false, trigger: null, generation: 0, jobGeneration: 0,
     init: function () { this.loadJob(); },
     destroy: function () { this.disposed = true; this.generation += 1; clearTimeout(this.timer); },
@@ -42,24 +42,38 @@ function issueFileMetadata(issueId) {
       this.generation += 1;
       if (this.trigger && this.trigger.isConnected) this.trigger.focus({ preventScroll: true });
     },
-    loadPreview: async function () {
+    choose: function (key, source) {
+      this.choices[key] = source;
+      this.choicesDirty = true;
+    },
+    canWrite: function () {
+      return !!this.preview && this.preview.ready !== false && !this.choicesDirty;
+    },
+    loadPreview: async function (reset = true) {
       if (this.busy) return;
       clearTimeout(this.timer);
       this.jobGeneration += 1;
       var generation = ++this.generation;
       this.busy = true; this.error = "";
+      this.choicesDirty = true;
+      var choices = reset ? {} : Object.assign({}, this.choices);
       try {
-        var data = await this.request(endpoint + "/preview", {});
+        var data = await this.request(endpoint + "/preview", Object.keys(choices).length ? { choices: choices } : {});
         if (this.disposed || generation !== this.generation) return;
         this.preview = data; this.job = null;
+        this.choices = {};
+        (data.conflicts || []).forEach(conflict => { if (conflict.selected) this.choices[conflict.key] = conflict.selected; });
+        this.choicesDirty = false;
       } catch (error) { if (generation === this.generation) this.error = error.message; }
       finally { if (!this.disposed) this.busy = false; }
     },
     write: async function () {
-      if (this.busy || !this.preview || this.active()) return;
+      if (this.busy || !this.canWrite() || this.active()) return;
       this.busy = true; this.error = "";
       try {
-        var result = await this.request(endpoint + "/write", { review_key: this.preview.review_key });
+        var approval = { review_key: this.preview.review_key };
+        if (Object.keys(this.choices).length) approval.choices = Object.assign({}, this.choices);
+        var result = await this.request(endpoint + "/write", approval);
         if (this.disposed) return;
         this.jobGeneration += 1;
         this.job = { id: result.job_id, state: result.state, percent: 0, message: "Queued", error: null };
@@ -76,7 +90,7 @@ function issueFileMetadata(issueId) {
     },
     trapFocus: function (event) {
       if (!this.open) return;
-      var elements = Array.from(this.$refs.dialog.querySelectorAll('button:not([disabled]), a[href], [tabindex="0"]')).filter(el => el.getClientRects().length > 0);
+      var elements = Array.from(this.$refs.dialog.querySelectorAll('button:not([disabled]), input:not([disabled]), a[href], [tabindex="0"]')).filter(el => el.getClientRects().length > 0);
       var first = elements[0], last = elements[elements.length - 1];
       if (!first) { event.preventDefault(); return; }
       if (event.shiftKey && (document.activeElement === first || document.activeElement === this.$refs.dialog)) { event.preventDefault(); last.focus(); }

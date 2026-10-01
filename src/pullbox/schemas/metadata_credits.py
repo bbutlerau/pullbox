@@ -31,6 +31,8 @@ class MetadataCredit(BaseModel):
         roles = [role.strip().casefold() for role in value.split(",")]
         if any(not role for role in roles):
             raise ValueError("Credits require nonempty roles")
+        # ComicVine's spelling and the XML schema describe the same pencils role.
+        roles = ["penciller" if role == "penciler" else role for role in roles]
         return ", ".join(sorted(set(roles)))
 
 

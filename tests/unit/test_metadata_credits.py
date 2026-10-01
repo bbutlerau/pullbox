@@ -208,3 +208,9 @@ async def test_empty_credits_trigger_exact_fallback_but_local_clear_does_not():
         **options,
     )
     assert all(len(a.calls) == 1 for a in adapters.values())
+
+
+def test_penciler_and_penciller_are_one_descriptive_role():
+    assert parse_credits([{"name": "David Finch", "role": "penciler, writer"}]) == parse_credits(
+        [{"name": "David Finch", "role": "penciller, writer"}]
+    )
