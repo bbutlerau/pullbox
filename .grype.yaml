@@ -36,12 +36,12 @@ ignore:
   # https://security-tracker.debian.org/tracker/CVE-2026-93990
   - vulnerability: CVE-2026-5435
     package:
-      name: libc6
+      name: '^libc6$'
       version: 2.41-12+deb13u4+dhi1
       type: deb
   - vulnerability: CVE-2026-19499
     package:
-      name: libc6
+      name: '^libc6$'
       version: 2.41-12+deb13u4+dhi1
       type: deb
 
@@ -57,17 +57,17 @@ ignore:
   # https://github.com/gcc-mirror/gcc/commit/aaa8351f4d2e636f9680a1f0a8ebc2f0a60611e6
   - vulnerability: CVE-2026-102010
     package:
-      name: gcc-14-base
+      name: '^gcc-14-base$'
       version: 14.2.0-19+dhi3
       type: deb
   - vulnerability: CVE-2026-102010
     package:
-      name: libgcc-s1
+      name: '^libgcc-s1$'
       version: 14.2.0-19+dhi3
       type: deb
   - vulnerability: CVE-2026-102010
     package:
-      name: libstdc++6
+      name: '^libstdc\+\+6$'
       version: 14.2.0-19+dhi3
       type: deb
   - vulnerability: CVE-2026-66046
