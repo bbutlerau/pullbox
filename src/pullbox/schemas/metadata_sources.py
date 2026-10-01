@@ -282,6 +282,24 @@ class SeriesIssuePageRead(MetadataFetch[MetadataPage[ProviderIssueRead]]):
     series_cover_url: str | None = None
 
 
+class CatalogExcludedIssue(BaseModel):
+    """An exact provider entry explicitly left out, never an issue identity claim."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source: Literal[MetadataSource.GCD_LOCAL]
+    series_external_id: str = Field(min_length=1, max_length=255)
+    external_id: str = Field(min_length=1, max_length=255)
+    issue_number_text: str = Field(max_length=100)
+
+
+class CatalogReviewRead(BaseModel):
+    token: str
+    total: int
+    supported_count: int
+    excluded: tuple[CatalogExcludedIssue, ...]
+
+
 class SeriesPreviewRead(BaseModel):
     source: MetadataSource
     external_id: str
@@ -289,6 +307,7 @@ class SeriesPreviewRead(BaseModel):
     series: MetadataFetch[ProviderSeriesRead]
     issues: MetadataFetch[MetadataPage[ProviderIssueRead]]
     folder_preview: str | None = None
+    catalog_review: CatalogReviewRead | None = None
 
 
 class StoryArcPreviewQuery(SeriesPreviewQuery):

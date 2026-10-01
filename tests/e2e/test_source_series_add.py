@@ -315,3 +315,93 @@ def test_preview_dialog_keyboard_reflow_and_accessibility(
     page.keyboard.press("Escape")
     expect(dialog).not_to_be_visible()
     expect(trigger).to_be_focused()
+
+
+@pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 390)])
+def test_gcd_catalog_exception_is_explicit_and_bound_to_preview(
+    authed_page, seeded_server, theme, width
+):
+    page = authed_page
+    page.set_viewport_size({"width": width, "height": 900})
+    result = preview("gcd_local", "3172")
+    result["series"]["data"].update(title="Watchmen", identity_namespace="gcd", issue_count=13)
+    result["issues"]["data"]["total"] = 13
+    result["catalog_review"] = {
+        "token": "a" * 64,
+        "total": 13,
+        "supported_count": 12,
+        "excluded": [
+            {
+                "source": "gcd_local",
+                "series_external_id": "3172",
+                "external_id": "647784",
+                "issue_number_text": "1 [2nd Printing]",
+            }
+        ],
+    }
+    adds = []
+    page.route("**/api/v1/metadata/series/preview", lambda route: route.fulfill(json=result))
+
+    def added(route):
+        adds.append(route.request.post_data_json)
+        route.fulfill(json={"id": 91, "title": "Watchmen"})
+
+    page.route("**/api/v1/series", added)
+    page.goto(f"{seeded_server}/series/add")
+    page.evaluate("theme => applyTheme(theme)", theme)
+    open_result(page, "gcd_local", "3172")
+    dialog = page.get_by_test_id("add-series-dialog")
+    expect(dialog.get_by_text("12 issues will be added; 1 left out.", exact=True)).to_be_visible()
+    expect(dialog.get_by_text("1 [2nd Printing]", exact=True)).to_be_visible()
+    button = dialog.get_by_role("button", name="Add 12 supported issues", exact=True)
+    expect(button).to_be_enabled()
+    assert not adds
+    assert_no_axe_violations(
+        page, name=f"gcd-review-{theme}", include=["[data-testid='add-series-dialog']"]
+    )
+    assert dialog.evaluate("el => el.scrollWidth <= el.clientWidth + 1")
+    button.click()
+    expect(dialog).not_to_be_visible()
+    assert adds[0]["catalog_review_token"] == "a" * 64
+    assert "issues" not in adds[0] and "excluded" not in adds[0]
+
+
+@pytest.mark.parametrize("supported", [0, 12])
+def test_catalog_review_pages_and_cancel_do_not_create_series(
+    authed_page, seeded_server, supported
+):
+    page = authed_page
+    result = preview("gcd_local", "3172")
+    result["series"]["data"]["identity_namespace"] = "gcd"
+    result["catalog_review"] = {
+        "token": "b" * 64,
+        "total": supported + 23,
+        "supported_count": supported,
+        "excluded": [
+            {
+                "source": "gcd_local",
+                "series_external_id": "3172",
+                "external_id": str(6000 + n),
+                "issue_number_text": f"{n} [2nd Printing]",
+            }
+            for n in range(23)
+        ],
+    }
+    adds = []
+    page.route("**/api/v1/metadata/series/preview", lambda route: route.fulfill(json=result))
+    page.route("**/api/v1/series", lambda route: adds.append(route))
+    page.goto(f"{seeded_server}/series/add")
+    open_result(page, "gcd_local", "3172")
+    dialog = page.get_by_test_id("add-series-dialog")
+    expect(dialog.get_by_text("0 [2nd Printing]", exact=True)).to_be_visible()
+    expect(dialog.get_by_role("link", name="View GCD issue")).to_have_count(10)
+    dialog.get_by_role("button", name="Next entries").click()
+    expect(dialog.get_by_text("10 [2nd Printing]", exact=True)).to_be_visible()
+    dialog.get_by_role("button", name="Next entries").click()
+    expect(dialog.get_by_role("link", name="View GCD issue")).to_have_count(3)
+    expect(dialog.get_by_role("button", name="Next entries")).to_be_disabled()
+    if not supported:
+        expect(dialog.get_by_role("button", name="Add 0 supported issues")).to_be_disabled()
+    dialog.get_by_role("button", name="Cancel", exact=True).click()
+    expect(dialog).not_to_be_visible()
+    assert not adds

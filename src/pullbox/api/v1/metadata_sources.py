@@ -39,6 +39,7 @@ from pullbox.services.gcd_local_activation import activate_snapshot, validate_fo
 from pullbox.services.metadata_arc_preview import preview_source_arc
 from pullbox.services.metadata_discovery import MetadataSourceError, MetadataSourceRegistry
 from pullbox.services.metadata_read_cache import source_read_cache
+from pullbox.services.metadata_series_adoption import SeriesAdoptionError
 from pullbox.services.metadata_series_artwork import representative_series_cover
 from pullbox.services.metadata_series_preview import preview_series_folder, preview_source_series
 from pullbox.services.metadata_source_status import deferred_work, source_status
@@ -142,15 +143,18 @@ async def preview_series(
         session, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled
     )
     await session.rollback()
-    result = await preview_source_series(
-        MetadataSourceRegistry(
-            runtime,
-            gcd_api_enabled=settings.metadata_gcd_api_v2_enabled,
-            read_cache=source_read_cache(session),
-        ),
-        body.source,
-        body.external_id,
-    )
+    try:
+        result = await preview_source_series(
+            MetadataSourceRegistry(
+                runtime,
+                gcd_api_enabled=settings.metadata_gcd_api_v2_enabled,
+                read_cache=source_read_cache(session),
+            ),
+            body.source,
+            body.external_id,
+        )
+    except SeriesAdoptionError as exc:
+        raise HTTPException(409, str(exc)) from exc
     await _require_source_revision(session, body.source, result.source_revision)
     if body.library_root_id is not None:
         root = await _preview_root(session, body.library_root_id)

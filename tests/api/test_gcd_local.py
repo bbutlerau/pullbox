@@ -176,3 +176,199 @@ async def test_invalid_gcd_candidates_fail_without_leaking_paths(
     response = await activate(authenticated_client, path)
     assert response.status_code == 400
     assert str(tmp_path) not in response.text
+
+
+@pytest.fixture
+async def watchmen_catalog(authenticated_client, sec_db, monkeypatch, tmp_path):
+    path = gcd_dump(tmp_path / "gcd.db")
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "INSERT INTO gcd_series VALUES "
+            "(3172, 'Watchmen', 'Watchmen', 1986, 1987, 1, 1, 13, 0, 0, 1, '')"
+        )
+        db.executemany(
+            "INSERT INTO gcd_issue VALUES (?,3172,?,'',?,0,NULL,'','','',32)",
+            [(41814 + n, str(n), n) for n in range(1, 13)] + [(647784, "1 [2nd Printing]", 13)],
+        )
+    assert (await activate(authenticated_client, path)).status_code == 200
+    root_path = tmp_path / "library"
+    root_path.mkdir()
+    async with sec_db.begin() as session:
+        root = LibraryRoot(name="Test", path=str(root_path), allow_managed_writes=True)
+        session.add(root)
+        await session.flush()
+        root_id = root.id
+    monkeypatch.setattr("pullbox.api.v1.series.get_event_bus", EventBus)
+    return (
+        path,
+        root_path,
+        {
+            "source": "gcd_local",
+            "external_id": "3172",
+            "source_revision": 1,
+            "library_root_id": root_id,
+        },
+    )
+
+
+async def catalog_preview(client, body):
+    return await client.post(
+        "/api/v1/metadata/series/preview",
+        json={key: value for key, value in body.items() if key != "source_revision"},
+        headers=csrf(client),
+    )
+
+
+async def test_gcd_exception_review_add_and_refresh_preserve_exact_catalog_decision(
+    authenticated_client, sec_db, watchmen_catalog
+):
+    from pullbox.models.metadata_identity import IssueExternalIdentity
+
+    path, root, body = watchmen_catalog
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    preview = await catalog_preview(authenticated_client, body)
+    assert preview.status_code == 200, preview.text
+    review = preview.json().get("catalog_review")
+    assert review is not None, "GCD Add must expose a review, not fail only after Add"
+    assert review["total"] == 13 and review["supported_count"] == 12
+    assert [(row["external_id"], row["issue_number_text"]) for row in review["excluded"]] == [
+        ("647784", "1 [2nd Printing]")
+    ]
+    assert len(review["token"]) == 64
+    assert not list(root.iterdir())
+    rejected = await authenticated_client.post(
+        "/api/v1/series", json=body, headers=csrf(authenticated_client)
+    )
+    assert rejected.status_code == 409 and not list(root.iterdir())
+    approved = {**body, "catalog_review_token": review["token"]}
+    added = await authenticated_client.post(
+        "/api/v1/series", json=approved, headers=csrf(authenticated_client)
+    )
+    assert added.status_code == 201, added.text
+    data = added.json()
+    assert data["issue_count"] == 12
+    assert data["catalog_exclusions"][0]["external_id"] == "647784"
+    async with sec_db() as session:
+        ids = set(await session.scalars(select(IssueExternalIdentity.external_id)))
+        assert ids == {str(41814 + n) for n in range(1, 13)}
+        assert await session.scalar(select(func.count()).select_from(Issue)) == 12
+    detail = await authenticated_client.get(f"/series/{data['id']}")
+    assert "1 [2nd Printing]" in detail.text and "647784" in detail.text
+    refreshed = await authenticated_client.post(
+        f"/api/v1/series/{data['id']}/refresh", headers=csrf(authenticated_client)
+    )
+    assert refreshed.status_code == 200, refreshed.text
+    assert refreshed.json()["issue_count"] == 12
+    assert refreshed.json()["catalog_exclusions"] == data["catalog_exclusions"]
+    again = await authenticated_client.post(
+        "/api/v1/series", json=approved, headers=csrf(authenticated_client)
+    )
+    assert again.status_code == 201 and again.json()["id"] == data["id"]
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+
+
+async def test_stale_or_forged_catalog_review_cannot_create_library(
+    authenticated_client, sec_db, watchmen_catalog
+):
+    path, root, body = watchmen_catalog
+    preview = await catalog_preview(authenticated_client, body)
+    review = preview.json().get("catalog_review")
+    assert review is not None
+    for token in ("f" * 64,):
+        result = await authenticated_client.post(
+            "/api/v1/series",
+            json={**body, "catalog_review_token": token},
+            headers=csrf(authenticated_client),
+        )
+        assert result.status_code == 409
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE gcd_issue SET number='1 [3rd Printing]' WHERE id=647784")
+    assert (await activate(authenticated_client, path, revision=1)).status_code == 200
+    result = await authenticated_client.post(
+        "/api/v1/series",
+        json={**body, "source_revision": 2, "catalog_review_token": review["token"]},
+        headers=csrf(authenticated_client),
+    )
+    assert result.status_code == 409
+    assert not list(root.iterdir())
+    async with sec_db() as session:
+        assert await session.scalar(select(func.count()).select_from(Series)) == 0
+
+
+async def test_gcd_review_includes_exceptions_after_the_first_page(
+    authenticated_client, watchmen_catalog
+):
+    path, _, body = watchmen_catalog
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE gcd_issue SET sort_code=500 WHERE id=647784")
+        db.executemany(
+            "INSERT INTO gcd_issue VALUES (?,3172,?,'',?,0,NULL,'','','',32)",
+            [(50000 + n, str(n), n) for n in range(13, 205)],
+        )
+    assert (await activate(authenticated_client, path, revision=1)).status_code == 200
+    preview = await catalog_preview(authenticated_client, body)
+    review = preview.json().get("catalog_review")
+    assert review is not None
+    assert review["supported_count"] == 204 and review["total"] == 205
+    assert review["excluded"][0]["external_id"] == "647784"
+
+
+@pytest.mark.parametrize("change", ["new_exception", "changed_exception", "duplicate_number"])
+async def test_refresh_rejects_unreviewed_changes_without_changing_owned_files(
+    authenticated_client, sec_db, watchmen_catalog, change
+):
+    from pullbox.models.issue import IssueStatus
+
+    path, root, body = watchmen_catalog
+    review = (await catalog_preview(authenticated_client, body)).json()["catalog_review"]
+    added = await authenticated_client.post(
+        "/api/v1/series",
+        json={**body, "catalog_review_token": review["token"]},
+        headers=csrf(authenticated_client),
+    )
+    assert added.status_code == 201
+    series_id = added.json()["id"]
+    marker = root / "owned.cbz"
+    marker.write_bytes(b"existing comic pages")
+    async with sec_db.begin() as session:
+        series = await session.get(Series, series_id)
+        series.title = "My Watchmen title"
+        issue = await session.scalar(select(Issue).order_by(Issue.id))
+        issue.status = IssueStatus.OWNED
+        issue_id = issue.id
+    with sqlite3.connect(path) as db:
+        if change == "changed_exception":
+            db.execute("UPDATE gcd_issue SET number='1 [3rd Printing]' WHERE id=647784")
+        else:
+            db.execute(
+                "INSERT INTO gcd_issue VALUES (888888,3172,?,'',500,0,NULL,'','','',32)",
+                ("nn" if change == "new_exception" else "1",),
+            )
+    assert (await activate(authenticated_client, path, revision=1)).status_code == 200
+    refreshed = await authenticated_client.post(
+        f"/api/v1/series/{series_id}/refresh", headers=csrf(authenticated_client)
+    )
+    assert refreshed.status_code == 409
+    async with sec_db() as session:
+        series = await session.get(Series, series_id)
+        assert series.title == "My Watchmen title" and series.issue_count == 12
+        assert series.catalog_exclusions == added.json()["catalog_exclusions"]
+        assert (await session.get(Issue, issue_id)).status == IssueStatus.OWNED
+        assert await session.scalar(select(func.count()).select_from(Issue)) == 12
+    assert marker.read_bytes() == b"existing comic pages"
+
+
+async def test_all_unsupported_catalog_cannot_be_added(authenticated_client, watchmen_catalog):
+    path, root, body = watchmen_catalog
+    with sqlite3.connect(path) as db:
+        db.execute("DELETE FROM gcd_issue WHERE series_id=3172 AND id != 647784")
+    assert (await activate(authenticated_client, path, revision=1)).status_code == 200
+    body["source_revision"] = 2
+    review = (await catalog_preview(authenticated_client, body)).json()["catalog_review"]
+    assert review["supported_count"] == 0
+    result = await authenticated_client.post(
+        "/api/v1/series",
+        json={**body, "catalog_review_token": review["token"]},
+        headers=csrf(authenticated_client),
+    )
+    assert result.status_code == 409 and not list(root.iterdir())

@@ -30,6 +30,7 @@ from pullbox.services.cover_resolver import resolve_covers_dir
 from pullbox.services.metadata_assembly import assemble_metadata
 from pullbox.services.metadata_baselines import MetadataBaselineWrite, save_metadata_baselines
 from pullbox.services.metadata_catalog_checkpoints import save_full_catalog_checkpoint
+from pullbox.services.metadata_catalog_review import apply_catalog_exclusions
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
 from pullbox.services.metadata_entity_values import apply_series_metadata_values
 from pullbox.services.metadata_issue_catalog import (
@@ -345,6 +346,7 @@ async def _catalog(
                 source_revision=registry.runtime[source].policy.revision,
                 profile=profiles.get(source),
             )
+            bundle = apply_catalog_exclusions(bundle, state.catalog_exclusions)
             _validate_bundle(bundle)
             return bundle
         except SeriesCatalogCountError:

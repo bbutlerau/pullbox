@@ -32,6 +32,7 @@ from pullbox.schemas.series import (
     SourceSeriesCreate,
 )
 from pullbox.services.cover_url_service import build_series_cover_url
+from pullbox.services.metadata_catalog_review import approve_catalog_review
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
 from pullbox.services.metadata_read_cache import source_read_cache
 from pullbox.services.metadata_series_add import source_series_add_transaction
@@ -407,6 +408,7 @@ async def add_series(
                 body.external_id,
                 source_revision=body.source_revision,
             )
+            bundle = approve_catalog_review(bundle, body.catalog_review_token)
             # This command owns commit/cleanup; serialize before committing so
             # a failed response cannot leave an unexpected library addition.
             async with source_series_add_transaction(

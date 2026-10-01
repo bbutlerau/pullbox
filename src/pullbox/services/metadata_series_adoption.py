@@ -37,7 +37,12 @@ from pullbox.schemas.metadata_snapshot import (
     MetadataValues,
     field_domain,
 )
-from pullbox.schemas.metadata_sources import ProviderIssueRead, ProviderSeriesRead, SourceStatus
+from pullbox.schemas.metadata_sources import (
+    CatalogExcludedIssue,
+    ProviderIssueRead,
+    ProviderSeriesRead,
+    SourceStatus,
+)
 from pullbox.services.metadata_assembly import assemble_metadata
 from pullbox.services.metadata_baselines import (
     MetadataBaselineWrite,
@@ -103,6 +108,7 @@ class SourceSeriesBundle:
     source_revision: int
     catalog_total: int
     catalog_started_at: datetime | None = None
+    excluded_issues: tuple[ProviderIssueRead, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -272,21 +278,37 @@ def _identities(
 def _validate_bundle(bundle: SourceSeriesBundle) -> list[tuple[float, str]]:
     profile = bundle.series
     _identities(profile, MetadataEntityKind.SERIES)
+    catalog = (*bundle.issues, *bundle.excluded_issues)
     if (
         not profile.title.strip()
         or len(profile.title) > 500
-        or len(bundle.issues) > 10000
+        or len(catalog) > 10000
         or type(bundle.catalog_total) is not int
-        or bundle.catalog_total != len(bundle.issues)
-        or (profile.issue_count is not None and profile.issue_count != len(bundle.issues))
+        or bundle.catalog_total != len(catalog)
+        or (profile.issue_count is not None and profile.issue_count != len(catalog))
     ):
         raise SeriesAdoptionError("The series profile or issue catalog is incomplete.")
+    if bundle.excluded_issues:
+        if profile.source is not MetadataSource.GCD_LOCAL or not bundle.issues:
+            raise SeriesAdoptionError("This catalog cannot be added with exclusions.")
+        for issue in bundle.excluded_issues:
+            try:
+                parse_issue_number_text(issue.issue_number_text)
+            except ValueError:
+                continue
+            raise SeriesAdoptionError("Supported issues cannot be omitted by catalog review.")
+        _validate_issue_batch(
+            SourceIssueBatch(profile.source, profile.external_id, catalog, bundle.source_revision),
+            allow_unsupported=True,
+        )
     return _validate_issue_batch(
         SourceIssueBatch(profile.source, profile.external_id, bundle.issues, bundle.source_revision)
     )
 
 
-def _validate_issue_batch(batch: SourceIssueBatch) -> list[tuple[float, str]]:
+def _validate_issue_batch(
+    batch: SourceIssueBatch, *, allow_unsupported: bool = False
+) -> list[tuple[float, str]]:
     if (
         type(batch.source_revision) is not int
         or batch.source_revision <= 0
@@ -306,6 +328,8 @@ def _validate_issue_batch(batch: SourceIssueBatch) -> list[tuple[float, str]]:
         try:
             number = parse_issue_number_text(issue.issue_number_text)
         except ValueError as exc:
+            if allow_unsupported and batch.source is MetadataSource.GCD_LOCAL:
+                continue
             raise SeriesAdoptionError(
                 "This catalog contains an unsupported issue designation; no issues were added."
             ) from exc
@@ -501,6 +525,15 @@ async def _adopt(
                 )
             ),
             issue_count=len(bundle.issues),
+            catalog_exclusions=[
+                CatalogExcludedIssue(
+                    source=MetadataSource.GCD_LOCAL,
+                    series_external_id=issue.series_external_id,
+                    external_id=issue.external_id,
+                    issue_number_text=issue.issue_number_text,
+                ).model_dump(mode="json")
+                for issue in bundle.excluded_issues
+            ],
             monitored=monitored,
             publisher_id=publisher_id,
             metadata_source=_metadata_label(profile.source),

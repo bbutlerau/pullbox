@@ -11,6 +11,7 @@ from pullbox.models.series import (
     SeriesStatusOverride,
     SeriesType,
 )
+from pullbox.schemas.metadata_sources import CatalogExcludedIssue
 
 
 class SeriesCreate(BaseModel):
@@ -48,6 +49,7 @@ class SourceSeriesCreate(BaseModel):
     source_revision: int = Field(..., ge=0, strict=True)
     library_root_id: int | None = Field(None, gt=0)
     search_on_add: bool | None = None
+    catalog_review_token: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
     @model_validator(mode="after")
     def canonical_identity(self) -> "SourceSeriesCreate":
@@ -89,6 +91,7 @@ class SeriesResponse(BaseModel):
     issue_catalog_last_synced_at: datetime | None = None
     issue_catalog_last_checked_at: datetime | None = None
     issue_catalog_error: str | None = None
+    catalog_exclusions: list[CatalogExcludedIssue] = Field(default_factory=list)
     comicvine_url: str | None = None
     monitored: bool
     metadata_last_refreshed: datetime | None = None

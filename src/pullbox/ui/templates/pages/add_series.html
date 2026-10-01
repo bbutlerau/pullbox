@@ -137,7 +137,7 @@
     ></div>
 
     <div
-      class="modal-panel max-w-2xl"
+      class="modal-panel max-w-2xl max-h-[calc(100dvh-5rem)]"
       role="dialog"
       data-testid="add-series-dialog"
       aria-modal="true"
@@ -152,7 +152,7 @@
       x-transition:leave-start="opacity-100 scale-100"
       x-transition:leave-end="opacity-0 scale-95"
     >
-      <div class="modal-header gap-4">
+      <div class="modal-header shrink-0 gap-4">
         <div class="add-series-result-cover shrink-0" aria-hidden="true">
           <img :src="selectedCoverUrl || null" :alt="selectedTitle" class="h-full w-full object-cover"
             data-testid="add-series-preview-cover" x-show="selectedCoverUrl" x-cloak
@@ -175,7 +175,7 @@
         </button>
       </div>
 
-      <div class="modal-body p-5 sm:p-6 space-y-5">
+      <div class="modal-body min-h-0 p-5 sm:p-6 space-y-5">
         <div x-show="previewLoading" data-testid="add-series-preview-status" role="status" aria-live="polite" class="flex items-center gap-2 text-sm text-pb-text-sec">
           <svg class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
             <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
@@ -183,6 +183,25 @@
           </svg>
           <span>Loading preview...</span>
         </div>
+        <section x-show="catalogReview" x-cloak class="space-y-3" aria-label="Catalog review">
+          <p class="text-sm font-medium" role="status" x-text="catalogReview ? catalogReview.supported_count + ' issues will be added; ' + catalogReview.excluded.length + ' left out.' : ''"></p>
+          <p class="text-sm text-pb-text-sec">Pullbox cannot represent these issue numbers yet. Adding the supported issues keeps this list on Series Details. No files are changed and no printings are merged.</p>
+          <ul class="space-y-2 text-sm">
+            <template x-for="entry in (catalogReview?.excluded || []).slice(reviewPage * 10, (reviewPage + 1) * 10)" :key="entry.external_id">
+              <li class="flex items-center justify-between gap-3">
+                <span class="min-w-0 break-words" x-text="entry.issue_number_text || '(no issue number)'"></span>
+                <a class="btn-ghost btn-sm shrink-0" :href="'https://www.comics.org/issue/' + encodeURIComponent(entry.external_id) + '/'" target="_blank" rel="noopener noreferrer" :aria-label="'View GCD issue ' + entry.external_id">View GCD</a>
+              </li>
+            </template>
+          </ul>
+          <div x-show="catalogReview && catalogReview.excluded.length > 10" class="flex items-center justify-between gap-2">
+            <button type="button" class="btn-ghost btn-sm" @click="reviewPage--" :disabled="reviewPage === 0 || adding">Previous entries</button>
+            <span class="text-sm text-pb-text-sec" x-text="catalogReview ? (reviewPage + 1) + ' / ' + Math.ceil(catalogReview.excluded.length / 10) : ''"></span>
+            <button type="button" class="btn-ghost btn-sm" @click="reviewPage++" :disabled="!catalogReview || (reviewPage + 1) * 10 >= catalogReview.excluded.length || adding">Next entries</button>
+          </div>
+          <p x-show="catalogReview && !catalogReview.supported_count" class="text-sm text-pb-text-sec">No supported issues can be added. Cancel and try another provider.</p>
+        </section>
+
         <section class="space-y-3">
           <p class="add-series-modal-section-label">Library settings</p>
 
@@ -237,10 +256,10 @@
           <button @click="closeModal()" :disabled="adding" class="btn-ghost">Cancel</button>
           <button
             @click="addSeriesToLibrary()"
-            :disabled="adding || !previewReady || !libraryRootId"
+            :disabled="adding || !previewReady || !libraryRootId || (catalogReview && !catalogReview.supported_count)"
             class="btn-primary gap-2"
           >
-            <span x-show="!adding">Add series</span>
+            <span x-show="!adding" x-text="catalogReview ? 'Add ' + catalogReview.supported_count + ' supported issues' : 'Add series'">Add series</span>
             <span x-show="adding" class="flex items-center gap-2">
               <svg class="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" aria-hidden="true">
                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
@@ -339,6 +358,8 @@ function addSeries() {
     selectedSource: '',
     selectedExternalId: '',
     sourceRevision: null,
+    catalogReview: null,
+    reviewPage: 0,
     selectedTitle: '',
     selectedPublisher: '',
     selectedYear: null,
@@ -436,6 +457,8 @@ function addSeries() {
       this.previewReady = false;
       this.previewFailed = false;
       this.sourceRevision = null;
+      this.catalogReview = null;
+      this.reviewPage = 0;
       this.addError = '';
       try {
         const rootId = Number(this.libraryRootId);
@@ -473,6 +496,7 @@ function addSeries() {
         this.updateFolderPreview();
         this.selectedIssueCount = data.issues.data.total;
         this.sourceRevision = data.source_revision;
+        this.catalogReview = data.catalog_review || null;
         this.previewReady = true;
       } catch (error) {
         if (sequence !== this.previewSequence || this.disposed || !this.showModal) return;
@@ -497,7 +521,7 @@ function addSeries() {
     },
 
     addSeriesToLibrary() {
-      if (this.adding || !this.previewReady || !this.libraryRootId) return;
+      if (this.adding || !this.previewReady || !this.libraryRootId || (this.catalogReview && !this.catalogReview.supported_count)) return;
       this.adding = true;
       this.addError = '';
 
@@ -507,6 +531,7 @@ function addSeries() {
         source_revision: this.sourceRevision,
         library_root_id: this.libraryRootId ? parseInt(this.libraryRootId, 10) : null,
       };
+      if (this.catalogReview) body.catalog_review_token = this.catalogReview.token;
 
       fetch('/api/v1/series', {
         method: 'POST',

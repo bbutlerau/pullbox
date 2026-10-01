@@ -116,6 +116,9 @@ class Series(Base, IdentityMixin, TimestampMixin):
     issue_catalog_last_synced_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     issue_catalog_last_checked_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     issue_catalog_error: Mapped[str | None] = mapped_column(Text)
+    catalog_exclusions: Mapped[list[dict[str, str]]] = mapped_column(
+        JSON, default=list, server_default="[]"
+    )
 
     # Monitoring — binary on/off, controls auto-search and issue status transitions
     monitored: Mapped[bool] = mapped_column(default=False, index=True)

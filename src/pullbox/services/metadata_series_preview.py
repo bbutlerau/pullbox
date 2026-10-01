@@ -13,11 +13,14 @@ from pullbox.models.publisher import Publisher
 from pullbox.models.series import Series, SeriesType
 from pullbox.schemas.metadata_sources import (
     MetadataFetch,
+    MetadataPage,
     ProviderSeriesRead,
     SeriesPreviewRead,
     SourceStatus,
 )
+from pullbox.services.metadata_catalog_review import catalog_review
 from pullbox.services.metadata_discovery import MetadataSourceRegistry
+from pullbox.services.metadata_series_adoption import fetch_source_series_bundle
 from pullbox.services.metadata_series_artwork import with_representative_cover
 from pullbox.services.metadata_source_reads import source_id
 
@@ -61,6 +64,21 @@ async def preview_source_series(
         issues=MetadataFetch(status=SourceStatus.NOT_QUERIED),
     )
     try:
+        if source is MetadataSource.GCD_LOCAL:
+            bundle = await fetch_source_series_bundle(
+                registry, source, identifier, source_revision=preview.source_revision
+            )
+            preview.series = MetadataFetch(status=SourceStatus.OK, data=bundle.series)
+            preview.issues = MetadataFetch(
+                status=SourceStatus.OK,
+                data=MetadataPage(
+                    results=list(bundle.issues[:100]),
+                    total=bundle.catalog_total,
+                    next_page=2 if len(bundle.issues) > 100 else None,
+                ),
+            )
+            preview.catalog_review = catalog_review(bundle)
+            return preview
         async with asyncio.timeout(registry.total_timeout):
             preview.series = await registry.series(source, identifier)
             if preview.series.status is SourceStatus.OK:

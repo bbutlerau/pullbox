@@ -19,7 +19,7 @@ from pullbox.models.metadata_identity import (
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import IssueCatalogState
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot, MetadataValues
-from pullbox.schemas.metadata_sources import SourcePolicyRead
+from pullbox.schemas.metadata_sources import CatalogExcludedIssue, SourcePolicyRead
 from pullbox.services.metadata_baselines import MetadataBaselineConflictError
 from pullbox.services.metadata_catalog_checkpoints import (
     CatalogCheckpoint,
@@ -82,6 +82,7 @@ class SeriesRefreshState:
     issues: tuple[RefreshEntityState, ...]
     policies: tuple[SourcePolicyRead, ...]
     checkpoints: tuple[CatalogCheckpoint, ...] = ()
+    catalog_exclusions: tuple[CatalogExcludedIssue, ...] = ()
 
 
 def _baseline(payload: str | None, kind: MetadataEntityKind) -> MetadataSnapshot | None:
@@ -263,5 +264,9 @@ async def read_series_refresh_state(
         for item in await read_source_policies(session)
     )
     return SeriesRefreshState(
-        parent, tuple(issues), policies, await read_catalog_checkpoints(session, series_id)
+        parent,
+        tuple(issues),
+        policies,
+        await read_catalog_checkpoints(session, series_id),
+        tuple(CatalogExcludedIssue.model_validate(item) for item in series.catalog_exclusions),
     )
