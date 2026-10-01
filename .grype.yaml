@@ -21,10 +21,13 @@ ignore:
   # not imported comic XML. Residual upstream-library risk remains until DHI
   # ships fixed packages; all other High findings continue to block.
   #
-  # Keep the existing libc review deadline of 2026-09-30 or the next base
-  # refresh, whichever comes first. Keep the existing Expat review deadline of
-  # 2026-10-07 or the next base refresh, whichever comes first. Remove these
-  # entries as soon as fixed stable packages are available.
+  # Re-reviewed and renewed by Adam Hernandez on 2026-10-01 ONLY for the two
+  # libc6 2.41-12+deb13u4+dhi1 matches below: re-review by 2026-10-04 or the
+  # next base refresh. Debian 13 has no fixed stable packages, and no direct
+  # affected calls were found in Pullbox or its pinned MEGA SDK; dependency
+  # reachability remains unproven. Older libc exceptions are not renewed.
+  # Keep the existing Expat review deadline of 2026-10-07 or the next base
+  # refresh, whichever comes first. Remove entries when fixed packages ship.
   # https://security-tracker.debian.org/tracker/CVE-2026-5435
   # https://security-tracker.debian.org/tracker/CVE-2026-19499
   # https://security-tracker.debian.org/tracker/CVE-2026-66046
@@ -40,6 +43,32 @@ ignore:
     package:
       name: libc6
       version: 2.41-12+deb13u4+dhi1
+      type: deb
+
+  # Approved by Adam Hernandez on 2026-10-01 for ONLY these three exact package
+  # matches. Accepted risk, NOT a fix or a claim that all dependencies are safe.
+  # GCC's fix is in the PBDS binary-heap erase_if template header. The runtime
+  # contains no compiler; neither Pullbox's native bridge nor its pinned MEGA
+  # SDK includes PBDS or calls this erase_if path. Third-party reachability and
+  # DHI backport status remain unproven; Debian 13 has no fixed stable package.
+  # Re-review by 2026-10-04 or at the next DHI refresh, whichever comes first.
+  # All other High findings and other package revisions remain blocking.
+  # https://security-tracker.debian.org/tracker/CVE-2026-102010
+  # https://github.com/gcc-mirror/gcc/commit/aaa8351f4d2e636f9680a1f0a8ebc2f0a60611e6
+  - vulnerability: CVE-2026-102010
+    package:
+      name: gcc-14-base
+      version: 14.2.0-19+dhi3
+      type: deb
+  - vulnerability: CVE-2026-102010
+    package:
+      name: libgcc-s1
+      version: 14.2.0-19+dhi3
+      type: deb
+  - vulnerability: CVE-2026-102010
+    package:
+      name: libstdc++6
+      version: 14.2.0-19+dhi3
       type: deb
   - vulnerability: CVE-2026-66046
     package:
