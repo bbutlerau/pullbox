@@ -536,6 +536,12 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
         ("/htmx/series/search", ("GET",), "htmx_search_series", "htmx_search_series"),
         ("/issues/{issue_id}", ("GET",), "issue_detail", "issue_detail"),
         (
+            "/htmx/issues/{issue_id}/metadata",
+            ("GET",),
+            "htmx_issue_metadata",
+            "htmx_issue_metadata",
+        ),
+        (
             "/htmx/issues/{issue_id}/reading",
             ("GET",),
             "htmx_issue_reading_hero",
