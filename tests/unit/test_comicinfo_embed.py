@@ -286,3 +286,66 @@ def test_materialize_cbz_with_comicinfo_move_deletes_source_after_success(
     assert not source.exists()
     assert target.exists()
     assert _read_comicinfo(target)["Series"] == "Moved Series"
+
+
+def _mode(path: Path) -> int:
+    return path.stat().st_mode & 0o777
+
+
+def test_embed_comicinfo_keeps_the_archive_permission_bits(tmp_path: Path) -> None:
+    archive_path = tmp_path / "issue.cbz"
+    _write_cbz(archive_path, "<ComicInfo><Series>Old Series</Series></ComicInfo>")
+    archive_path.chmod(0o664)
+
+    assert embed_comicinfo_in_cbz(archive_path, {"Series": "New Series"}) is True
+
+    assert _read_comicinfo(archive_path)["Series"] == "New Series"
+    assert _mode(archive_path) == 0o664
+
+
+def test_embed_comicinfo_keeps_permission_bits_with_caller_temp_path(tmp_path: Path) -> None:
+    archive_path = tmp_path / "issue.cbz"
+    _write_cbz(archive_path, "<ComicInfo><Series>Old Series</Series></ComicInfo>")
+    archive_path.chmod(0o600)
+
+    embed_comicinfo_in_cbz(
+        archive_path,
+        {"Series": "New Series"},
+        temp_path=tmp_path / "work" / "issue.tmp.cbz",
+    )
+
+    assert _mode(archive_path) == 0o600
+
+
+def test_materialize_cbz_with_comicinfo_carries_source_permission_bits(tmp_path: Path) -> None:
+    source_path = tmp_path / "downloads" / "issue.cbz"
+    source_path.parent.mkdir()
+    _write_cbz(source_path, "<ComicInfo><Series>Old Series</Series></ComicInfo>")
+    source_path.chmod(0o644)
+    target_path = tmp_path / "library" / "Series" / "issue.cbz"
+
+    materialize_cbz_with_comicinfo(
+        source_path,
+        target_path,
+        {"Series": "New Series"},
+        transfer_method="copy",
+    )
+
+    assert _read_comicinfo(target_path)["Series"] == "New Series"
+    assert _mode(target_path) == 0o644
+
+
+def test_embed_comicinfo_survives_a_filesystem_that_rejects_chmod(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_path = tmp_path / "issue.cbz"
+    _write_cbz(archive_path, "<ComicInfo><Series>Old Series</Series></ComicInfo>")
+
+    def reject_chmod(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError("chmod is not permitted on this mount")
+
+    monkeypatch.setattr("pullbox.utilities.comicinfo.os.chmod", reject_chmod)
+
+    assert embed_comicinfo_in_cbz(archive_path, {"Series": "New Series"}) is True
+    assert _read_comicinfo(archive_path)["Series"] == "New Series"
