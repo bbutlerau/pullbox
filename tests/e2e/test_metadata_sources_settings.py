@@ -170,6 +170,70 @@ def test_metadata_priorities_save_reload_and_domain_reset(authed_page, seeded_se
     assert not errors
 
 
+@pytest.mark.parametrize("external_change", [False, True])
+def test_gcd_save_updates_only_the_seen_priority_revision(
+    authed_page, seeded_server, tmp_path, external_change
+):
+    from tests.api.test_gcd_local import gcd_dump
+
+    page = authed_page
+    SettingsPage(page, seeded_server).goto("metadata")
+    priority = page.get_by_test_id("metadata-source-priority")
+    priority.evaluate("node => { node.keepThisNode = true; }")
+    order = priority.get_by_test_id("metadata-order-global")
+    order.locator('[data-order-direction="down"]').first.click()
+    draft = order.locator("[data-source-label]").all_text_contents()
+    gcd = page.get_by_test_id("gcd-local-access")
+
+    if external_change:
+        sources = page.request.get(seeded_server + "/api/v1/metadata/sources").json()
+        base = next(source for source in sources if source["source"] == "gcd_local")
+        response = page.request.put(
+            seeded_server + "/api/v1/metadata/sources/gcd_local",
+            headers={"X-CSRF-Token": page.evaluate("readCsrfTokenFromBody()")},
+            data={
+                "revision": base["revision"],
+                "enabled": False,
+                "priority": base["priority"],
+                "domain_priorities": base["domain_priorities"],
+                "settings": base["settings"],
+            },
+        )
+        assert response.status == 200
+        with page.expect_response("**/api/v1/metadata/sources"):
+            gcd.get_by_role("button", name="Load saved GCD settings", exact=True).click()
+        expect(gcd.get_by_role("button", name="Load saved GCD settings")).to_be_enabled()
+
+    gcd.get_by_label("GCD SQLite database").fill(str(gcd_dump(tmp_path / "gcd.db")))
+    with page.expect_response("**/api/v1/metadata/sources/gcd_local") as enabled:
+        gcd.get_by_role("button", name="Validate and enable GCD", exact=True).click()
+    assert enabled.value.status == 200
+    expect(
+        priority.get_by_role("button", name="Test GCD Local Database", exact=True)
+    ).to_be_enabled()
+    expect(order.locator("[data-source-label]")).to_have_text(draft)
+    path_draft = str(tmp_path / "next-dump.db")
+    gcd.get_by_label("GCD SQLite database").fill(path_draft)
+    with page.expect_response("**/api/v1/metadata/priorities") as saved:
+        priority.get_by_role("button", name="Save metadata priority", exact=True).click()
+    assert saved.value.status == (409 if external_change else 200)
+    expect(order.locator("[data-source-label]")).to_have_text(draft)
+    expect(gcd.get_by_label("GCD SQLite database")).to_have_value(path_draft)
+    assert priority.evaluate("node => node.keepThisNode") is True
+
+    order.locator('[data-order-direction="down"]').nth(2).click()
+    draft = order.locator("[data-source-label]").all_text_contents()
+    with page.expect_response("**/api/v1/metadata/sources/gcd_local") as disabled:
+        gcd.get_by_role("button", name="Disable GCD", exact=True).click()
+    assert disabled.value.status == 200
+    expect(gcd.get_by_role("status")).to_contain_text("GCD is disabled")
+    with page.expect_response("**/api/v1/metadata/priorities") as saved:
+        priority.get_by_role("button", name="Save metadata priority", exact=True).click()
+    assert saved.value.status == (409 if external_change else 200)
+    expect(order.locator("[data-source-label]")).to_have_text(draft)
+    assert priority.evaluate("node => node.keepThisNode") is True
+
+
 def test_metadata_priority_conflict_keeps_draft_and_rows(authed_page, seeded_server):
     page = authed_page
     SettingsPage(page, seeded_server).goto("metadata")

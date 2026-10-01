@@ -17,7 +17,7 @@
 </ol>
 {% endmacro %}
 
-<div x-data="metadataPriorityEditor()" @metadata-credentials-updated.window="refreshHealth()" data-testid="metadata-source-priority">
+<div x-data="metadataPriorityEditor()" @metadata-credentials-updated.window="sourceUpdated($event.detail)" data-testid="metadata-source-priority">
 {% call section_card(title="Metadata priority", title_style="plain", body_class="p-0") %}
   <div class="space-y-4 p-5">
     <p class="text-sm text-pb-text-sec">Put preferred sources first. Only enabled sources that support the requested information are used. Changing priority never changes a comic's identity.</p>

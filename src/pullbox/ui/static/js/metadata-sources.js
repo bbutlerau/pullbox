@@ -4,6 +4,12 @@ function gcdLocalSettings(seed, csrf) {
     gcdError: '', gcdMessage: '', gcdController: null, gcdAlive: true,
     destroy() { this.gcdAlive = false; this.gcdController?.abort(); },
     cancelGcd() { this.gcdController?.abort(); },
+    prioritiesUpdated(detail) {
+      const policy = detail?.policies?.find(item => item.source === 'gcd_local');
+      if (policy && this.gcdBase?.revision === detail.previousRevisions?.gcd_local) {
+        this.gcdBase = JSON.parse(JSON.stringify(policy));
+      }
+    },
     async reloadGcd() {
       if (this.gcdBusy) return;
       this.gcdBusy = true;
@@ -44,7 +50,9 @@ function gcdLocalSettings(seed, csrf) {
         this.gcdBase = data;
         this.gcdPath = data.settings.database_path || '';
         this.gcdMessage = enabled ? 'GCD is enabled. You can search, preview and add series.' : 'GCD is disabled. The database and its saved path are unchanged.';
-        window.dispatchEvent(new CustomEvent('metadata-credentials-updated'));
+        window.dispatchEvent(new CustomEvent('metadata-credentials-updated', {
+          detail: {source: 'gcd_local', previousRevision: base.revision, policy: data},
+        }));
       } catch (_) {
         if (this.gcdAlive) this.gcdError = 'Validation stopped or the connection was lost. Load saved GCD settings to confirm the current source before retrying.';
       } finally {
@@ -155,6 +163,17 @@ function metadataSourceSettings(seed, csrf) {
         this.refreshHealth();
       }
     },
+    sourceUpdated(detail) {
+      if (detail?.policy && detail.policy.source === detail.source) {
+        const current = this.sources.find(item => item.source === detail.source);
+        const descriptor = {...current, ...detail.policy};
+        // A same-page save may advance its own baseline, not an unseen external edit.
+        this.savedSources = this.savedSources.map(item =>
+          item.source === detail.source && item.revision === detail.previousRevision
+            ? clone(descriptor) : item);
+      }
+      this.refreshHealth();
+    },
     eligible(domain) {
       return this.order.filter(source => domain !== 'artwork' || !source.startsWith('gcd_'));
     },
@@ -229,11 +248,12 @@ function metadataSourceSettings(seed, csrf) {
     async save() {
       if (this.busy || !this.dirty) return;
       this.saving = true; this.error = ''; this.message = ''; this.conflict = false;
+      const revisions = Object.fromEntries(this.savedSources.map(item => [item.source, item.revision]));
       try {
         const response = await this.request('/api/v1/metadata/priorities', {
           method: 'PUT', body: JSON.stringify({
             order: this.order, domain_orders: this.domainOrders,
-            revisions: Object.fromEntries(this.savedSources.map(item => [item.source, item.revision])),
+            revisions,
           }),
         });
         if (response.status === 409) {
@@ -249,6 +269,9 @@ function metadataSourceSettings(seed, csrf) {
           this.metronBase = clone(data.find(item => item.source === 'metron_api'));
         }
         this.accept(data);
+        window.dispatchEvent(new CustomEvent('metadata-priorities-updated', {
+          detail: {previousRevisions: revisions, policies: data},
+        }));
         this.message = 'Metadata priority saved.';
       } catch (_) {
         if (this.alive) this.error = 'Could not save metadata priority. Your draft is kept; check the connection and retry.';
