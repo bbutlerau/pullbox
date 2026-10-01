@@ -1,5 +1,5 @@
 {% from "components/dropdown_select.html" import dropdown_select %}
-<section class="rounded-lg border border-pb-border bg-pb-card p-4 space-y-3" data-testid="issue-metadata-links" x-data="issueMetadataLinks({{ issue.id }})" aria-labelledby="issue-metadata-heading">
+<section class="rounded-lg border border-pb-border bg-pb-card p-4 space-y-3" data-testid="issue-metadata-links" x-data="issueMetadataLinks({{ issue.id }})" @issue-file-metadata-complete.window="load()" aria-labelledby="issue-metadata-heading">
   <div class="flex flex-wrap items-center justify-between gap-3">
     <div class="space-y-2">
       <h2 id="issue-metadata-heading" class="text-sm font-semibold text-pb-text">Metadata sources</h2>

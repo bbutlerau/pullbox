@@ -69,6 +69,9 @@ class RecordingLogger:
 
 
 class RecordingExecutor:
+    def get_execution_mode(self, config, context):
+        return "process"
+
     def __init__(self, apply_result: ApplyResult | None = None) -> None:
         self.apply_result = apply_result or ApplyResult()
         self.after_commit_calls: list[tuple[Any, ...]] = []

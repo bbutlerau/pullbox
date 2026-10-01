@@ -1,0 +1,45 @@
+<div x-data="issueFileMetadata({{ issue.id }})" class="mt-3 space-y-2" data-testid="issue-file-metadata">
+  <button type="button" class="btn-ghost btn-sm" @click="show()">Write file metadata</button>
+  <p class="text-sm text-pb-text-sec" x-show="active()" x-cloak>File metadata is being written in the background.</p>
+  <template x-teleport="body">
+    <div class="modal-shell" x-show="open" x-cloak @keydown.escape.window="if (open) close()" @keydown.tab.window="trapFocus($event)">
+      <div class="modal-backdrop" @click="close()"></div>
+      <section class="modal-panel max-w-2xl max-h-[90vh]" role="dialog" aria-modal="true" aria-labelledby="file-metadata-title" tabindex="-1" x-ref="dialog">
+        <header class="modal-header"><h2 id="file-metadata-title" class="modal-title">Write file metadata</h2></header>
+        <div class="modal-body space-y-4 p-5" :aria-busy="busy">
+          <p class="text-sm text-pb-text-sec">ComicInfo.xml and MetronInfo.xml will use the same reconciled metadata. Comic pages and your edits are preserved. This does not rename or move the file.</p>
+          <p class="text-sm text-pb-error" role="alert" x-show="error || (job && job.error)" x-text="error || (job && job.error)"></p>
+          <p class="text-sm text-pb-text-sec" role="status" x-show="busy && !job">Preparing metadata preview...</p>
+          <div x-show="preview && !job" class="space-y-3">
+            <p class="text-sm font-semibold text-pb-text break-all" x-text="preview && preview.file_name"></p>
+            <p class="text-sm text-pb-text-sec" x-show="preview && preview.unchanged">Both metadata files already match. No file rewrite is needed.</p>
+            <div class="space-y-2 max-h-80 overflow-y-auto" data-testid="file-metadata-changes">
+              <template x-for="(change, index) in (preview ? preview.changes : [])" :key="index">
+                <article class="rounded-lg border border-pb-border p-3 space-y-1">
+                  <p class="text-xs font-semibold text-pb-text break-all" x-text="change.document + ' · ' + change.field"></p>
+                  <p class="text-sm text-pb-text-sec break-words" x-text="'Current: ' + (change.before === null ? 'Not set' : change.before)"></p>
+                  <p class="text-sm text-pb-text break-words" x-text="'Proposed: ' + (change.after === null ? 'Not set' : change.after)"></p>
+                </article>
+              </template>
+            </div>
+          </div>
+          <div x-show="job" class="space-y-3">
+            <p class="text-sm text-pb-text" role="status" x-text="job && (job.state === 'COMPLETED' ? 'Both metadata files are up to date.' : job.message)"></p>
+            <div class="app-progress">
+              <div class="app-progress-track"><div class="app-progress-fill app-progress-fill--interactive" :class="{ 'is-indeterminate': job && job.percent === null }" :style="job && job.percent !== null ? 'width: ' + job.percent + '%' : ''" role="progressbar" aria-label="File metadata progress" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="job ? job.percent : null"></div></div>
+              <span class="app-progress-value" x-text="job && job.percent !== null ? Math.round(job.percent) + '%' : ''"></span>
+            </div>
+            <p class="text-sm text-pb-text-sec" x-show="active()">You can close this window. Progress is also shown in Background activity and Utilities.</p>
+            <a class="btn-ghost btn-sm" href="/utilities?tab=queue" x-show="job && job.state === 'PAUSED'">Resume in Utilities</a>
+          </div>
+        </div>
+        <footer class="modal-footer">
+          <button type="button" class="btn-ghost" @click="close()">Close</button>
+          <button type="button" class="btn-ghost" @click="cancel()" x-show="active()" :disabled="busy || (job && job.state === 'CANCELLING')">Cancel write</button>
+          <button type="button" class="btn-primary" @click="loadPreview()" x-show="!active() && (!preview || job) && (!job || job.state !== 'PAUSED')" :disabled="busy">Preview again</button>
+          <button type="button" class="btn-primary" @click="write()" x-show="preview && !job && !preview.unchanged" :disabled="busy">Write both metadata files</button>
+        </footer>
+      </section>
+    </div>
+  </template>
+</div>

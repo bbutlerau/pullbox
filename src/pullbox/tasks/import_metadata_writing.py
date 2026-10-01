@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from uuid import uuid4
 from zipfile import ZipFile
 
@@ -15,7 +16,7 @@ from pullbox.core.file_safety import (
     is_dangerous_file_blocking_enabled,
     is_resource_safety_exception_allowed,
 )
-from pullbox.core.metadata_identity import ExternalIdentityRef, IdentityNamespace, MetadataSource
+from pullbox.core.metadata_identity import MetadataSource
 from pullbox.models import LibraryFile
 from pullbox.models.import_job import (
     ImportControlRequest,
@@ -27,9 +28,8 @@ from pullbox.models.import_job import (
 from pullbox.models.library import FileFormat
 from pullbox.providers.base import IssueMetadata
 from pullbox.providers.metadata.comicvine_normalization import issue as normalize_comicvine_issue
-from pullbox.schemas.metadata_sources import MetadataDomain, ProviderIssueRead
 from pullbox.services.archive_metadata_binding import (
-    ArchiveMetadataBinding,
+    archive_primary_identity,
     assemble_bound_archive_metadata,
     inspect_archive_metadata_target,
     read_archive_metadata_binding,
@@ -42,33 +42,13 @@ from pullbox.services.archive_metadata_publication import (
     publish_archive_publication,
     record_archive_publication,
 )
-from pullbox.services.archive_metadata_reconciliation import (
-    ArchiveMetadataReconciliation,
-    reconcile_archive_metadata,
-)
+from pullbox.services.archive_metadata_reconciliation import reconcile_archive_metadata
 from pullbox.services.catalog.reader import CatalogIssueMetadata
 from pullbox.services.import_archive_publication import bind_import_archive_publication
 from pullbox.utilities.executors.archive_metadata_staging import stage_cbz_metadata_interruptible
 
-
-def _primary_identity(
-    binding: ArchiveMetadataBinding, archive: ArchiveMetadataReconciliation
-) -> ExternalIdentityRef | None:
-    identities = binding.metadata.issues[0].identities
-    if archive.metroninfo.metron is not None:
-        for item in archive.metroninfo.metron.identities:
-            if item.primary and item.evidence.identity in identities:
-                return item.evidence.identity
-    ranks: dict[IdentityNamespace, int] = {}
-    for policy in binding.metadata.policies:
-        rank = policy.domain_priorities.get(MetadataDomain.CORE, policy.priority)
-        namespace = policy.identity_namespace
-        ranks[namespace] = min(rank, ranks.get(namespace, rank))
-    return min(
-        identities,
-        key=lambda ref: (ranks.get(ref.namespace, 1001), ref.namespace.value, ref.external_id),
-        default=None,
-    )
+if TYPE_CHECKING:
+    from pullbox.schemas.metadata_sources import ProviderIssueRead
 
 
 async def write_imported_archive_metadata(
@@ -164,7 +144,7 @@ async def write_imported_archive_metadata(
         issue,
         max_uncompressed_bytes=limit,
         block_dangerous=block_dangerous,
-        primary_identity=_primary_identity(binding, archive),
+        primary_identity=archive_primary_identity(binding, archive),
         previous_series=binding.metadata.series.baseline,
         previous_issue=binding.metadata.issues[0].baseline,
         cancellation_check=check_control,

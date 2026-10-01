@@ -350,6 +350,7 @@ async def test_lifespan_starts_background_services_and_shuts_down_cleanly(
             "db_check_cleanup",
             "export_library",
             "file_convert",
+            "file_metadata",
             "integrity_check",
             "library_permissions",
             "mass_convert_pipeline",

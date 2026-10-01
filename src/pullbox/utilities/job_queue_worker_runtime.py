@@ -34,7 +34,9 @@ def build_worker_runtime(
 ) -> WorkerRuntime:
     """Build the worker pool and batch size for one utility dispatch run."""
     execution_mode = executor.get_execution_mode(config, job_context)
-    batch_size = 1 if execution_mode == ExecutionMode.SERIAL else worker_count
+    batch_size = (
+        1 if execution_mode in {ExecutionMode.SERIAL, ExecutionMode.ASYNC} else worker_count
+    )
     factory_signature = signature(worker_pool_factory)
     accepts_execution_mode = "execution_mode" in factory_signature.parameters or any(
         param.kind == Parameter.VAR_KEYWORD for param in factory_signature.parameters.values()
@@ -66,6 +68,19 @@ async def _iter_rollback_processed_items(
         yield processed
 
 
+async def _iter_async_processed_items(
+    *,
+    payloads: list[dict[str, Any]],
+    executor: JobExecutor,
+    config: dict[str, Any],
+    job_context: dict[str, Any] | None,
+) -> Any:
+    for payload in payloads:
+        processed = await executor.process_item_async(payload, config, job_context)
+        processed.worker_id = 1
+        yield processed
+
+
 def build_processed_item_stream(
     *,
     job_type: str,
@@ -76,6 +91,10 @@ def build_processed_item_stream(
     job_context: dict[str, Any] | None,
 ) -> Any:
     """Return the async processed-item stream for one batch."""
+    if executor.get_execution_mode(config, job_context) is ExecutionMode.ASYNC:
+        return _iter_async_processed_items(
+            payloads=payloads, executor=executor, config=config, job_context=job_context
+        )
     if job_type == JobType.ROLLBACK:
         return _iter_rollback_processed_items(
             payloads=payloads,

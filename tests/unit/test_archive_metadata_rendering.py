@@ -176,6 +176,45 @@ def test_unassembled_local_values_cannot_be_overwritten_or_erased(old, new):
         )
 
 
+@pytest.mark.parametrize(
+    "embedded,canonical",
+    [
+        ("Civil War - Unmasked", "Civil War: Unmasked"),
+        ("Batman - The Dark Knight - Golden Dawn", "Batman: The Dark Knight: Golden Dawn"),
+    ],
+)
+def test_exact_issue_anchor_allows_series_separator_aliases(embedded, canonical):
+    series, issue = snapshots()
+    series = series.model_copy(update={"values": MetadataValues(title=canonical)})
+    incoming = files(
+        ci=(
+            f"<ComicInfo><Series>{embedded}</Series>"
+            "<Web>https://comicvine.gamespot.com/issue/4000-7/</Web></ComicInfo>"
+        )
+    )
+    pair = render_archive_metadata(series, issue, incoming)
+    assert ET.fromstring(pair.comicinfo).findtext("Series") == canonical
+    assert parse_metroninfo(pair.metroninfo).series == canonical
+
+
+@pytest.mark.parametrize(
+    "embedded,canonical,anchored",
+    [
+        ("Civil War - Unmasked", "Civil War: Unmasked", False),
+        ("X-Men", "X Men", True),
+        ("Different Book", "Civil War: Unmasked", True),
+    ],
+)
+def test_series_aliases_never_authorize_unbound_or_semantic_changes(embedded, canonical, anchored):
+    series, issue = snapshots()
+    series = series.model_copy(update={"values": MetadataValues(title=canonical)})
+    web = "<Web>https://comicvine.gamespot.com/issue/4000-7/</Web>" if anchored else ""
+    with pytest.raises(ArchiveMetadataRenderError, match="unreconciled_field"):
+        render_archive_metadata(
+            series, issue, files(ci=f"<ComicInfo><Series>{embedded}</Series>{web}</ComicInfo>")
+        )
+
+
 @pytest.mark.parametrize("value", [None, "", "Reviewed title"])
 def test_explicit_user_override_updates_or_clears_both_documents(value):
     series, issue = snapshots(title=value)

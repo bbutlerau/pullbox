@@ -60,6 +60,7 @@ class ArchivePublicationPlan(BaseModel):
     series: MetadataSnapshot
     issue: MetadataSnapshot
     import_owner: ImportArchiveOwner | None = None
+    metadata_job_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
 
 
 @dataclass(frozen=True)

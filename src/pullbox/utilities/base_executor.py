@@ -22,6 +22,7 @@ class ExecutionMode(enum.StrEnum):
     SERIAL = "serial"
     THREAD = "thread"
     PROCESS = "process"
+    ASYNC = "async"
 
 
 class ItemResult(enum.StrEnum):
@@ -110,6 +111,15 @@ class JobExecutor(ABC):
     """
 
     execution_mode: ExecutionMode = ExecutionMode.PROCESS
+
+    async def process_item_async(
+        self,
+        item_data: dict[str, Any],
+        job_config: dict[str, Any],
+        job_context: dict[str, Any] | None = None,
+    ) -> ProcessedItem:
+        """Async workflows own short DB sessions and offload archive work."""
+        raise NotImplementedError("This executor does not support async item processing")
 
     @abstractmethod
     async def generate_items(

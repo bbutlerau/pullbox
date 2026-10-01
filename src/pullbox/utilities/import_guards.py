@@ -31,6 +31,7 @@ def utility_job_mutates_library(job_type: str, config: dict[str, Any]) -> bool:
         JobType.MASS_CONVERT_PIPELINE.value,
         JobType.MASS_RENAME.value,
         JobType.ROLLBACK.value,
+        JobType.FILE_METADATA.value,
     }:
         return True
 

@@ -763,6 +763,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     from pullbox.utilities.executors.db_check_cleanup import DBCheckCleanupExecutor
     from pullbox.utilities.executors.export_library import ExportLibraryExecutor
     from pullbox.utilities.executors.file_converter import FileConverterExecutor
+    from pullbox.utilities.executors.file_metadata import FileMetadataExecutor
     from pullbox.utilities.executors.integrity_checker import IntegrityCheckerExecutor
     from pullbox.utilities.executors.library_permissions import LibraryPermissionsExecutor
     from pullbox.utilities.executors.mass_convert_pipeline import MassConvertPipelineExecutor
@@ -774,6 +775,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
 
     queue_mgr = JobQueueManager(session_factory=get_session_factory())
     queue_mgr.register_executor("file_convert", FileConverterExecutor)
+    queue_mgr.register_executor("file_metadata", FileMetadataExecutor)
     queue_mgr.register_executor("mass_convert_pipeline", MassConvertPipelineExecutor)
     queue_mgr.register_executor("mass_rename", MassRenameExecutor)
     queue_mgr.register_executor("integrity_check", IntegrityCheckerExecutor)

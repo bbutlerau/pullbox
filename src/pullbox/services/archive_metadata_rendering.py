@@ -1,5 +1,6 @@
 """Render coordinated metadata without authorizing filesystem or identity changes."""
 
+import re
 from dataclasses import dataclass
 from xml.etree import ElementTree as ET
 
@@ -231,6 +232,16 @@ def _guard_values(
                         _format_text(existing.series_type),
                         _format_text(snapshot.values.series_type),
                     )
+                if (
+                    field == "title"
+                    and snapshot.entity_kind is MetadataEntityKind.SERIES
+                    and isinstance(old, str)
+                    and isinstance(new, str)
+                    and _series_separator_key(old) == _series_separator_key(new)
+                    and any(item.identity in issue.identities for item in archive.evidence)
+                ):
+                    # Only a proven exact issue can reconcile filesystem-safe subtitle separators.
+                    continue
                 if old != new and not _authorized(
                     snapshot,
                     previous,
@@ -275,6 +286,11 @@ def _guard_values(
                 )
             ):
                 raise ArchiveMetadataRenderError("unreconciled_field", "cover_date")
+
+
+def _series_separator_key(value: str) -> str:
+    value = re.sub(r"\s+[-\u2013\u2014]\s+", " : ", value)
+    return " ".join(value.replace(":", " : ").casefold().split())
 
 
 def _render_core(

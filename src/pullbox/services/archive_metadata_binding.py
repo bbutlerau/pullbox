@@ -16,12 +16,16 @@ from pullbox.core.library_file_ownership import (
     ReferencedFileMutationError,
     require_mutable_library_target,
 )
-from pullbox.core.metadata_identity import IdentityNamespace, MetadataEntityKind
+from pullbox.core.metadata_identity import (
+    ExternalIdentityRef,
+    IdentityNamespace,
+    MetadataEntityKind,
+)
 from pullbox.core.metadata_identity_state import IdentityVerificationState
 from pullbox.models import Issue, LibraryFile, LibraryRoot
 from pullbox.models.library import FileFormat, LibraryFileStorageMode
 from pullbox.schemas.metadata_snapshot import MetadataSnapshot
-from pullbox.schemas.metadata_sources import ProviderIssueRead
+from pullbox.schemas.metadata_sources import MetadataDomain, ProviderIssueRead
 from pullbox.services.archive_metadata_reconciliation import ArchiveMetadataReconciliation
 from pullbox.services.metadata_assembly import assemble_metadata
 from pullbox.services.metadata_series_refresh_state import (
@@ -53,6 +57,27 @@ class ArchiveMetadataBinding:
     file_size: int
     file_modified_at: datetime
     metadata: SeriesRefreshState
+
+
+def archive_primary_identity(
+    binding: ArchiveMetadataBinding, archive: ArchiveMetadataReconciliation
+) -> ExternalIdentityRef | None:
+    """Retain a verified embedded primary, otherwise use saved core-field priority."""
+    identities = binding.metadata.issues[0].identities
+    if archive.metroninfo.metron is not None:
+        for item in archive.metroninfo.metron.identities:
+            if item.primary and item.evidence.identity in identities:
+                return item.evidence.identity
+    ranks: dict[IdentityNamespace, int] = {}
+    for policy in binding.metadata.policies:
+        rank = policy.domain_priorities.get(MetadataDomain.CORE, policy.priority)
+        namespace = policy.identity_namespace
+        ranks[namespace] = min(rank, ranks.get(namespace, rank))
+    return min(
+        identities,
+        key=lambda ref: (ranks.get(ref.namespace, 1001), ref.namespace.value, ref.external_id),
+        default=None,
+    )
 
 
 async def read_archive_metadata_binding(
