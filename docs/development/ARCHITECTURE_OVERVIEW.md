@@ -673,9 +673,22 @@ series/browser/bulk deletion behavior is activated by this housekeeping boundary
 
 The existing import/cache consumers have not yet migrated to this registry.
 Metron has token settings, bounded transport and
-series/issue/arc adapter operations; GCD execution remains unimplemented, and
-GCD API v2 is additionally disabled by the release feature flag. Capability
+series/issue/arc adapter operations. GCD Local validates and reads an official
+SQLite dump in query-only mode for bounded series/issue discovery and refresh;
+GCD API v2 execution remains disabled by the release feature flag. Capability
 lists describe implemented adapter operations, not planned features.
+
+`series_sidecar.py` exposes an explicit Series Details preview/write boundary for
+`series.json`. It assembles the saved canonical series snapshot without provider
+calls or issue-catalog reads, retains verified links and provenance, and preserves
+safe existing Mylar/custom JSON fields. Approval binds metadata, root policy,
+folder ownership, and existing file evidence. Reference-only, shared, ambiguous,
+linked, and read-only locations remain untouched. Split series receive equivalent
+compiled metadata only in their individually eligible managed folders. Staging
+runs off-thread outside write admission; short atomic publication revalidates
+metadata, folder evidence, active imports, and existing publication/removal guards.
+Cancellation drains the current short item and its cleanup before stopping. This
+does not activate automatic import writers, rewrite archives, or change deletion.
 
 **Required standard**
 

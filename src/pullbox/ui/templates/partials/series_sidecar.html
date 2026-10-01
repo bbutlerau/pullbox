@@ -1,0 +1,48 @@
+<div x-data="seriesSidecar({{ series.id }})" data-testid="series-sidecar">
+  <button type="button" class="btn-ghost btn-sm" @click="show()">Write series metadata</button>
+  <template x-teleport="body">
+    <div class="modal-shell" x-show="open" x-cloak @keydown.escape.window="if (open) close()" @keydown.tab.window="trapFocus($event)">
+      <div class="modal-backdrop" @click="close()"></div>
+      <section class="modal-panel max-w-2xl max-h-[90vh]" role="dialog" aria-modal="true" aria-labelledby="series-sidecar-title" tabindex="-1" x-ref="dialog">
+        <header class="modal-header"><h2 id="series-sidecar-title" class="modal-title">Write series metadata</h2></header>
+        <div class="modal-body space-y-4 p-5" :aria-busy="busy">
+          <p class="text-sm text-pb-text-sec">Save the library's reconciled metadata and verified provider links to series.json in this series' managed folders. Safe custom JSON fields are preserved. Comic files, Mylar references, and import history are not changed.</p>
+          <p class="text-sm text-pb-text-sec">Reference-only, shared, and unsafe locations stay unchanged. No providers are contacted. Each sidecar is written atomically; a blocked folder does not prevent another safe folder from being updated.</p>
+          <p class="text-sm text-pb-error" role="alert" x-show="error" x-text="error"></p>
+          <p class="text-sm text-pb-text-sec" x-show="busy" x-text="preview ? 'Writing series metadata...' : 'Preparing series metadata preview...'"></p>
+          <p class="text-sm text-pb-text" role="status" x-show="result" x-text="summary()"></p>
+          <div class="space-y-3" x-show="preview">
+            <div class="rounded-lg border border-pb-border p-3 space-y-2">
+              <p class="text-sm font-semibold text-pb-text" x-text="preview && preview.snapshot.values.title"></p>
+              <p class="text-sm text-pb-text-sec" x-text="preview && [preview.snapshot.values.publisher, preview.snapshot.values.year_start, preview.snapshot.values.issue_count === null ? null : preview.snapshot.values.issue_count + ' issues'].filter(value => value !== null && value !== undefined).join(' · ')"></p>
+              <div class="flex flex-wrap gap-2">
+                <template x-for="identity in (preview ? preview.snapshot.identities : [])" :key="identity.namespace">
+                  <span class="pill pill-neutral" x-text="identity.namespace + ' ' + identity.external_id"></span>
+                </template>
+              </div>
+              <details>
+                <summary class="text-sm text-pb-text-sec cursor-pointer">Compiled metadata</summary>
+                <pre class="mt-2 max-h-60 overflow-auto whitespace-pre-wrap break-words text-xs text-pb-text-sec" x-text="preview && JSON.stringify({ snapshot: preview.snapshot, aliases: preview.aliases }, null, 2)"></pre>
+              </details>
+            </div>
+            <div class="space-y-2 max-h-60 overflow-y-auto" data-testid="series-sidecar-targets">
+              <template x-for="target in targets()" :key="target.directory">
+                <article class="rounded-lg border border-pb-border p-3 space-y-1">
+                  <p class="text-sm font-semibold text-pb-text break-all" x-text="target.directory"></p>
+                  <p class="text-sm text-pb-text-sec" x-text="actionLabel(target.action)"></p>
+                  <p class="text-sm text-pb-warning" x-show="target.reason" x-text="target.reason"></p>
+                </article>
+              </template>
+            </div>
+            <p class="text-sm text-pb-text-sec" x-show="preview && !preview.targets.length">No registered series folder is available. Set a managed series location before writing metadata.</p>
+          </div>
+        </div>
+        <footer class="modal-footer">
+          <button type="button" class="btn-ghost" @click="close()">Close</button>
+          <button type="button" class="btn-ghost" @click="loadPreview()" :disabled="busy">Preview again</button>
+          <button type="button" class="btn-primary" @click="write()" :disabled="busy || !preview || !preview.ready || !!result">Write series.json</button>
+        </footer>
+      </section>
+    </div>
+  </template>
+</div>

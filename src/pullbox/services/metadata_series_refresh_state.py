@@ -105,6 +105,7 @@ async def read_series_refresh_state(
     *,
     issue_ids: tuple[int, ...] | None = None,
     allow_partial_catalog: bool = False,
+    include_issues: bool = True,
 ) -> SeriesRefreshState:
     """Capture a catalog or a bounded exact subset using the same value mapping."""
     if allow_partial_catalog and issue_ids is None:
@@ -184,6 +185,19 @@ async def read_series_refresh_state(
         series.comicvine_id,
         frozenset({"status", "year_end"}) if series.status_override else frozenset(),
     )
+    if not include_issues:
+        if issue_ids is not None:
+            raise ValueError("Series-only reads cannot select issues.")
+        return SeriesRefreshState(
+            parent,
+            (),
+            tuple(
+                item.model_copy(
+                    update={"last_tested_at": None, "last_success_at": None, "last_status": None}
+                )
+                for item in await read_source_policies(session)
+            ),
+        )
     members = (
         await session.execute(
             select(Issue, IssueMetadataBaseline.revision, IssueMetadataBaseline.snapshot_json)
