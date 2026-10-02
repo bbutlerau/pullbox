@@ -319,8 +319,9 @@ async def test_nested_library_root_is_not_disposable_trash(identity_probe_db, tm
     assert result.retained_entries >= 1
 
 
+@pytest.mark.parametrize("connection_start_delay", [0, 3])
 async def test_directory_discovery_does_not_hold_database_writer(
-    identity_probe_db, tmp_path, monkeypatch
+    identity_probe_db, tmp_path, monkeypatch, connection_start_delay
 ):
     _, factory, _ = identity_probe_db
     trash = tmp_path / "trash"
@@ -331,23 +332,26 @@ async def test_directory_discovery_does_not_hold_database_writer(
 
     def paused(root):
         entered.set()
-        assert release.wait(10)
+        assert release.wait(30)
         yield from real(root)
 
     monkeypatch.setattr(cleanup, "walk_trash", paused)
     async with factory() as session:
         task = asyncio.create_task(cleanup_trash(session, trash))
-        assert await asyncio.to_thread(entered.wait, 5)
         try:
+            assert await asyncio.to_thread(entered.wait, 10)
 
             async def write():
+                await asyncio.sleep(connection_start_delay)
                 async with factory.begin() as other:
                     await lock_file_mutation_admission(other)
 
-            await asyncio.wait_for(write(), 2)
+            # A deadlock watchdog, not a latency budget: commit must precede walker release.
+            await asyncio.wait_for(write(), 10)
+            assert not release.is_set()
         finally:
             release.set()
-        result = await asyncio.wait_for(task, 5)
+            result = await asyncio.wait_for(task, 10)
     assert result.deleted_entries == 1
 
 

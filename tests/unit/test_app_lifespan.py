@@ -173,6 +173,9 @@ def _settings(tmp_path, *, startup_update_check_enabled: bool) -> SimpleNamespac
 def patched_lifespan(monkeypatch: pytest.MonkeyPatch, tmp_path):
     """Patch expensive startup dependencies while preserving lifespan control flow."""
     import pullbox.app as app
+    from pullbox.ui import routes as ui_routes
+
+    monkeypatch.setattr(ui_routes, "_cached_instance_name", ui_routes._cached_instance_name)
 
     _FakeImportRunner.instances.clear()
     _FakeDirectRuntime.instances.clear()

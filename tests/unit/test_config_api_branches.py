@@ -264,6 +264,9 @@ async def test_update_config_applies_runtime_side_effects_and_restart_response(
     db_session: AsyncSession,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from pullbox.ui import routes as ui_routes
+
+    monkeypatch.setattr(ui_routes, "_cached_instance_name", ui_routes._cached_instance_name)
     db_session.add(User(username="admin", password_hash=AuthService.hash_password("Test@1234")))
     await db_session.flush()
 
@@ -335,6 +338,7 @@ async def test_update_config_applies_runtime_side_effects_and_restart_response(
         },
     )
 
+    assert ui_routes.get_instance_name() == "Pullbox Lab"
     assert response["restart_required"] is True
     assert response["restart_required_keys"] == [
         "https_cert_path",
