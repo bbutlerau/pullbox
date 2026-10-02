@@ -3,9 +3,10 @@
 import httpx
 import pytest
 from sqlalchemy import func, select, update
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from pullbox.core.provider_cooldown import ProviderCooldown
-from pullbox.models import Issue, Series, StoryArc, StoryArcExternalIdentity
+from pullbox.models import Base, Issue, Series, StoryArc, StoryArcExternalIdentity
 from pullbox.models.config import SystemConfig
 from pullbox.models.library import LibraryRoot
 from pullbox.models.metadata_identity import IssueIdentityEvent
@@ -17,6 +18,19 @@ from tests.unit.test_metron_source import envelope, issue_row, series_row
 
 pytest_plugins = ["conftest_security"]
 BASE = "/api/v1/metadata/story-arcs/catalog"
+
+
+@pytest.fixture
+async def sec_db(tmp_path_factory):
+    # Cache/account sessions must not invalidate the request's shared StaticPool connection.
+    path = tmp_path_factory.mktemp("arc-catalog-db") / "database.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        yield async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()
 
 
 @pytest.fixture
@@ -114,6 +128,15 @@ async def preview(client, fixture):
     result = await client.post(BASE + "/preview", json=fixture["selection"], headers=csrf(client))
     assert result.status_code == 200, result.text
     return result.json()
+
+
+async def test_arc_catalog_sessions_survive_peer_connection_invalidation(sec_db):
+    async with sec_db() as reader, sec_db() as peer:
+        assert await reader.scalar(select(func.count()).select_from(StoryArc)) == 0
+        connection = await peer.connection()
+        await connection.invalidate()
+        await peer.rollback()
+        assert await reader.scalar(select(func.count()).select_from(StoryArc)) == 0
 
 
 async def test_catalog_add_revalidates_saved_response_through_real_adapter(

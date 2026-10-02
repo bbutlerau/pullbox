@@ -10,10 +10,12 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from pullbox.models import Base
 from pullbox.models.config import SystemConfig
 from pullbox.models.library import LibraryRoot
 from pullbox.models.metadata_source import MetadataSourceConfig
@@ -27,9 +29,22 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from httpx import AsyncClient
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 pytest_plugins = ["conftest_security"]
+
+
+@pytest.fixture
+async def sec_db(tmp_path_factory):
+    # Cache/account sessions must not invalidate the request's shared StaticPool connection.
+    path = tmp_path_factory.mktemp("arc-catalog-db") / "database.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        yield async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()
 
 
 @pytest.fixture
@@ -74,6 +89,15 @@ def _review_fields(response) -> dict[str, str]:
         for name in ("fingerprint", "source_revision", "file_defaults_fingerprint")
         if (match := re.search(rf'name="{name}" value="([^"]+)"', response.text))
     }
+
+
+async def test_arc_catalog_sessions_survive_peer_connection_invalidation(sec_db):
+    async with sec_db() as reader, sec_db() as peer:
+        assert await reader.scalar(select(func.count()).select_from(StoryArc)) == 0
+        connection = await peer.connection()
+        await connection.invalidate()
+        await peer.rollback()
+        assert await reader.scalar(select(func.count()).select_from(StoryArc)) == 0
 
 
 async def test_registry_links_to_dedicated_comicvine_add_page(
