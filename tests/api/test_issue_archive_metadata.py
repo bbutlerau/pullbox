@@ -2,14 +2,17 @@
 
 import os
 import sys
+from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
+from pathlib import Path
 from xml.etree import ElementTree as ET
 from zipfile import ZipFile
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from pullbox.models import Issue, LibraryFile
+from pullbox.models import Base, Issue, LibraryFile
 from pullbox.models.library import LibraryFileStorageMode
 from pullbox.services.archive_metadata_rendering import ArchiveMetadataRenderError
 from pullbox.services.issue_file_metadata import file_metadata_error
@@ -21,6 +24,25 @@ from tests.integration.metadata_identity.test_archive_metadata_publication impor
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 pytest_plugins = ["conftest_security"]
+
+
+@pytest.fixture
+async def sec_db(tmp_path: Path) -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
+    # Background progress and publication use independent sessions, not one StaticPool connection.
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'archive-metadata.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    try:
+        yield async_sessionmaker(engine, expire_on_commit=False)
+    finally:
+        await engine.dispose()
+
+
+async def test_background_sessions_have_independent_transactions(sec_db):
+    async with sec_db() as writer, sec_db() as observer, writer.begin_nested():
+        assert await writer.scalar(text("SELECT 1")) == 1
+        assert await observer.scalar(text("SELECT 1")) == 1
+        await observer.commit()
 
 
 @pytest.mark.parametrize("field", ["title", "issue_count", "credits"])

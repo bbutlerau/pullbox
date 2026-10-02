@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import structlog
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import OperationalError
 from structlog.testing import capture_logs
@@ -642,6 +643,10 @@ async def test_artwork_failure_does_not_report_committed_metadata_as_failed(
     monkeypatch.setattr(refresh.ProviderArtworkClient, "download_cover", download)
     monkeypatch.setattr(Path, "replace", reject_publish)
     with capture_logs() as logs:
+        # A logger cached before app reconfiguration still holds the old processor list.
+        monkeypatch.setattr(
+            refresh, "logger", structlog.wrap_logger(None, cache_logger_on_first_use=False)
+        )
         async with factory() as session:
             response = await routes.refresh_series(series_id, User(username="tester"), session)
             assert response.description == "Committed metadata"
