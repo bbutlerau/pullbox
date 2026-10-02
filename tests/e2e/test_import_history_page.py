@@ -10,6 +10,29 @@ from tests.e2e.pages.import_page import ImportPage
 pytestmark = pytest.mark.e2e
 
 
+@pytest.fixture
+def latest_matching_job(seeded_server):
+    """Own the latest matching job without altering other tests' active imports."""
+    from sqlalchemy import delete
+
+    from pullbox.database import get_session_factory
+    from pullbox.models.import_job import ImportJob
+    from tests.e2e.conftest import _run_async_blocking
+    from tests.ui.test_import_collection_shell_ui_routes import _seed_import_progress_job
+
+    factory = get_session_factory()
+    job_id = _run_async_blocking(_seed_import_progress_job(factory, status="matching"))
+
+    async def remove_job():
+        async with factory.begin() as session:
+            await session.execute(delete(ImportJob).where(ImportJob.id == job_id))
+
+    try:
+        yield job_id
+    finally:
+        _run_async_blocking(remove_job())
+
+
 class TestImportHistoryTab:
     """Behavior-first E2E checks for the Import workspace history tab."""
 
@@ -237,12 +260,11 @@ class TestImportHistoryTab:
         self,
         authed_page,
         seeded_server: str,  # type: ignore[no-untyped-def]
+        latest_matching_job: int,
     ) -> None:
         import_page = ImportPage(authed_page, seeded_server)
         import_page.goto(tab="history")
-        matching_job_id = self._active_matching_job_id(authed_page)
-
-        assert matching_job_id is not None
+        matching_job_id = latest_matching_job
 
         import_page.workspace_tab("collection").click()
         import_page.progress_panel.wait_for(state="visible", timeout=5000)

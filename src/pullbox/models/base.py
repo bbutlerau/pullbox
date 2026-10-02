@@ -21,8 +21,9 @@ class UTCDateTime(TypeDecorator[datetime]):
     so Pydantic serializes it with +00:00/Z and downstream code never
     has to guess whether a timestamp is UTC or local.
 
-    Write path: strips tzinfo before storage (SQLite ignores it anyway).
-    Read path: attaches UTC tzinfo to naive datetimes coming from SQLite.
+    SQLite stores naive UTC. PostgreSQL receives aware UTC so its timestamptz
+    driver cannot interpret a naive value in the process's local timezone.
+    Naive input and database values are interpreted as UTC, never local time.
     """
 
     impl = DateTime(timezone=True)
@@ -32,9 +33,8 @@ class UTCDateTime(TypeDecorator[datetime]):
         """Normalize to UTC before storing."""
         if value is None:
             return None
-        if value.tzinfo is not None:
-            return value.astimezone(UTC).replace(tzinfo=None)
-        return value
+        normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+        return normalized if dialect.name == "postgresql" else normalized.replace(tzinfo=None)
 
     def process_result_value(self, value: datetime | None, dialect: Any) -> datetime | None:
         """Tag naive datetimes from the DB as UTC."""
@@ -42,7 +42,7 @@ class UTCDateTime(TypeDecorator[datetime]):
             return None
         if value.tzinfo is None:
             return value.replace(tzinfo=UTC)
-        return value
+        return value.astimezone(UTC)
 
 
 class Base(DeclarativeBase):

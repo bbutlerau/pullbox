@@ -1,0 +1,24 @@
+<section x-show="retryOpen" x-cloak data-testid="metadata-deferred-work" class="space-y-3 border-t border-pb-border p-5" aria-label="Deferred metadata work" :aria-busy="retryLoading">
+  <div class="flex flex-wrap items-center justify-between gap-3">
+    <h3 class="text-sm font-medium text-pb-text" x-text="retrySource ? labels[retrySource] + ' deferred work' : 'All deferred metadata work'"></h3>
+    <button type="button" class="btn-ghost" :disabled="retryLoading" @click="closeRetries()">Close deferred work</button>
+  </div>
+  <p class="text-sm text-pb-text-sec">Series can have separate issue checks and metadata refreshes waiting. Files and reading progress are unchanged.</p>
+  <p role="status" class="text-sm text-pb-text-sec" x-text="retryLoading ? 'Loading deferred work...' : retryPage.total + ' pending tasks'"></p>
+  <p role="alert" x-show="retryError" class="text-sm text-pb-danger" x-text="retryError"></p>
+  <ul class="divide-y divide-pb-border">
+    <template x-for="row in retryPage.items" :key="row.id">
+      <li class="space-y-1 py-3">
+        <a class="text-sm font-medium text-pb-text underline" :href="'/series/' + row.series_id" x-text="row.series_title"></a>
+        <p class="text-sm text-pb-text-sec" x-text="(labels[row.source] || 'Metadata sources') + ' / ' + (row.task_id === 'sync_new_issues' ? 'New issue check' : 'Metadata refresh')"></p>
+        <p class="text-sm text-pb-text-sec" x-text="retryState(row)"></p>
+      </li>
+    </template>
+  </ul>
+  <p x-show="!retryLoading && !retryError && !retryPage.items.length" class="text-sm text-pb-text-sec">No deferred work on this page. Refresh the list or check an earlier page.</p>
+  <nav aria-label="Deferred work pages" class="flex flex-wrap items-center justify-end gap-2">
+    <button type="button" class="btn-ghost" :disabled="retryLoading" @click="loadRetries(retryPage.offset)">Refresh list</button>
+    <button type="button" class="btn-ghost" :disabled="retryLoading || retryPage.offset === 0" @click="loadRetries(Math.max(0, retryPage.offset - retryPage.limit))">Previous</button>
+    <button type="button" class="btn-ghost" :disabled="retryLoading || !retryPage.has_more" @click="loadRetries(retryPage.offset + retryPage.limit)">Next</button>
+  </nav>
+</section>

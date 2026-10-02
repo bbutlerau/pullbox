@@ -173,6 +173,9 @@ def _settings(tmp_path, *, startup_update_check_enabled: bool) -> SimpleNamespac
 def patched_lifespan(monkeypatch: pytest.MonkeyPatch, tmp_path):
     """Patch expensive startup dependencies while preserving lifespan control flow."""
     import pullbox.app as app
+    from pullbox.ui import routes as ui_routes
+
+    monkeypatch.setattr(ui_routes, "_cached_instance_name", ui_routes._cached_instance_name)
 
     _FakeImportRunner.instances.clear()
     _FakeDirectRuntime.instances.clear()
@@ -197,6 +200,14 @@ def patched_lifespan(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
     async def no_op_count(*_args: object, **_kwargs: object) -> int:
         return 0
+
+    async def recover_conversions(_session: object) -> int:
+        _LIFESPAN_EVENTS.append("conversion_recovery_completed")
+        return 1
+
+    async def recover_removals(_session: object) -> int:
+        _LIFESPAN_EVENTS.append("removal_recovery_completed")
+        return 1
 
     def session_factory() -> _FakeSession:
         return _FakeSession()
@@ -237,6 +248,14 @@ def patched_lifespan(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setattr(app, "_run_debug_logging_expiry_enforcer", neverending_debug_enforcer)
     monkeypatch.setattr(app, "get_event_bus", lambda: event_bus)
     monkeypatch.setattr(app, "get_session_factory", lambda: session_factory)
+    monkeypatch.setattr(
+        "pullbox.services.library_removal.recover_library_removals",
+        recover_removals,
+    )
+    monkeypatch.setattr(
+        "pullbox.services.library_conversion_recovery.recover_library_conversions",
+        recover_conversions,
+    )
     monkeypatch.setattr(app, "load_system_config_values", load_config_values)
     monkeypatch.setattr(app, "get_scheduler", lambda: scheduler)
     monkeypatch.setattr(app, "dispose_engine", no_op_async)
@@ -253,8 +272,8 @@ def patched_lifespan(monkeypatch: pytest.MonkeyPatch, tmp_path):
         lambda *_args: asyncio.sleep(0),
     )
     monkeypatch.setattr(
-        "pullbox.utilities.settings.cleanup_utility_trash_retention",
-        lambda *_args: None,
+        "pullbox.services.library_trash_cleanup.cleanup_trash",
+        lambda *_args, **_kwargs: asyncio.sleep(0),
     )
     monkeypatch.setattr(
         "pullbox.utilities.settings.resolve_utility_directory",
@@ -334,6 +353,7 @@ async def test_lifespan_starts_background_services_and_shuts_down_cleanly(
             "db_check_cleanup",
             "export_library",
             "file_convert",
+            "file_metadata",
             "integrity_check",
             "library_permissions",
             "mass_convert_pipeline",
@@ -395,9 +415,15 @@ async def test_import_recovery_completes_before_scheduler_can_start(
     async with patched_lifespan.app.lifespan(FastAPI()):
         assert "import_recovery_completed" in _LIFESPAN_EVENTS
         assert "scheduler_started" in _LIFESPAN_EVENTS
-        assert _LIFESPAN_EVENTS.index("import_recovery_completed") < _LIFESPAN_EVENTS.index(
-            "scheduler_started"
-        )
+    assert _LIFESPAN_EVENTS.index("removal_recovery_completed") < _LIFESPAN_EVENTS.index(
+        "conversion_recovery_completed"
+    )
+    assert _LIFESPAN_EVENTS.index("conversion_recovery_completed") < _LIFESPAN_EVENTS.index(
+        "import_recovery_completed"
+    )
+    assert _LIFESPAN_EVENTS.index("import_recovery_completed") < _LIFESPAN_EVENTS.index(
+        "scheduler_started"
+    )
 
 
 @pytest.mark.asyncio

@@ -29,7 +29,23 @@ def test_production_check_rejects_development_scanner_packages(
 def test_production_check_accepts_runtime_without_scanner(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(runtime, "find_spec", lambda name: None)
     monkeypatch.setattr(runtime.pyexpat, "version_info", runtime.MINIMUM_EXPAT_VERSION)
+    monkeypatch.setattr(runtime, "verify_paired_pdf_boundary", lambda: None, raising=False)
     runtime.main()
+
+
+def test_production_check_requires_real_paired_pdf_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+    monkeypatch.setattr(runtime, "find_spec", lambda name: None)
+    monkeypatch.setattr(runtime.pyexpat, "version_info", runtime.MINIMUM_EXPAT_VERSION)
+    monkeypatch.setattr(
+        runtime, "verify_paired_pdf_boundary", lambda: calls.append("PDF"), raising=False
+    )
+    runtime.main()
+    assert calls == ["PDF"], (
+        "Production image must exercise its actual PDF renderer and paired worker"
+    )
 
 
 def test_production_check_rejects_runtime_without_utf16_guard(

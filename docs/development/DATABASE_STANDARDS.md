@@ -370,6 +370,301 @@ PostgreSQL where the code already supports it.
 
 ## 4. Schema Conventions
 
+### Metadata Identity Review
+
+Canonical series, issue, and Story Arc provider identities retain append-only
+evidence separately from active ownership. Automatic writers use the shared
+attachment service; non-verifying observations cannot acquire ownership or clear
+a rejected/conflicted decision. Stale and conflicted owners retain uniqueness.
+
+The interactive `/api/v1/metadata-identities/{kind}/{local_id}` endpoints list
+bounded saved claims, preview one saved event, and confirm/reject that event.
+Writes require operator authentication, shared CSRF protection, and a current
+review fingerprint/revision. The server supplies the actor; clients cannot
+supply a provider identity or actor ID in a decision body. A replay receipt
+proves historical completion, not current ownership. Replacing an assignment
+requires explicit rejection first, and dependent issue identities must be
+reviewed before detaching a series. Files and archive metadata are not changed
+by identity review.
+
+Review, observation, and attachment share parent lock ordering and caller-owned
+transactions. Compatibility ComicVine columns and retained history change
+atomically with ownership. Do not bypass these services with ad hoc ID updates.
+
+### Metadata Source Configuration
+
+`metadata_source_configs` stores one revision-checked policy per executable source,
+using the normal integer identity and timestamp mixins plus a unique source slug.
+It has no cascading relationship to provider identities. Reads do not create rows;
+the migration seeds default ComicVine local/API policies and disabled other sources.
+The canonical ComicVine credential remains in its existing configuration key.
+Other API tokens use encrypted columns, never the ordinary settings JSON or read DTOs.
+
+Services leave transaction ownership to callers. Settings writes use revision
+checks and row locks (plus a SQLite write transaction before the savepoint).
+Health checks perform no provider I/O inside a database transaction. Their short
+result write applies only to the tested revision and cannot replace a newer probe.
+Cached health is diagnostic, not proof that a source is safe or available now.
+
+### Metadata Account Admission
+
+`metadata_source_accounts` keeps at most one current credential-scope record per
+remote source, separate from series retries, response caches and library metadata.
+It stores a one-way account scope key, bounded status, UTC retry/probe deadlines
+and a positive revision, not credentials or remote error payloads. Source policy
+ordering changes cannot bypass a known account failure. Local catalogs have no
+account row. Downgrade removes transport admission state only.
+
+The account guard is a transport lifecycle boundary with engine-bound sessions
+of its own, like the source response cache. It never commits the calling library
+session. Admission commits before provider I/O; outcomes use conditional updates
+against the captured credential scope and revision. An expired cooldown admits
+one 45-second recovery probe, acquired after local request capacity is available.
+Cancellation releases the probe while retaining the prior failure; a crashed
+process recovers through lease expiry. Reads fail closed if admission storage
+cannot be checked, instead of repeatedly submitting known-failing requests.
+
+An explicit Test connection may lease an authentication-held account while its
+retry deadline remains null. Only success clears that hold; cancellation retains
+it. Account recovery and matching credential/configuration-scoped entity retry
+deadlines commit atomically, with revision increments invalidating stale work.
+Scheduler wakeups happen after commit. Downgrading the authentication-probe
+migration clears active authentication leases and advances their revisions without
+discarding the hold, library or entity retries. Operator read DTOs expose status,
+deadlines and bounded task counts, never account/configuration keys or credentials.
+
+### Canonical Metadata Baselines
+
+Series, issue and Story Arc metadata baselines use separate real foreign keys,
+one row per local target, positive revisions and bounded versioned snapshot JSON.
+They are retained provenance, not a provider-response cache. Entity deletion
+cascades the corresponding baseline; source configuration deletion does not.
+Migration does not backfill provider ownership of existing descriptive values.
+
+Baseline writes run through the shared service in caller-owned transactions.
+They lock arcs, series parents, then issues in ID order, verify current exact
+ownership and compare the expected baseline revision before updating. Batched
+creation avoids per-issue reads. SQLite obtains its write transaction before the
+savepoint; PostgreSQL uses row locks. A stale batch rolls back even when its caller
+catches the conflict. Future refresh writers must additionally revalidate their
+captured source-policy and ownership revisions and current user values before
+applying network results; the baseline service is not a substitute for that check.
+
+Source-bound Story Arc commands save their canonical arc baseline inside the
+existing revision-claimed catalog savepoint. Newly seeded parent/issue baselines
+share that transaction; pre-existing rows are not retrospectively attributed to
+the incoming source. Issue baseline writes are batched at 200. Refresh reloads
+current mapped fields after claiming the arc, retaining user changes and clears.
+Corrupt provenance aborts the entire refresh, including membership additions.
+Source-bound multi-source refresh captures an immutable read set before provider
+I/O and releases its read transaction. It locks source policies before the arc,
+then compares mapped fields, baseline revision/payload, identity claims/history,
+arc revision/lifecycle/monitoring and managed-placement presence before saving.
+A stale read aborts the complete membership and metadata write, including when a
+caller catches the domain error. Secondary sources never acquire membership or
+identity ownership through descriptive enrichment.
+
+Issue snapshots can retain up to 128 descriptive creator credits. Each credit
+has a bounded name and normalized role list compatible with the existing
+Creator/IssueCreator columns. Relations and baseline values commit together;
+provider absence does not clear local credits. Refresh includes current creator
+names/roles in its read set to detect edits, clears and concurrent changes.
+Credit reads and writes use 200-issue batches, not per-issue queries. Writers
+retain existing linked creator IDs when possible and never rename a shared
+creator or claim another provider's creator ID from a name match. The legacy
+ComicVine writer likewise resolves known IDs exactly; name-only reuse is limited
+to unclaimed descriptive rows. No credit schema migration or provenance backfill
+is needed for this additive snapshot field.
+
+Canonical field origins may retain the fixed embedded document names ComicInfo.xml
+and MetronInfo.xml. This local provenance cannot also claim a provider source,
+provider freshness, derivation or explicit user override. Older version-one
+snapshot JSON without the field remains valid. Archive-derived empty credits are
+not provider-enrichment gaps; subsequent edits and clears become user overrides.
+Observed archive identities stay unverified and cannot pass the baseline writer's
+ownership check as verified identities. Archive review/preservation diagnostics
+persist across refreshes until a new archive comparison updates them. The caller
+still owns independent file/target matching and atomic application to entity rows;
+baseline persistence alone neither establishes that match nor permits file writes.
+
+### Archive Publication Intent
+
+`archive_metadata_publications` stores versioned, bounded evidence before a paired
+archive replacement. A unique operation ID supports exact replay; active file and
+canonical-path reservations reject concurrent attempts. Nullable `SET NULL` file
+links preserve the immutable intent when the library row is deleted; the path
+reservation and evidence survive. There is no age-based lease takeover.
+
+Services use caller-owned transactions and the shared SQLite write/savepoint
+boundary. Recording new intent first acquires the shared file-mutation admission
+mutex, before any owner/entity locks. Import-owned publication locks its job, imported file and action;
+publication then locks source policies, series, issue, root, file, then the
+journal row. Generic filesystem classification only locks the journal row;
+import-owner recovery uses the full owner/binding lock order. Large file hashing, rendering
+and staging stay outside write transactions; only the short, offloaded atomic
+publication and directory-sync boundary retains the lock. An intent must commit
+before publication. A failed post-rename transaction leaves evidence for later
+inspection instead of authorizing blind replacement. Published records remain
+reserved pending coherent canonical/file-state finalization. Downgrade refuses
+to discard any intended, published or review record; only abandoned-only history
+may be removed. No existing archive is backfilled or mutated by the migration.
+
+Finalization uses the same policy/parent/issue/root/file/journal lock order and
+requires a published receipt, independently inspected output and an unchanged
+database binding. Canonical entity values, descriptive credits, baselines and
+LibraryFile size/timestamp/hash commit together with the finalized marker and
+reservation release. Unchanged snapshots do not advance their baselines. File
+checks run off-thread before and after DB writes; finalization does not rewrite
+archives. Naming/source ownership evidence and catalog lifecycle timestamps are
+not repurposed. A completed replay reports historical completion without
+reapplying values or claiming present ownership. Finalized receipts survive file
+deletion and block downgrade to the old state contract. Stale, interrupted or
+failed finalization retains the published reservation; caught errors still roll
+back the nested write. Production workflow rollback and restart integration remain
+required before existing writers switch to this boundary.
+
+An optional versioned-plan import owner binds deferred enrichment to its exact
+completed import record and managed placement action. Bounded digests retain the
+original action and pending-work snapshot; legacy journal JSON without an owner
+remains readable. Owner cancellation, rollback, deletion or changed evidence
+cannot authorize record, publication or finalization. Completed replay remains
+historical even after the owner is deleted.
+
+Finalization stores the successor publication reference on the import action and
+acknowledges deferred enrichment in the same transaction as canonical/file state.
+It never replaces the original destination signature or source/naming evidence.
+Import rollback rejects active publications, unverified successor pointers and
+reassigned registrations. A successor must be finalized for that exact unchanged
+action, and its verified fingerprint/digest must still match the actual archive.
+The original source remains subject to the existing rollback policy.
+
+A stopped owner may receive a `settled` receipt for a proven published successor.
+It updates only registered file accounting and the import's successor reference,
+marking enrichment cancelled without applying canonical snapshots or baselines.
+The immutable original placement proof and exact current registration must still
+match. Settled receipts release reservations and survive rollback; downgrade
+refuses to discard them. A proven untouched intent can instead be abandoned.
+Changed or unproven files retain reservations and cannot fall through to legacy
+enrichment. Neither recovery path writes an archive.
+
+The recovery task owns a clean session and commits bounded keyset reads before
+inspection/hashing, then commits each recovered receipt independently. It rejects
+pending caller edits and nested transactions. Startup/enrichment and rollback
+orchestration invoke it under the existing process-local import lane. Shared
+mutation fencing across all other writers and paired enrichment-worker activation
+remain required; the process-local lane is not a cross-process filesystem lock.
+
+### Short File Mutation Coordination
+
+`services/library_mutation_coordination.py` coordinates Library browser renames
+and series-folder renames with new archive-publication admission. SQLite acquires
+its writer transaction with a no-op ORM update; PostgreSQL uses the fixed
+transaction-scoped advisory key pair `0x50554C4C / 0x46494C45`. Acquire this mutex
+before entity locks and retain it through the caller's commit or rollback. No
+provider calls, archive rewriting or hashing may run under it. Existing bulk
+series-folder rename retains its caller-owned transaction; it is not a concurrent
+or background archive-conversion lane.
+
+Under the mutex, renames inspect bounded pages of active publication evidence,
+including source and private stage paths and directory descendants. Orphaned
+reservations survive deleted LibraryFile rows. Invalid or inconsistent plans fail
+closed. A terminal released publication does not block later renames. Publication
+work between commits remains protected by its durable reservation, not by a
+long-running advisory lock. This is cooperative application coordination, not a
+lock against external programs or a durable rename-recovery journal.
+
+Library browser renames join file work, commit and compensation on cancellation.
+Compensation reacquires admission, rechecks reservations/reference protection and
+moves back only the owned inode into an unclaimed destination. A completed commit
+is not undone when the request is cancelled. Conversion, deletion, bulk utility
+writers, import placement and other mutation paths still need the shared contract
+before paired background writing can be enabled.
+
+### Library Conversion Journal
+
+`library_conversions` retains bounded original, staged output and independent trash
+backup evidence. Preparation uses interruptible child processes outside database
+write transactions. The Library browser owns the session lifecycle: it commits
+intent before exclusive publication, then commits the existing LibraryFile's new
+path before removing the unchanged original. Reader state and issue identity keep
+their existing registration. Copying the backup into private staging on the trash
+filesystem supports cross-filesystem trash without a long SQLite write lock.
+
+Conversion reservations share admission with archive metadata publication and
+short renames. They cover original, output, backup and both stage paths, survive
+LibraryFile deletion, and do not expire. Startup recovery examines bounded batches,
+hashes outside write transactions, and rechecks the files under admission before
+registration or cleanup. It never republishes private stages. Proven untouched
+intent is abandoned; proven output/backup can finish registration and cleanup;
+changed or unproven evidence remains reserved for review. A lost commit response
+never permits deleting a registered output. Downgrade refuses retained completed
+or unresolved conversion evidence. Bulk utilities and other mutation entry points
+still require coordinated lifecycles before paired background writers activate.
+
+### Library Removal Journal
+
+`library_removals` retains bounded immutable source, root, private-stage and
+optional trash evidence independently of LibraryFile/series lifetimes. Admission
+reserves overlapping paths against archive publication, conversion and rename.
+The owner commits intent before a short exclusive staging rename, then commits
+the journal's detached state together with its selected database removals.
+Startup restores only uncommitted staging; it never resumes destructive cleanup.
+
+An explicit delete/trash disposition is required for cleanup. Historical plans
+default to retain-only. `cleanup_json` retains bounded copy/publication/deletion
+receipts; downgrade refuses to discard them. Cleanup owns clean-session
+transactions and holds a non-expiring OS file lock across its lifecycle, not a
+database write transaction across slow work. Same-filesystem trash uses exclusive
+rename; cross-filesystem trash copies privately, verifies content, and publishes
+without replacing an existing destination before removing its private source.
+Cancellation joins workers and leaves retryable proof. Unknown replacements are
+preserved. The old public source path is never used for cleanup.
+
+`workspace_cleaned` records proven terminal staging-directory cleanup, separately
+from payload disposition and retained cleanup evidence. Its composite index serves
+bounded startup recovery; completed markers avoid repeated filesystem scans.
+Upgrade defaults existing records to unverified without touching files. Downgrade
+drops only the marker/index and preserves all authorization and cleanup receipts.
+Only inactive complete/abandoned records may be pruned. Descriptor-relative empty
+directory removal and lock checks run under short admission; payloads, replacements
+and unknown contents are never recursively removed by terminal housekeeping.
+
+These are owner-integration primitives, not yet the public delete implementation.
+Series/browser/bulk deletion must adopt the complete lifecycle before paired
+background writing is enabled. POSIX file locking is implemented;
+other platforms currently fail closed at private cleanup admission.
+
+Trash maintenance now owns an idle session and commits each short, identity-checked
+unlink separately. The startup and utility route callers finish configuration
+reads before entering that lifecycle; the service rejects an existing transaction
+instead of committing unrelated changes. Shared admission protects recovery
+dependencies until deletion finishes, including cancellation. Traversal and
+bounded directory-page construction occur outside transactions. The indexed
+`library_removals.trash_path_key` is a derived literal-path lookup, not identity
+authority: the bounded original plan and cleanup receipt are revalidated before
+using their publication time to protect a whole trash tree. Upgrade backfills this
+index in bounded batches without filesystem access; downgrade discards only the
+derived key, never the retained plan/receipt. Existing legacy trash files keep
+mtime-based retention until their writers adopt journaled ownership.
+
+### Source Catalog Checkpoints
+
+`series_catalog_checkpoints` records complete issue-catalog progress separately
+for each series/source pair. Real cascading foreign keys bind it to the series,
+source configuration and active identity row. The saved source revision, identity
+revision and exact external ID must still match before a cursor is usable. A
+local-source checkpoint also retains the catalog generation; incremental readers
+must compare that generation before applying a partial window.
+
+Full Add/refresh writes persist the checkpoint in the same caller-owned
+transaction as catalog rows and canonical baselines. A captured checkpoint
+revision participates in refresh revalidation. Checkpoint timestamps record
+the live request start, never completion or an unvalidated cache hit. Explicit
+full revalidation bypasses response-cache coalescing for that catalog so a
+joined earlier fetch cannot be mistaken for a new modification boundary.
+Migration leaves existing global timestamps untouched and creates no synthetic
+provider checkpoints. Downgrade discards sync progress only.
+
 ### 4.1 Base Model Mixins
 
 **Current Pullbox implementation**

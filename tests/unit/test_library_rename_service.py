@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -14,11 +15,9 @@ from pullbox.models.library import (
     LibraryFileStorageMode,
     LibraryRoot,
 )
-from pullbox.services.library_rename_service import rename_library_entry
+from pullbox.services.library_rename_service import _rename_path, rename_library_entry
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -63,3 +62,32 @@ async def test_rename_rejects_target_containing_referenced_file(
 
     assert source_file.read_bytes() == original
     assert not target.exists()
+
+
+@pytest.mark.parametrize("kind", ["file", "folder"])
+def test_rename_never_overwrites_a_racing_destination(tmp_path, monkeypatch, kind):
+    source, target = tmp_path / "source", tmp_path / "target"
+    if kind == "folder":
+        source.mkdir()
+    else:
+        source.write_bytes(b"original")
+    exists = Path.exists
+    raced = False
+
+    def create_after_check(path):
+        nonlocal raced
+        if path == target and not raced:
+            raced = True
+            if kind == "folder":
+                target.mkdir()
+            else:
+                target.write_bytes(b"other")
+            return False
+        return exists(path)
+
+    monkeypatch.setattr(Path, "exists", create_after_check)
+    with pytest.raises(ValidationError, match="already exists"):
+        _rename_path(source, target)
+    assert source.exists() and target.exists()
+    if kind == "file":
+        assert source.read_bytes() == b"original" and target.read_bytes() == b"other"

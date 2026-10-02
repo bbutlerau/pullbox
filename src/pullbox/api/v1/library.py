@@ -257,7 +257,9 @@ async def _folder_has_tracked_descendants(session: DbSession, target: Path) -> b
     file_count = int(
         (
             await session.execute(
-                select(func.count(LibraryFile.id)).where(LibraryFile.file_path.like(f"{prefix}/%"))
+                select(func.count(LibraryFile.id)).where(
+                    LibraryFile.file_path.startswith(f"{prefix}/", autoescape=True)
+                )
             )
         ).scalar_one()
         or 0
@@ -276,7 +278,9 @@ async def _folder_has_tracked_descendants(session: DbSession, target: Path) -> b
     series_count = int(
         (
             await session.execute(
-                select(func.count(Series.id)).where(Series.path.like(f"{prefix}/%"))
+                select(func.count(Series.id)).where(
+                    Series.path.startswith(f"{prefix}/", autoescape=True)
+                )
             )
         ).scalar_one()
         or 0

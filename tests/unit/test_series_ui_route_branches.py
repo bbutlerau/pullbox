@@ -295,13 +295,13 @@ async def test_add_series_context_covers_empty_preview_success_and_failure(
     get_key = AsyncMock(return_value="fake-key")
     page_search = AsyncMock(return_value=([preview_result], 1))
     global_search = AsyncMock(return_value=([full_result], 1))
-    monkeypatch.setattr("pullbox.core.comicvine_key.get_comicvine_api_key", get_key)
+    monkeypatch.setattr("pullbox.services.metadata_sources.get_comicvine_api_key", get_key)
     monkeypatch.setattr(
         "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_page",
         page_search,
     )
     monkeypatch.setattr(
-        "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_globally",
+        "pullbox.providers.metadata.comicvine.ComicVineProvider.search_series_candidates_page",
         global_search,
     )
 
@@ -316,7 +316,9 @@ async def test_add_series_context_covers_empty_preview_success_and_failure(
     assert preview["search_total_results"] == 1
     assert preview["search_shown_count"] == 1
     assert preview["search_results"][0]["title"] == "The Brave and the Bold"  # type: ignore[index]
-    page_search.assert_awaited_once_with("The Brave", None, limit=20)
+    page_search.assert_awaited_once_with(
+        "The Brave", None, limit=20, offset=0, suppress_errors=False, strict_response=True
+    )
 
     full = await series_routes.load_add_series_search_context(
         db_session,
@@ -331,7 +333,7 @@ async def test_add_series_context_covers_empty_preview_success_and_failure(
 
     get_key.side_effect = RuntimeError("boom")
     failed = await series_routes.load_add_series_search_context(db_session, "Batman", "relevance")
-    assert failed["search_error"] == "ComicVine search failed. Check your API key in settings."
+    assert failed["search_error"] == "Search could not finish. Retry or check Metadata settings."
 
 
 @pytest.mark.asyncio
@@ -353,7 +355,6 @@ async def test_add_series_page_and_htmx_search_routes_render_expected_templates(
         )
     )
     await db_session.flush()
-    monkeypatch.setattr(series_routes, "get_request_session_factory", lambda _request: None)
 
     page = await series_routes.add_series_page(
         _request(),

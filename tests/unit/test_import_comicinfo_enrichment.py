@@ -4,7 +4,7 @@ import sqlite3
 import threading
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, call
+from unittest.mock import ANY, AsyncMock, call
 
 import pytest
 from sqlalchemy import select
@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 @pytest.mark.asyncio
 async def test_comicinfo_prefetch_chunks_provider_batches(
     monkeypatch: pytest.MonkeyPatch,
+    async_engine,
 ) -> None:
     prefetch_issue_metadata = AsyncMock()
     monkeypatch.setattr(enrichment_module, "COMICVINE_BULK_BATCH_SIZE", 2, raising=False)
@@ -51,17 +52,22 @@ async def test_comicinfo_prefetch_chunks_provider_batches(
     monkeypatch.setattr(
         enrichment_module,
         "_load_pending_imported_file_ids",
-        AsyncMock(return_value=[]),
+        AsyncMock(return_value=[11, 12, 13]),
     )
     monkeypatch.setattr(
         enrichment_module,
         "_load_pending_issue_cv_ids",
-        AsyncMock(return_value=[101, 102, 103]),
+        AsyncMock(side_effect=[[101, 102], [103]]),
+    )
+    monkeypatch.setattr(
+        enrichment_module,
+        "_prepare_pending_imported_file_with_retry",
+        AsyncMock(return_value=None),
     )
     monkeypatch.setattr(enrichment_module, "wait_for_comicinfo_turn", AsyncMock())
 
     await _run_import_comicinfo_enrichment_while_fenced(
-        AsyncMock(),
+        async_sessionmaker(async_engine, expire_on_commit=False),
         job_id=7,
         build_comicinfo_payload=AsyncMock(),
         apply_comicinfo=AsyncMock(),
@@ -72,6 +78,10 @@ async def test_comicinfo_prefetch_chunks_provider_batches(
     assert prefetch_issue_metadata.await_args_list == [
         call([101, 102]),
         call([103]),
+    ]
+    assert enrichment_module._load_pending_issue_cv_ids.await_args_list == [
+        call(ANY, job_id=7, imported_file_ids=[11, 12]),
+        call(ANY, job_id=7, imported_file_ids=[13]),
     ]
 
 
@@ -389,6 +399,7 @@ async def test_deferred_enrichment_rejects_reused_library_file_identity(
 async def test_locked_pending_file_does_not_stop_later_enrichment(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    async_engine,
 ) -> None:
     later_archive = tmp_path / "Later Issue.cbz"
     later_archive.write_text("archive")
@@ -458,7 +469,7 @@ async def test_locked_pending_file_does_not_stop_later_enrichment(
         raise AssertionError("completion persistence was replaced for this test")
 
     await run_import_comicinfo_enrichment(
-        object(),  # type: ignore[arg-type]
+        async_sessionmaker(async_engine, expire_on_commit=False),
         job_id=7,
         build_comicinfo_payload=unused_build_payload,
         apply_comicinfo=apply_comicinfo,
@@ -472,6 +483,7 @@ async def test_locked_pending_file_does_not_stop_later_enrichment(
 @pytest.mark.asyncio
 async def test_retryable_provider_error_stops_enrichment_and_leaves_queue_pending(
     monkeypatch: pytest.MonkeyPatch,
+    async_engine,
 ) -> None:
     async def job_is_completed(_factory: object, *, job_id: int) -> bool:
         assert job_id == 7
@@ -519,7 +531,7 @@ async def test_retryable_provider_error_stops_enrichment_and_leaves_queue_pendin
         raise AssertionError("no durable file event is expected")
 
     await run_import_comicinfo_enrichment(
-        object(),  # type: ignore[arg-type]
+        async_sessionmaker(async_engine, expire_on_commit=False),
         job_id=7,
         build_comicinfo_payload=unused_build_payload,
         apply_comicinfo=should_not_apply,

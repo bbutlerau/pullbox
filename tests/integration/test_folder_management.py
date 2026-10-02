@@ -128,13 +128,12 @@ class TestRenameSeriesFolder:
         )
 
     @pytest.mark.asyncio
-    async def test_rename_when_template_changes(self, tmp_path, series_svc):
+    async def test_rename_when_template_changes(self, tmp_path, series_svc, db_session):
         """Folder is renamed when template produces a different name."""
         # Current folder
         old_folder = tmp_path / "Batman (2024)"
         old_folder.mkdir()
 
-        # Mock series
         series = Series(
             id=1,
             title="Batman",
@@ -145,9 +144,9 @@ class TestRenameSeriesFolder:
             library_root_id=1,
         )
 
-        # Mock library root
-        root = MagicMock()
-        root.path = str(tmp_path)
+        root = LibraryRoot(id=1, name="Comics", path=str(tmp_path))
+        db_session.add_all([root, series])
+        await db_session.flush()
 
         # Mock config — new template includes publisher
         config_data = {
@@ -156,25 +155,14 @@ class TestRenameSeriesFolder:
             "colon_replacement": "dash",
         }
 
-        session = AsyncMock()
-        session.get = AsyncMock(
-            side_effect=lambda cls, id: series if cls is not LibraryRoot else root,
-        )
-
         # Mock _load_naming_config
-        with (
-            patch.object(
-                series_svc.__class__,
-                "_load_naming_config",
-                new_callable=AsyncMock,
-                return_value=config_data,
-            ),
-            patch(
-                "pullbox.services.series_service.require_mutable_library_target",
-                new_callable=AsyncMock,
-            ),
+        with patch.object(
+            series_svc.__class__,
+            "_load_naming_config",
+            new_callable=AsyncMock,
+            return_value=config_data,
         ):
-            new_path = await series_svc.rename_series_folder(session, 1)
+            new_path = await series_svc.rename_series_folder(db_session, 1)
 
         assert new_path is not None
         assert "Unknown" in new_path  # publisher is None → "Unknown"
@@ -182,7 +170,7 @@ class TestRenameSeriesFolder:
         assert Path(new_path).exists()
 
     @pytest.mark.asyncio
-    async def test_no_rename_when_already_correct(self, tmp_path, series_svc):
+    async def test_no_rename_when_already_correct(self, tmp_path, series_svc, db_session):
         """No rename happens when folder already matches template."""
         folder = tmp_path / "Batman (2024)"
         folder.mkdir()
@@ -197,8 +185,9 @@ class TestRenameSeriesFolder:
             library_root_id=1,
         )
 
-        root = MagicMock()
-        root.path = str(tmp_path)
+        root = LibraryRoot(id=1, name="Comics", path=str(tmp_path))
+        db_session.add_all([root, series])
+        await db_session.flush()
 
         config_data = {
             "series_folder_template": "{Series} ({Year})",
@@ -206,37 +195,29 @@ class TestRenameSeriesFolder:
             "colon_replacement": "dash",
         }
 
-        session = AsyncMock()
-        session.get = AsyncMock(
-            side_effect=lambda cls, id: series if cls is not LibraryRoot else root,
-        )
-
         with patch.object(
             series_svc.__class__,
             "_load_naming_config",
             new_callable=AsyncMock,
             return_value=config_data,
         ):
-            new_path = await series_svc.rename_series_folder(session, 1)
+            new_path = await series_svc.rename_series_folder(db_session, 1)
 
         assert new_path is None
         assert folder.exists()
 
     @pytest.mark.asyncio
-    async def test_returns_none_for_series_without_path(self, series_svc):
+    async def test_returns_none_for_series_without_path(self, series_svc, db_session):
         """Series without a path returns None."""
-        series = MagicMock()
-        series.path = None
-        series.library_root_id = None
+        series = Series(id=1, title="Batman", sort_title="Batman")
+        db_session.add(series)
+        await db_session.flush()
 
-        session = AsyncMock()
-        session.get = AsyncMock(return_value=series)
-
-        result = await series_svc.rename_series_folder(session, 1)
+        result = await series_svc.rename_series_folder(db_session, 1)
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_collision_appends_cv_id(self, tmp_path, series_svc):
+    async def test_collision_appends_cv_id(self, tmp_path, series_svc, db_session):
         """When target folder exists, appends [cv-{id}]."""
         old_folder = tmp_path / "Old Name (2024)"
         old_folder.mkdir()
@@ -255,8 +236,9 @@ class TestRenameSeriesFolder:
             library_root_id=1,
         )
 
-        root = MagicMock()
-        root.path = str(tmp_path)
+        root = LibraryRoot(id=1, name="Comics", path=str(tmp_path))
+        db_session.add_all([root, series])
+        await db_session.flush()
 
         config_data = {
             "series_folder_template": "{Series} ({Year})",
@@ -264,24 +246,13 @@ class TestRenameSeriesFolder:
             "colon_replacement": "dash",
         }
 
-        session = AsyncMock()
-        session.get = AsyncMock(
-            side_effect=lambda cls, id: series if cls is not LibraryRoot else root,
-        )
-
-        with (
-            patch.object(
-                series_svc.__class__,
-                "_load_naming_config",
-                new_callable=AsyncMock,
-                return_value=config_data,
-            ),
-            patch(
-                "pullbox.services.series_service.require_mutable_library_target",
-                new_callable=AsyncMock,
-            ),
+        with patch.object(
+            series_svc.__class__,
+            "_load_naming_config",
+            new_callable=AsyncMock,
+            return_value=config_data,
         ):
-            new_path = await series_svc.rename_series_folder(session, 1)
+            new_path = await series_svc.rename_series_folder(db_session, 1)
 
         assert new_path is not None
         assert "[cv-99999]" in new_path

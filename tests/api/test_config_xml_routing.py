@@ -511,13 +511,18 @@ class TestPutIdentitySettings:
         self,
         client: AsyncClient,
         _db_factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        from pullbox.ui import routes
+
+        monkeypatch.setattr(routes, "_cached_instance_name", routes._cached_instance_name)
         resp = await client.put(
             "/api/v1/config",
             json={"values": {"instance_name": "MyComics"}},
             headers=_csrf_header_for(client),
         )
         assert resp.status_code == 200
+        assert routes.get_instance_name() == "MyComics"
 
         async with _db_factory() as session:
             row = await session.get(SystemConfig, "instance_name")

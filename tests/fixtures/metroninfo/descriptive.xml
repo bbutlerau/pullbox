@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetronInfo>
+  <IDS><ID source="Metron" primary="true">101</ID><ID source="Comic Vine">202</ID></IDS>
+  <Publisher id="press:7"><Name>Example Press</Name><Imprint id="imprint:8">Night Line</Imprint></Publisher>
+  <Series id="21" lang="fr">
+    <Name>Harbor Lights</Name><SortName>Harbor Lights, The</SortName>
+    <StartYear>2020</StartYear><Volume>2</Volume><VolumeCount>3</VolumeCount>
+    <AlternativeNames>
+      <AlternativeName id="name:9" lang="fr">Les lumieres</AlternativeName>
+      <AlternativeName>Harbour Lights</AlternativeName>
+    </AlternativeNames>
+  </Series>
+  <Number>50-x</Number><AlternativeNumber>150</AlternativeNumber>
+  <CollectionTitle>Collected Nights</CollectionTitle><MangaVolume>02</MangaVolume>
+  <Stories><Story id="story:10">New Shores</Story><Story>Homeward</Story></Stories>
+  <Summary>A storm arrives.
+The harbor waits.</Summary>
+  <Notes>Reader notes &amp; preserved context.</Notes><PageCount>1200</PageCount>
+  <AgeRating>Teen Plus</AgeRating>
+  <Genres><Genre id="genre:11">Adventure</Genre></Genres>
+  <Tags><Tag id="tag:12">Coastal</Tag></Tags>
+  <Characters><Character id="character:13">Captain Example</Character></Characters>
+  <Teams><Team id="team:14">Harbor Watch</Team></Teams>
+  <Locations><Location id="location:15">The Harbor</Location></Locations>
+  <Reprints><Reprint id="issue:16">First edition</Reprint></Reprints>
+  <Credits>
+    <Credit><Creator id="creator:17">Alex Example</Creator><Roles><Role id="role:18">Writer</Role><Role>Artist</Role></Roles></Credit>
+    <Credit><Creator>Sam Example</Creator></Credit>
+  </Credits>
+</MetronInfo>

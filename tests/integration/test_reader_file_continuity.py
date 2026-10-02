@@ -209,13 +209,14 @@ async def test_conversion_to_cbz_preserves_reader_state_and_issue_identity(
     before = _state_values(state)
     source = Path(library_file.file_path)
 
-    async def preserving_converter(source_path: Path, _target_format: str) -> Path:
-        target = source_path.with_suffix(".cbz")
-        await asyncio.to_thread(shutil.copy2, source_path, target)
-        return target
+    async def preserving_converter(
+        source_path: Path, _target_format: str, *, output_path: Path
+    ) -> Path:
+        await asyncio.to_thread(shutil.copy2, source_path, output_path)
+        return output_path
 
     monkeypatch.setattr(
-        "pullbox.services.library_convert_service.convert_file",
+        "pullbox.services.library_conversion_files.convert_file_interruptible",
         preserving_converter,
     )
 

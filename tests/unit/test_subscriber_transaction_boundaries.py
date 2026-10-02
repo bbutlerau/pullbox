@@ -82,10 +82,17 @@ async def test_series_cover_download_happens_outside_database_session(
         def __init__(self, **_kwargs: Any) -> None:
             return None
 
-        async def download_cover(self, _url: str, destination: Path) -> None:
+        async def __aenter__(self) -> FakeMetadataService:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        async def download_cover(self, _url: str, destination: Path) -> bool:
             assert _SessionTracker.active_sessions == 0
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(b"cover")
+            return True
 
     _SessionTracker.active_sessions = 0
     monkeypatch.setattr("pullbox.core.subscribers.asyncio.sleep", fake_sleep)
@@ -95,7 +102,9 @@ async def test_series_cover_download_happens_outside_database_session(
     monkeypatch.setattr("pullbox.core.comicvine_key.get_comicvine_api_key", fake_api_key)
     monkeypatch.setattr("pullbox.services.cover_resolver.resolve_covers_dir", fake_covers_dir)
     monkeypatch.setattr("pullbox.providers.metadata.comicvine.ComicVineProvider", FakeProvider)
-    monkeypatch.setattr("pullbox.services.metadata_service.MetadataService", FakeMetadataService)
+    monkeypatch.setattr(
+        "pullbox.services.provider_artwork.ProviderArtworkClient", FakeMetadataService
+    )
 
     await _download_covers_for_series(SeriesAdded(series_id=series_id, comicvine_id=12345))
 

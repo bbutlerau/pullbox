@@ -116,6 +116,71 @@ def _ctx(request: Request, user: object | None = None, **kwargs: object) -> dict
     return dict(context)
 
 
+@router.get(
+    "/import/{job_id}/metadata-writes", response_class=HTMLResponse, include_in_schema=False
+)
+async def import_metadata_write_follow_up(
+    job_id: int,
+    request: Request,
+    user: AuthenticatedUser,
+    session: DbSession,
+    page: int = Query(1, ge=1),
+) -> Response:
+    from pullbox.services.import_metadata_follow_up import load_metadata_write_follow_up
+
+    return _templates().TemplateResponse(
+        request,
+        "partials/import_metadata_write_follow_up.html",
+        _ctx(request, user, **await load_metadata_write_follow_up(session, job_id, page=page)),
+    )
+
+
+@router.post(
+    "/import/{job_id}/files/{file_id}/retry-metadata",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def import_retry_metadata_write(
+    job_id: int,
+    file_id: int,
+    request: Request,
+    user: InteractiveOperatorUser,
+    session: DbSession,
+    page: int = Query(1, ge=1),
+) -> Response:
+    from pullbox.api.deps import get_request_session_factory
+    from pullbox.composition.services import build_import_service
+    from pullbox.services.import_metadata_follow_up import (
+        load_metadata_write_follow_up,
+        retry_import_metadata_write,
+    )
+
+    message, error = "Metadata writing is already queued or complete.", None
+    try:
+        service = await build_import_service(session)
+        queued = await retry_import_metadata_write(session, job_id, file_id, actor=user.username)
+        await session.commit()
+        if queued:
+            service.schedule_comicinfo_enrichment(
+                get_request_session_factory(request), job_id=job_id
+            )
+            message = "Metadata retry queued. Follow its progress in the activity menu."
+    except ValidationError as exc:
+        await session.rollback()
+        error = exc.message
+    return _templates().TemplateResponse(
+        request,
+        "partials/import_metadata_write_follow_up.html",
+        _ctx(
+            request,
+            user,
+            metadata_message=message if error is None else None,
+            metadata_error=error,
+            **await load_metadata_write_follow_up(session, job_id, page=page),
+        ),
+    )
+
+
 def _object_to_int(value: object, default: int = 0) -> int:
     if isinstance(value, bool):
         return int(value)

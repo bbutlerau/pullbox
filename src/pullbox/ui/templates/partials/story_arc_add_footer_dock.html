@@ -9,7 +9,7 @@
       {"label": "results", "value": total|string},
       {"label": "shown", "value": shown_count|string},
       {"label": "in library", "value": in_library_count|string},
-      {"label": "provider", "value": "Comic Vine"},
+      {"label": "source", "value": search_source_label|default("Comic Vine")},
     ],
     hx_target="#story-arc-add-results",
     hx_swap="morph:outerHTML show:#content:top",

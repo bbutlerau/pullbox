@@ -9,7 +9,14 @@ from pullbox.ui import standalone_shell
 
 
 @pytest.mark.parametrize(
-    "script", ["story-arc-preview.js", "story-arc-detail.js", "series-rescan.js"]
+    "script",
+    [
+        "story-arc-preview.js",
+        "story-arc-detail.js",
+        "series-rescan.js",
+        "metadata-sources.js",
+        "series-metadata-links.js",
+    ],
 )
 def test_story_arc_controller_change_invalidates_main_shell_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, script: str

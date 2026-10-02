@@ -153,6 +153,18 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "apply_file_assignment",
             "apply_file_assignment",
         ),
+        (
+            "/import/{job_id}/metadata-writes",
+            ("GET",),
+            "import_metadata_write_follow_up",
+            "import_metadata_write_follow_up",
+        ),
+        (
+            "/import/{job_id}/files/{file_id}/retry-metadata",
+            ("POST",),
+            "import_retry_metadata_write",
+            "import_retry_metadata_write",
+        ),
         ("/import", ("GET",), "import_page", "import_page"),
         (
             "/import/{job_id}/progress-partial",
@@ -416,6 +428,18 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
             "story_arc_catalog_refresh",
             "story_arc_catalog_refresh",
         ),
+        (
+            "/story-arcs/catalog/{source}/{provider_id}",
+            ("GET",),
+            "source_arc_preview",
+            "source_arc_preview",
+        ),
+        (
+            "/story-arcs/catalog/{source}/{provider_id}",
+            ("POST",),
+            "source_arc_add",
+            "source_arc_add",
+        ),
         ("/story-arcs", ("GET",), "story_arc_list", "story_arc_list"),
         ("/story-arcs/add", ("GET",), "story_arc_add", "story_arc_add"),
         ("/story-arcs", ("POST",), "story_arc_create", "story_arc_create"),
@@ -511,6 +535,12 @@ def test_ui_router_manifest_remains_stable_during_decomposition() -> None:
         ),
         ("/htmx/series/search", ("GET",), "htmx_search_series", "htmx_search_series"),
         ("/issues/{issue_id}", ("GET",), "issue_detail", "issue_detail"),
+        (
+            "/htmx/issues/{issue_id}/metadata",
+            ("GET",),
+            "htmx_issue_metadata",
+            "htmx_issue_metadata",
+        ),
         (
             "/htmx/issues/{issue_id}/reading",
             ("GET",),

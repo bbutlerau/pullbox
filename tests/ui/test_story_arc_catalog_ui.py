@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from pullbox.models.config import SystemConfig
 from pullbox.models.library import LibraryRoot
+from pullbox.models.metadata_source import MetadataSourceConfig
 from pullbox.models.story_arc import IssueStoryArc, StoryArc
 from pullbox.providers.metadata.comicvine import ComicVineError
 from pullbox.services.auth_service import SESSION_COOKIE_NAME, AuthService
@@ -32,13 +33,24 @@ pytest_plugins = ["conftest_security"]
 
 
 @pytest.fixture
-def catalog_provider(monkeypatch: pytest.MonkeyPatch) -> CatalogProvider:
+async def catalog_provider(monkeypatch: pytest.MonkeyPatch, sec_db) -> CatalogProvider:
+    # Match the source-settings migration, not an unmigrated create_all-only DB.
+    async with sec_db.begin() as session:
+        session.add(
+            MetadataSourceConfig(source="comicvine_api", enabled=True, priority=20, revision=1)
+        )
     provider = CatalogProvider()
     monkeypatch.setattr(
         "pullbox.core.comicvine_key.get_comicvine_api_key", AsyncMock(return_value="test")
     )
     monkeypatch.setattr(
         "pullbox.providers.metadata.comicvine.ComicVineProvider", lambda **_: provider
+    )
+    monkeypatch.setattr(
+        "pullbox.services.metadata_sources.get_comicvine_api_key", AsyncMock(return_value="test")
+    )
+    monkeypatch.setattr(
+        "pullbox.providers.metadata.sources.ComicVineProvider", lambda *_args, **_kw: provider
     )
     return provider
 
@@ -54,6 +66,14 @@ async def _root(factory: async_sessionmaker[AsyncSession], path: str) -> int:
 def _csrf(client: AsyncClient) -> dict[str, str]:
     token = client.cookies.get(SESSION_COOKIE_NAME) or ""
     return {"X-CSRF-Token": AuthService.get_csrf_token_from_session(token) or ""}
+
+
+def _review_fields(response) -> dict[str, str]:
+    return {
+        name: match[1]
+        for name in ("fingerprint", "source_revision", "file_defaults_fingerprint")
+        if (match := re.search(rf'name="{name}" value="([^"]+)"', response.text))
+    }
 
 
 async def test_registry_links_to_dedicated_comicvine_add_page(
@@ -87,10 +107,10 @@ async def test_registry_links_to_dedicated_comicvine_add_page(
         response.text,
     )
     assert 'class="h-5 w-5 animate-spin"' in response.text
-    assert "Searching ComicVine" in response.text
+    assert "Searching metadata sources" in response.text
     assert "Large catalogs can take a moment." in response.text
     assert 'data-testid="story-arc-add-footer-dock"' in response.text
-    assert "Search Comic Vine" in response.text
+    assert "Search Story Arcs" in response.text
     assert 'data-testid="story-arcs-create-form"' not in response.text
 
 
@@ -139,14 +159,14 @@ async def test_catalog_search_marks_already_added_and_does_not_create(
         "/story-arcs/catalog?q=event", headers={"HX-Request": "true"}
     )
     assert response.status_code == 200
-    assert 'href="/story-arcs/catalog/42"' in response.text
+    assert 'href="/story-arcs/catalog/comicvine_api/42"' in response.text
     assert f'href="/story-arcs/{arc_id}"' in response.text
     assert 'class="pill pill-success"' in response.text
     assert "In Library" in response.text
     assert 'data-testid="story-arc-existing-cover-link"' in response.text
     assert 'data-testid="story-arc-existing-title-link"' in response.text
     assert "Already added" not in response.text
-    assert catalog_provider.searches == [("event", 20, 0)]
+    assert catalog_provider.searches == [("event", 100, 0)]
     assert catalog_provider.closed == 1
     async with sec_db() as session:
         assert len(list(await session.scalars(select(StoryArc)))) == 1
@@ -162,7 +182,7 @@ async def test_catalog_search_renders_provider_cover_and_missing_cover_fallback(
     )
 
     assert response.status_code == 200
-    assert 'src="https://example.test/story-arcs/42.jpg"' in response.text
+    assert 'src="https://comicvine.gamespot.com/a/uploads/story-arcs/42.jpg"' in response.text
     assert 'alt="Numbering Event"' in response.text
     assert 'loading="lazy"' in response.text
     assert response.text.count('class="add-series-result-cover-empty"') == 1
@@ -173,7 +193,7 @@ async def test_catalog_preview_uses_review_workspace_and_separate_canonical_root
 ):
     response = await authenticated_client.get("/story-arcs/catalog/42")
     assert response.status_code == 200
-    assert "Issues are listed in Comic Vine's returned order." in response.text
+    assert "Issues are listed in ComicVine API's returned order." in response.text
     assert "Every issue needs a different positive position." not in response.text
     assert "reading order unverified" not in response.text
     assert "1000000" in response.text and "1AU" in response.text
@@ -279,7 +299,7 @@ async def test_provider_failure_is_safe_and_retryable(
         "/story-arcs/catalog?q=event", headers={"HX-Request": "true"}
     )
     assert response.status_code == 200
-    assert "Comic Vine search failed" in response.text
+    assert "Story Arc search failed" in response.text
     assert "secret-bearing" not in response.text
     assert 'role="alert"' in response.text
 
@@ -298,7 +318,7 @@ async def test_add_rejects_empty_stale_or_invalid_member_set(
     token = re.search(r'name="fingerprint" value="([^"]+)"', response.text)
     assert token is not None
     data = {
-        "fingerprint": token.group(1),
+        **_review_fields(response),
         "library_root_id": str(root_id),
         "issue_provider_ids": ["101", "102"],
         "reading_orders": ["2", "1"],
@@ -350,7 +370,7 @@ async def test_add_persists_reviewed_order_and_independent_copy_settings(
     response = await authenticated_client.post(
         "/story-arcs/catalog/42",
         data={
-            "fingerprint": token.group(1),
+            **_review_fields(response),
             "library_root_id": str(root_id),
             "issue_provider_ids": ["101", "102"],
             "reading_orders": ["2", "1"],
@@ -394,7 +414,7 @@ async def test_changed_file_defaults_require_repreview_before_adding(
     added = await authenticated_client.post(
         "/story-arcs/catalog/42",
         data={
-            "fingerprint": token.group(1),
+            **_review_fields(preview),
             "file_defaults_fingerprint": defaults.group(1),
             "library_root_id": str(root_id),
             "issue_provider_ids": ["101", "102"],
@@ -404,7 +424,7 @@ async def test_changed_file_defaults_require_repreview_before_adding(
         follow_redirects=False,
     )
     assert added.status_code == 303
-    assert added.headers["location"].endswith("?error=file-defaults")
+    assert added.headers["location"].endswith("?error=file_defaults_changed")
     async with sec_db() as session:
         assert list(await session.scalars(select(StoryArc))) == []
 
@@ -426,7 +446,7 @@ async def test_failed_provider_cleanup_cannot_report_failure_after_committing_ad
     response = await authenticated_client.post(
         "/story-arcs/catalog/42",
         data={
-            "fingerprint": token.group(1),
+            **_review_fields(response),
             "library_root_id": str(root_id),
             "issue_provider_ids": ["101", "102"],
             "reading_orders": ["1", "2"],
@@ -475,7 +495,7 @@ async def test_add_auto_search_requires_monitoring_and_global_default_and_runs_a
     response = await authenticated_client.post(
         "/story-arcs/catalog/42",
         data={
-            "fingerprint": token.group(1),
+            **_review_fields(response),
             "library_root_id": str(root_id),
             "issue_provider_ids": ["101", "102"],
             "reading_orders": ["1", "2"],
@@ -516,7 +536,7 @@ async def test_refresh_reviews_additions_and_preserves_removed_members_and_order
     assert response.status_code == 200
     assert 'data-testid="story-arc-update-additions"' in response.text
     assert "Exact Comics #2" in response.text
-    assert "Comic Vine issue ID 102 — preserved" in response.text
+    assert "ComicVine API issue ID 102 — preserved" in response.text
     token = re.search(r'name="fingerprint" value="([^"]+)"', response.text)
     revision = re.search(r'name="expected_revision" value="([^"]+)"', response.text)
     assert token is not None and revision is not None
@@ -525,7 +545,7 @@ async def test_refresh_reviews_additions_and_preserves_removed_members_and_order
     response = await authenticated_client.post(
         f"/story-arcs/{arc_id}/catalog-refresh",
         data={
-            "fingerprint": token.group(1),
+            **_review_fields(response),
             "expected_revision": revision.group(1),
             "confirm_refresh": "true",
         },
@@ -736,7 +756,7 @@ async def test_add_runs_initial_copy_after_commit_even_when_future_sync_is_off(
     response = await authenticated_client.post(
         "/story-arcs/catalog/42",
         data={
-            "fingerprint": token.group(1),
+            **_review_fields(response),
             "library_root_id": str(root_id),
             "issue_provider_ids": ["101", "102"],
             "reading_orders": ["1", "2"],
@@ -805,7 +825,7 @@ async def test_imported_arc_refresh_requires_explicit_root_for_new_series_only(
     revision = re.search(r'name="expected_revision" value="([^"]+)"', response.text)
     assert token is not None and revision is not None
     form = {
-        "fingerprint": token.group(1),
+        **_review_fields(response),
         "expected_revision": revision.group(1),
         "confirm_refresh": "true",
     }
@@ -857,7 +877,7 @@ async def test_saved_unavailable_refresh_root_has_actionable_guidance(
     result = await authenticated_client.post(
         f"/story-arcs/{arc_id}/catalog-refresh",
         data={
-            "fingerprint": token.group(1),
+            **_review_fields(preview),
             "expected_revision": revision.group(1),
             "confirm_refresh": "true",
         },

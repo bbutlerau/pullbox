@@ -751,7 +751,8 @@ class TestRefreshSeries:
 
         provider = MagicMock()
         provider.get_series = AsyncMock(
-            return_value=SimpleNamespace(
+            return_value=SeriesMetadata(
+                provider_id="160860",
                 title="Absolute Martian Manhunter",
                 sort_title="Absolute Martian Manhunter",
                 year_start=2025,

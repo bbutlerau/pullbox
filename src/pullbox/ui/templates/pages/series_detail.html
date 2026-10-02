@@ -49,6 +49,21 @@
 
   {% include "partials/series_detail_hero.html" %}
   {% include "partials/series_detail_catalog_state_banner.html" %}
+  {% include "partials/series_metadata_links.html" %}
+  {% if series.catalog_exclusions %}
+  <details class="card p-4" data-testid="series-catalog-exclusions">
+    <summary class="flex items-center gap-2 text-sm font-medium">Catalog entries left out ({{ series.catalog_exclusions | length }})</summary>
+    <p class="mt-3 text-sm text-pb-text-sec">These GCD entries were left out when adding this series because their issue numbers are not supported. They are not merged with another printing or counted as wanted. Existing files are unchanged.</p>
+    <ul class="mt-3 space-y-2 max-h-64 overflow-y-auto text-sm">
+      {% for entry in series.catalog_exclusions %}
+      <li class="flex items-center justify-between gap-3">
+        <span class="min-w-0 break-words">{{ entry.issue_number_text or '(no issue number)' }} <span class="text-pb-text-sec">(GCD {{ entry.external_id }})</span></span>
+        <a class="btn-ghost btn-sm shrink-0" href="https://www.comics.org/issue/{{ entry.external_id | urlencode }}/" target="_blank" rel="noopener noreferrer">View GCD</a>
+      </li>
+      {% endfor %}
+    </ul>
+  </details>
+  {% endif %}
   {% include "partials/series_issues.html" %}
 
   {% include "partials/series_detail_delete_modal.html" %}

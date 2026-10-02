@@ -1,0 +1,80 @@
+{% from "components/dropdown_select.html" import dropdown_select %}
+<section class="rounded-lg border border-pb-border bg-pb-card p-4 space-y-3" data-testid="issue-metadata-links" x-data="issueMetadataLinks({{ issue.id }})" @issue-file-metadata-complete.window="load()" aria-labelledby="issue-metadata-heading">
+  <div class="flex flex-wrap items-center justify-between gap-3">
+    <div class="space-y-2">
+      <h2 id="issue-metadata-heading" class="text-sm font-semibold text-pb-text">Metadata sources</h2>
+      <p x-show="loading" class="text-sm text-pb-text-sec">Loading linked providers...</p>
+      <div class="flex flex-wrap items-center gap-2" x-cloak x-show="!loading">
+        <template x-for="identity in identities" :key="identity.namespace">
+          <span class="pill pill-neutral" x-text="label(identity.namespace) + ' ' + identity.external_id + (identity.state === 'verified' ? ' · Linked' : ' · Needs review')"></span>
+        </template>
+        <span x-show="!identities.length" class="text-sm text-pb-text-sec">No verified provider links yet.</span>
+      </div>
+    </div>
+    <div class="flex flex-wrap gap-2">
+      <button type="button" class="btn-ghost btn-sm" @click="openLink()" :disabled="loading || refreshing">Link provider</button>
+      <button type="button" class="btn-primary btn-sm" @click="refreshMetadata()" :disabled="loading || refreshing || !canRefresh">Refresh metadata</button>
+    </div>
+  </div>
+  <p class="text-sm text-pb-text-sec" role="status" x-show="syncing" x-cloak>Initial series metadata sync is in progress. Refresh will be available after it finishes.</p>
+  <p class="text-sm text-pb-text-sec" role="status" x-show="refreshing" x-cloak>Refreshing this issue's metadata...</p>
+  <p class="text-sm text-pb-success" role="status" x-show="message" x-text="message" x-cloak></p>
+  <p class="text-sm text-pb-error" role="alert" x-show="error && !open" x-text="error" x-cloak></p>
+  <details x-show="origins.length" x-cloak>
+    <summary class="text-sm font-semibold text-pb-text cursor-pointer">Field sources</summary>
+    <dl class="mt-2 grid gap-2 sm:grid-cols-2">
+      <template x-for="origin in origins" :key="origin.field"><div class="flex justify-between gap-3 text-sm"><dt class="text-pb-text-sec" x-text="origin.field.replaceAll('_', ' ')"></dt><dd class="text-pb-text" x-text="originLabel(origin)"></dd></div></template>
+    </dl>
+  </details>
+  <template x-teleport="body">
+    <div class="modal-shell" x-show="open" x-cloak @keydown.escape.window="if (open) closeLink()" @keydown.tab.window="trapFocus($event)">
+      <div class="modal-backdrop" @click="closeLink()"></div>
+      <section class="modal-panel max-w-2xl max-h-[90vh]" role="dialog" aria-modal="true" aria-labelledby="issue-link-title" tabindex="-1" x-ref="linkDialog">
+        <header class="modal-header"><h2 id="issue-link-title" class="modal-title">Link issue metadata provider</h2></header>
+        <div class="modal-body space-y-4 p-5" :aria-busy="busy">
+          <p class="text-sm text-pb-text-sec">Choose the same issue from a provider already linked to this series. Linking does not change the issue number or any files. Refresh metadata afterward to fill gaps using your source priority.</p>
+          <p class="text-sm text-pb-error" role="alert" x-show="error" x-text="error"></p>
+          <p class="text-sm text-pb-text-sec" role="status" x-show="busy">Loading provider metadata...</p>
+          <div x-show="!candidate" class="space-y-4">
+            <p x-show="!sources.length" class="text-sm text-pb-text-sec">No additional linked series provider is available for this issue. <a class="text-pb-accent underline" href="/series/{{ issue.series_id }}">Link a provider on Series Details</a> first, or enable one in <a class="text-pb-accent underline" href="/settings?tab=metadata">Metadata settings</a>.</p>
+            <form @submit.prevent="search(0)" class="space-y-3" x-show="sources.length">
+              <div><label for="issue-link-source-trigger" class="field-label">Provider</label>
+                {{ dropdown_select(name="issue-link-source", trigger_id="issue-link-source-trigger", local_model="source", options_expression="sourceOptions()", local_on_change="resetSearch()", disabled_expression="busy") }}
+              </div>
+              <button type="submit" class="btn-primary btn-sm" :disabled="busy">Browse provider issues</button>
+            </form>
+            <p class="text-sm text-pb-text-sec" x-show="searched" x-text="'Find issue #' + current.issue_number_text + ' in ' + current.series_title + '.'"></p>
+            <div class="space-y-2 max-h-96 overflow-y-auto" data-testid="issue-link-results">
+              <template x-for="result in results" :key="result.source + ':' + result.external_id">
+                <article class="flex items-center justify-between gap-3 rounded-lg border border-pb-border p-3">
+                  <div class="min-w-0"><p class="text-sm font-semibold text-pb-text break-words" x-text="'#' + result.issue_number_text + ' · ' + (result.title || current.series_title)"></p><p class="text-xs text-pb-text-sec" x-text="describe(result)"></p><p class="text-xs text-pb-text-sec" x-text="label(result.identity_namespace) + ' ' + result.external_id"></p></div>
+                  <button type="button" class="btn-ghost btn-sm shrink-0" @click="preview(result)" :disabled="busy" :aria-label="'Review issue ' + result.issue_number_text">Review</button>
+                </article>
+              </template>
+              <p x-show="searched && !results.length" role="status" class="text-sm text-pb-text-sec">No issues found for this linked series. Try another provider.</p>
+            </div>
+            <div class="flex items-center justify-between gap-2" x-show="searched && (offset > 0 || nextOffset !== null)">
+              <button type="button" class="btn-ghost btn-sm" @click="search(previousIssueOffset())" :disabled="busy || offset === 0">Previous</button>
+              <span class="text-sm text-pb-text-sec" x-text="'Issues ' + (offset + 1) + '-' + (offset + results.length)"></span>
+              <button type="button" class="btn-ghost btn-sm" @click="search(nextOffset)" :disabled="busy || nextOffset === null">Next</button>
+            </div>
+          </div>
+          <div x-show="candidate" class="space-y-3" data-testid="issue-link-review">
+            <h3 class="text-sm font-semibold text-pb-text" tabindex="-1" x-ref="reviewHeading">Confirm this is the same issue</h3>
+            <div class="grid gap-3 sm:grid-cols-2">
+              <div class="rounded-lg border border-pb-border p-3"><p class="text-xs text-pb-text-sec">Your library</p><p class="text-sm font-semibold text-pb-text" x-text="candidate && '#' + candidate.current.issue_number_text + ' · ' + (candidate.current.title || candidate.current.series_title)"></p><p class="text-sm text-pb-text-sec" x-text="candidate && describe(candidate.current)"></p></div>
+              <div class="rounded-lg border border-pb-border p-3"><p class="text-xs text-pb-text-sec" x-text="candidate && label(candidate.candidate.identity_namespace) + ' ' + candidate.candidate.external_id"></p><p class="text-sm font-semibold text-pb-text" x-text="candidate && '#' + candidate.candidate.issue_number_text + ' · ' + (candidate.candidate.title || candidate.current.series_title)"></p><p class="text-sm text-pb-text-sec" x-text="candidate && describe(candidate.candidate)"></p></div>
+            </div>
+            <p class="text-sm text-pb-text-sec">Check the title, issue designation and publication date before linking. Editions and reprints may share a number.</p>
+            <p class="text-sm text-pb-warning" x-show="conflict()" x-text="conflict()"></p>
+            <button type="button" class="btn-ghost btn-sm" @click="candidate = null; error = ''" :disabled="busy">Back to matches</button>
+          </div>
+        </div>
+        <footer class="modal-footer">
+          <button type="button" class="btn-ghost" @click="closeLink()">Cancel</button>
+          <button type="button" class="btn-primary" x-show="candidate" :disabled="busy || !candidate || !!conflict()" @click="confirm()">Link this issue</button>
+        </footer>
+      </section>
+    </div>
+  </template>
+</section>

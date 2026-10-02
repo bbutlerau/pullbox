@@ -449,7 +449,13 @@ async def test_download_covers_continues_after_series_cover_failure(
         def __init__(self, **_kwargs: object) -> None:
             return None
 
-        async def download_cover(self, _url: str, _destination: Path) -> None:
+        async def __aenter__(self) -> FailingMetadataService:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        async def download_cover(self, _url: str, _destination: Path) -> bool:
             raise RuntimeError("cdn failed")
 
     monkeypatch.setattr(subscribers.asyncio, "sleep", AsyncNoop())
@@ -458,7 +464,7 @@ async def test_download_covers_continues_after_series_cover_failure(
     monkeypatch.setattr("pullbox.services.cover_resolver.resolve_covers_dir", fake_covers_dir)
     monkeypatch.setattr("pullbox.providers.metadata.comicvine.ComicVineProvider", FakeProvider)
     monkeypatch.setattr(
-        "pullbox.services.metadata_service.MetadataService",
+        "pullbox.services.provider_artwork.ProviderArtworkClient",
         FailingMetadataService,
     )
 
@@ -523,19 +529,29 @@ async def test_download_covers_downloads_issue_covers_and_continues_after_failur
         def __init__(self, **_kwargs: object) -> None:
             return None
 
-        async def download_cover(self, url: str, destination: Path) -> None:
-            downloaded_destinations.append(destination.name)
+        async def __aenter__(self) -> FakeMetadataService:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        async def download_cover(self, url: str, destination: Path) -> bool:
+            assert destination.name.startswith(".")
+            downloaded_destinations.append(destination.name.split(".", 2)[2])
             if "001.5" in url:
                 raise RuntimeError("cdn failed")
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(b"cover")
+            return True
 
     monkeypatch.setattr(subscribers.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(subscribers, "get_session_factory", lambda: factory)
     monkeypatch.setattr("pullbox.core.comicvine_key.get_comicvine_api_key", fake_api_key)
     monkeypatch.setattr("pullbox.services.cover_resolver.resolve_covers_dir", fake_covers_dir)
     monkeypatch.setattr("pullbox.providers.metadata.comicvine.ComicVineProvider", FakeProvider)
-    monkeypatch.setattr("pullbox.services.metadata_service.MetadataService", FakeMetadataService)
+    monkeypatch.setattr(
+        "pullbox.services.provider_artwork.ProviderArtworkClient", FakeMetadataService
+    )
 
     await subscribers._download_covers_for_series(
         SeriesAdded(series_id=series_id, comicvine_id=123)

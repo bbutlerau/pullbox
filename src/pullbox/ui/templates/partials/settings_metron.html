@@ -1,0 +1,36 @@
+<div class="mt-6" data-testid="metron-access">
+{% call section_card(title="Metron access", title_style="plain", body_class="p-0") %}
+  <form @submit.prevent="saveMetron()">
+    <div class="settings-rows settings-rows-align-end">
+      {% call settings_row(label="Enable Metron", label_for="metron-enabled", help="Use Metron in your metadata source order. Disabling it keeps the saved token.") %}
+        <input id="metron-enabled" type="checkbox" class="checkbox-pb" x-model="metronEnabled" :disabled="busy">
+      {% endcall %}
+      {% call settings_row(label="Metron API token", label_for="metron-token", help="Create an API token in your Metron account under API Tokens. Leave this field blank to keep the saved token.") %}
+        <div class="w-full max-w-xl space-y-3">
+          <input id="metron-token" type="password" class="input-pb w-full font-mono" x-model="metronToken"
+                 autocomplete="new-password" maxlength="4096" spellcheck="false" autocapitalize="none"
+                 :disabled="busy || metronClear" aria-describedby="metron-token-status">
+          <p id="metron-token-status" class="text-sm text-pb-text-sec"
+             x-text="metronBase?.credential_configured ? 'A token is saved.' : 'No token is saved.'"></p>
+          <label class="flex items-center gap-3 text-sm text-pb-text" x-show="metronBase?.credential_configured" x-cloak>
+            <input type="checkbox" class="checkbox-pb" x-model="metronClear" :disabled="busy"
+                   @change="if (metronClear) metronToken = ''">
+            Remove saved token
+          </label>
+        </div>
+      {% endcall %}
+    </div>
+    <div class="px-5" x-show="metronError || metronMessage" x-cloak>
+      <p role="alert" class="pb-4 text-sm text-pb-danger" x-show="metronError" x-text="metronError"></p>
+      <p role="status" class="pb-4 text-sm text-pb-success" x-show="metronMessage" x-text="metronMessage"></p>
+    </div>
+    {% call settings_footer(align="end") %}
+      <div class="settings-footer-actions ml-auto justify-end">
+        <button type="button" class="btn-ghost" x-show="metronConflict" x-cloak :disabled="busy" @click="reloadMetron()">Load saved Metron settings</button>
+        <button type="submit" class="btn-primary" :disabled="busy || !metronDirty" :aria-busy="metronSaving"
+                x-text="metronSaving ? 'Saving Metron...' : 'Save Metron settings'">Save Metron settings</button>
+      </div>
+    {% endcall %}
+  </form>
+{% endcall %}
+</div>

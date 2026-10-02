@@ -16,6 +16,7 @@ from pullbox.models.series import Series
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.sql.elements import ColumnElement
 
 TASK_IDS = ("sync_new_issues", "refresh_metadata")
 
@@ -48,12 +49,13 @@ async def load_sweep(session: AsyncSession, task_id: str) -> MetadataSweep:
     return MetadataSweep()
 
 
-async def start_sweep(session: AsyncSession, task_id: str) -> MetadataSweep:
+async def start_sweep(
+    session: AsyncSession, task_id: str, *, eligible: ColumnElement[bool] | None = None
+) -> MetadataSweep:
     state = await load_sweep(session, task_id)
     if not state.active:
-        upper = await session.scalar(
-            select(func.max(Series.id)).where(Series.comicvine_id.isnot(None))
-        )
+        predicate = eligible if eligible is not None else Series.comicvine_id.isnot(None)
+        upper = await session.scalar(select(func.max(Series.id)).where(predicate))
         state = MetadataSweep(upper_bound=upper or 0, active=True)
         await save_sweep(session, task_id, state)
     await session.commit()
@@ -86,10 +88,19 @@ def schedule_sweep(task_id: str, state: MetadataSweep) -> None:
 
 async def recover_metadata_sweep_schedules() -> None:
     """Restore interrupted batches without waiting for tomorrow's cron."""
+    from pullbox.config import get_settings
     from pullbox.database import get_session_factory
+    from pullbox.services.metadata_series_retry import retry_deadline, retry_runtime
 
     async with get_session_factory()() as session:
+        runtime = await retry_runtime(
+            session, gcd_api_enabled=get_settings().metadata_gcd_api_v2_enabled
+        )
         for task_id in TASK_IDS:
             state = await load_sweep(session, task_id)
+            if not state.active:
+                deadline = await retry_deadline(session, task_id, runtime)
+                if deadline is not None:
+                    state = MetadataSweep(active=True, retry_at=deadline.timestamp())
             if state.active:
                 schedule_sweep(task_id, state)

@@ -375,6 +375,10 @@ async def issue_detail(
     deep_open_requested = read == "1"
     open_reader_on_load = deep_open_requested and issue_reading.primary_label is not None
 
+    from pullbox.services.metadata_credits import read_issue_credits
+
+    credits = await read_issue_credits(session, [issue.id])
+
     return _templates().TemplateResponse(
         request,
         "pages/issue_detail.html",
@@ -382,12 +386,49 @@ async def issue_detail(
             request,
             user,
             issue=issue,
+            issue_metadata_credits=credits.get(issue.id, ()),
             issue_story_arc_origin=story_arc_origin,
             issue_detail_back_url=issue_detail_back_url,
             reader_enabled=reader_enabled,
             issue_reading=issue_reading,
             open_reader_on_load=open_reader_on_load,
             reader_deep_open_unavailable=deep_open_requested and not open_reader_on_load,
+        ),
+    )
+
+
+@issue_router.get(
+    "/htmx/issues/{issue_id}/metadata",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+async def htmx_issue_metadata(
+    request: Request,
+    issue_id: int,
+    user: AuthenticatedUser,
+    session: DbSession,
+) -> Response:
+    """Render committed metadata only; no provider calls or full-page replacement."""
+    from pullbox.services.metadata_credits import read_issue_credits
+
+    issue = await _load_issue_detail_record(session, issue_id)
+    if issue is None:
+        return Response(status_code=404)
+    reader_enabled = get_settings().reader_enabled
+    reading = await _issue_reading_view(
+        session, user_id=user.id, issue=issue, reader_enabled=reader_enabled
+    )
+    credits = await read_issue_credits(session, [issue.id])
+    return _templates().TemplateResponse(
+        request,
+        "partials/issue_metadata_content.html",
+        _ctx(
+            request,
+            user,
+            issue=issue,
+            issue_metadata_credits=credits.get(issue.id, ()),
+            reader_enabled=reader_enabled,
+            issue_reading=reading,
         ),
     )
 

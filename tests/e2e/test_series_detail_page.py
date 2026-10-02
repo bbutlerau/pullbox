@@ -16,6 +16,52 @@ pytestmark = pytest.mark.e2e
 class TestSeriesDetailPage:
     """Behavior-first E2E coverage for /series/{id}."""
 
+    @pytest.mark.parametrize("theme", ["light", "dark"])
+    def test_metadata_refresh_conflict_is_actionable_without_reloading(
+        self, authed_page, seeded_server, theme
+    ):
+        page = authed_page
+        SeriesDetailPage(page, seeded_server).goto(1)
+        page.evaluate("theme => applyTheme(theme)", theme)
+        page.evaluate("window.refreshDocumentMarker = 'unchanged'")
+        detail = (
+            "A provider issue was renumbered. Review the issue match; existing files were kept."
+        )
+        page.route(
+            "**/api/v1/series/1/refresh",
+            lambda route: route.fulfill(status=409, json={"detail": detail}),
+        )
+        button = page.get_by_test_id("series-action-refresh")
+        button.click()
+        expect(page.get_by_text(detail, exact=True)).to_be_visible()
+        expect(page.locator("#toast-container > div").filter(has_text=detail)).to_be_in_viewport(
+            ratio=1
+        )
+        expect(button).to_be_enabled()
+        assert page.evaluate("window.refreshDocumentMarker") == "unchanged"
+
+    @pytest.mark.parametrize("failure", ["html", "malformed_detail", "network"])
+    def test_metadata_refresh_unexpected_failure_is_retryable(
+        self, authed_page, seeded_server, failure
+    ):
+        page = authed_page
+        SeriesDetailPage(page, seeded_server).goto(1)
+
+        def fail(route):
+            if failure == "network":
+                route.abort()
+            elif failure == "html":
+                route.fulfill(status=502, content_type="text/html", body="<h1>Gateway error</h1>")
+            else:
+                route.fulfill(status=500, json={"detail": {"internal": "not for display"}})
+
+        page.route("**/api/v1/series/1/refresh", fail)
+        button = page.get_by_test_id("series-action-refresh")
+        button.click()
+        expect(page.get_by_text("Failed to refresh metadata", exact=True)).to_be_visible()
+        expect(button).to_be_enabled()
+        expect(page.get_by_text("not for display", exact=True)).not_to_be_visible()
+
     def test_automatic_search_reports_queue_failure_instead_of_no_results(
         self,
         authed_page,

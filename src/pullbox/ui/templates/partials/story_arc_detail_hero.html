@@ -114,8 +114,8 @@
           </button>
         </form>
 
-        {% if story_arc.comicvine_id %}
-          {{ provider_update_link("/story-arcs/" ~ story_arc.id ~ "/catalog-refresh", testid="story-arc-action-provider-review") }}
+        {% if story_arc.catalog_source_label %}
+          {{ provider_update_link("/story-arcs/" ~ story_arc.id ~ "/catalog-refresh", testid="story-arc-action-provider-review", source_label=story_arc.catalog_source_label) }}
         {% endif %}
 
         {% if story_arc.active %}

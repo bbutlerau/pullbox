@@ -5,6 +5,7 @@ Import Base from here for migration target_metadata.
 """
 
 from pullbox.models.airdcpp import AirDcppAcquisition, AirDcppClientSettings
+from pullbox.models.archive_metadata_publication import ArchiveMetadataPublication
 from pullbox.models.audit_log import AuditEventType, AuditLog
 from pullbox.models.base import Base, IdentityMixin, TimestampMixin
 from pullbox.models.blocklist import BlocklistEntry, BlocklistReason
@@ -59,7 +60,25 @@ from pullbox.models.library import (
     LibraryRootPolicySource,
     MatchConfidence,
 )
+from pullbox.models.library_conversion import LibraryConversion
+from pullbox.models.library_removal import LibraryRemoval
 from pullbox.models.matching_suggestion import MatchingSuggestion, SuggestionStatus
+from pullbox.models.metadata_baseline import (
+    IssueMetadataBaseline,
+    SeriesMetadataBaseline,
+    StoryArcMetadataBaseline,
+)
+from pullbox.models.metadata_catalog_checkpoint import SeriesCatalogCheckpoint
+from pullbox.models.metadata_identity import (
+    IssueExternalIdentity,
+    IssueIdentityEvent,
+    SeriesExternalIdentity,
+    SeriesIdentityEvent,
+    StoryArcIdentityEvent,
+)
+from pullbox.models.metadata_series_retry import MetadataSeriesRetry
+from pullbox.models.metadata_source import MetadataSourceConfig
+from pullbox.models.metadata_source_account import MetadataSourceAccount
 from pullbox.models.operation_progress import (
     OperationProgress,
     OperationProgressState,
@@ -116,6 +135,7 @@ __all__ = [
     "APIKey",
     "AirDcppAcquisition",
     "AirDcppClientSettings",
+    "ArchiveMetadataPublication",
     "AuditEventType",
     "AuditLog",
     "Base",
@@ -169,6 +189,9 @@ __all__ = [
     "Issue",
     "IssueCatalogState",
     "IssueCreator",
+    "IssueExternalIdentity",
+    "IssueIdentityEvent",
+    "IssueMetadataBaseline",
     "IssueReaderState",
     "IssueStatus",
     "IssueStoryArc",
@@ -176,7 +199,9 @@ __all__ = [
     "ItemState",
     "JobState",
     "JobType",
+    "LibraryConversion",
     "LibraryFile",
+    "LibraryRemoval",
     "LibraryRoot",
     "LibraryRootPolicy",
     "LibraryRootPolicySource",
@@ -184,6 +209,9 @@ __all__ = [
     "MatchConfidence",
     "MatchingSuggestion",
     "MetadataProviderCacheEntry",
+    "MetadataSeriesRetry",
+    "MetadataSourceAccount",
+    "MetadataSourceConfig",
     "OperationProgress",
     "OperationProgressState",
     "OperationProgressTone",
@@ -196,12 +224,18 @@ __all__ = [
     "SearchLog",
     "SearchType",
     "Series",
+    "SeriesCatalogCheckpoint",
+    "SeriesExternalIdentity",
+    "SeriesIdentityEvent",
+    "SeriesMetadataBaseline",
     "SeriesStatus",
     "SeriesStatusOverride",
     "SeriesType",
     "StoryArc",
     "StoryArcExternalIdentity",
+    "StoryArcIdentityEvent",
     "StoryArcLifecycle",
+    "StoryArcMetadataBaseline",
     "StoryArcPlacement",
     "StoryArcPlacementMode",
     "StoryArcPlacementOwnership",

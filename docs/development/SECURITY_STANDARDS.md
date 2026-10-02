@@ -533,7 +533,10 @@ that lock down important behavior.
 - CBZ repack plus CBR/CB7 conversion reject unsafe archive member names before
   extraction.
 - Non-ZIP archive families do not receive equivalent decompressed-size
-  inspection today.
+  inspection in legacy conversion paths. The paired metadata writer separately
+  enforces declared and streamed limits for RAR/7z/TAR, rejects links/special
+  members and uses private numbered 7z spools instead of extracted member paths.
+  Its production consumer migration is not yet enabled.
 
 **Required standard**
 

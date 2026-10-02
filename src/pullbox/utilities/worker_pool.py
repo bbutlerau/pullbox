@@ -92,6 +92,9 @@ class WorkerPool:
         elif execution_mode == ExecutionMode.SERIAL:
             self._pool = ThreadPoolExecutor(max_workers=1)
             self._max_workers = 1
+        elif execution_mode == ExecutionMode.ASYNC:
+            self._pool = None
+            self._max_workers = 1
         else:  # pragma: no cover - defensive fallback
             raise ValueError(f"Unsupported execution mode: {execution_mode}")
         self._shutdown = False
@@ -101,7 +104,7 @@ class WorkerPool:
 
     def _ensure_active(self) -> None:
         """Raise if the pool is no longer available."""
-        if self._shutdown or self._pool is None:
+        if self._shutdown or (self._pool is None and self._execution_mode != ExecutionMode.ASYNC):
             raise RuntimeError("WorkerPool has been shut down")
 
     def _coerce_result(self, item_data: dict[str, Any], raw: object) -> ProcessedItem:
@@ -213,8 +216,9 @@ class WorkerPool:
 
     def shutdown(self) -> None:
         """Shut down the worker pool, waiting for in-progress items."""
-        if self._pool is not None and not self._shutdown:
-            self._pool.shutdown(wait=True)
+        if not self._shutdown:
+            if self._pool is not None:
+                self._pool.shutdown(wait=True)
             self._shutdown = True
             self._pool = None
             self._control_dir.cleanup()

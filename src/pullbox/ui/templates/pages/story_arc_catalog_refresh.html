@@ -4,6 +4,7 @@
 {% from "components/page_dock.html" import page_dock %}
 
 {% set arc_url = "/story-arcs/" ~ story_arc_id %}
+{% set source_label = source_label|default("Comic Vine") %}
 {% set check_url = arc_url ~ "/catalog-refresh" %}
 {% set additions = changes.added_issue_provider_ids if changes else [] %}
 {% set removals = changes.removed_issue_provider_ids if changes else [] %}
@@ -52,20 +53,20 @@
         <p class="series-domain-info-label mb-2">Check for updates</p>
         {% set title_parts = arc_name.split(" ", 1) %}
         <h1 class="series-domain-hero-title">
-          <a href="{{ arc_comicvine_url }}" class="series-domain-hero-title-link" target="_blank" rel="noopener" aria-label="Open {{ arc_name }} on ComicVine">
+          {% if arc_comicvine_url %}<a href="{{ arc_comicvine_url }}" class="series-domain-hero-title-link" target="_blank" rel="noopener" aria-label="Open {{ arc_name }} on {{ source_label }}">{% endif %}
             {{ title_parts[0]|upper }}{% if title_parts|length > 1 %} <span>{{ title_parts[1]|upper }}</span>{% endif %}
-          </a>
+          {% if arc_comicvine_url %}</a>{% endif %}
         </h1>
-        <p class="series-domain-hero-description">Compare Comic Vine's issue list with this story arc. Your existing reading order and files stay unchanged.</p>
+        <p class="series-domain-hero-description">Compare {{ source_label }}'s issue list with this story arc. Your existing reading order and files stay unchanged.</p>
         <div class="series-domain-status-row">
           <span class="pill {{ 'pill-danger' if error_message else 'pill-success' if up_to_date else 'pill-warning' if not changes else 'pill-info' }}">{{ check_state }}</span>
-          <span class="pill pill-neutral">Comic Vine</span>
+          <span class="pill pill-neutral">{{ source_label }}</span>
         </div>
       </div>
       <aside class="series-domain-actions-panel" aria-labelledby="story-arc-update-actions-title">
         <p id="story-arc-update-actions-title" class="series-domain-actions-title">Review <span>updates</span></p>
         <div class="series-domain-actions-buttons">
-          {{ provider_update_link(check_url, label="Check again", testid="story-arc-update-retry") }}
+          {{ provider_update_link(check_url, label="Check again", testid="story-arc-update-retry", source_label=source_label) }}
           <a href="{{ arc_url }}" class="btn-ghost">Back to story arc</a>
         </div>
       </aside>
@@ -80,12 +81,12 @@
   {% elif preview and not preview.membership_complete %}
     <div role="alert" class="rounded-lg border border-pb-warning/40 bg-pb-warning/10 px-4 py-3 text-sm text-pb-text">
       <p class="font-semibold">Incomplete member list</p>
-      <p class="mt-1">Comic Vine didn't return a complete issue list. Nothing has changed. Check again before saving updates.</p>
+      <p class="mt-1">{{ source_label }} didn't return a complete issue list. Nothing has changed. Check again before saving updates.</p>
     </div>
   {% elif up_to_date %}
     <div role="status" class="rounded-lg border border-pb-success/40 bg-pb-success/10 px-4 py-3 text-sm text-pb-text">
       <p class="font-semibold">This story arc is up to date</p>
-      <p class="mt-1">Its issue list matches Comic Vine. There's nothing to save.</p>
+      <p class="mt-1">Its issue list matches {{ source_label }}. There's nothing to save.</p>
     </div>
   {% endif %}
 
@@ -97,6 +98,7 @@
         <p class="text-sm text-pb-text-sec">New issues are appended and become eligible for acquisition. Confirm their reading order before files are synchronized to an arc folder. Existing names, memberships, reading order, and files stay unchanged.</p>
         <input type="hidden" name="expected_revision" value="{{ changes.revision }}">
         <input type="hidden" name="fingerprint" value="{{ preview.fingerprint }}">
+        {% if source_revision is defined %}<input type="hidden" name="source_revision" value="{{ source_revision }}">{% endif %}
         {% if needs_library_root %}
           <div class="max-w-xl">
             <label for="refresh-library-root" class="mb-1 block text-sm font-medium text-pb-text">Library root for new series</label>
@@ -128,7 +130,7 @@
       {"label": "status", "value": check_state},
       {"label": "new issues", "value": additions|length if changes else "—"},
       {"label": "no longer listed", "value": removals|length if changes else "—"},
-      {"label": "source", "value": "Comic Vine"},
+      {"label": "source", "value": source_label},
     ]) }}
   </div>
 {% endblock %}

@@ -37,5 +37,10 @@
       </svg>
     </button>
   </div>
+  {% if issue.library_file.file_format.value == 'cbz' and issue.library_file.storage_mode.value == 'managed' %}
+    {% include "partials/issue_file_metadata.html" %}
+  {% else %}
+    <p class="text-sm text-pb-text-sec mt-3">File metadata writing is available for managed CBZ copies. Files kept in place are not modified.</p>
+  {% endif %}
 </section>
 {% endif %}

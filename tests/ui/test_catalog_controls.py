@@ -89,10 +89,12 @@ async def test_add_series_labels_local_search_without_api_key(
 ):
     reader = installed_reader(tmp_path)
     monkeypatch.setattr("pullbox.services.catalog.reader.get_catalog_reader", lambda: reader)
-    response = await authenticated_client.get("/series/add?q=Batman")
+    monkeypatch.setattr("pullbox.providers.metadata.sources.get_catalog_reader", lambda: reader)
+    response = await authenticated_client.get("/series/add?q=Batman&source=comicvine_local")
     assert response.status_code == 200
-    assert "Search local catalog" in response.text
+    assert "Search ComicVine local" in response.text
     assert "Batman" in response.text
+    assert 'data-series-source="comicvine_local"' in response.text
     assert "Check your API key" not in response.text
 
 

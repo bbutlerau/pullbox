@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import shutil
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 import structlog
@@ -181,14 +181,6 @@ async def ensure_utility_directories(
         )
 
 
-def _log_trash_walk_error(error: OSError) -> None:
-    logger.warning(
-        "utility_trash_walk_failed",
-        path=getattr(error, "filename", None),
-        error=str(error),
-    )
-
-
 def build_trash_destination(
     trash_dir: Path,
     source: Path,
@@ -297,132 +289,3 @@ def restore_file_from_utility_trash(
 
     if temp_backup is not None and temp_backup.exists():
         temp_backup.unlink()
-
-
-def _remove_tree(path: Path) -> int:
-    """Delete a file or directory tree and return the removed-entry count."""
-    deleted = 0
-
-    if not path.exists():
-        return 0
-
-    if path.is_file() or path.is_symlink():
-        path.unlink()
-        return 1
-
-    for root, dirnames, filenames in path.walk(top_down=False, on_error=_log_trash_walk_error):
-        dirnames.sort()
-        filenames.sort()
-        for filename in filenames:
-            file_path = root / filename
-            try:
-                file_path.unlink()
-                deleted += 1
-            except OSError as exc:
-                logger.warning(
-                    "utility_trash_delete_failed",
-                    path=str(file_path),
-                    error=str(exc),
-                )
-        for dirname in dirnames:
-            dir_path = root / dirname
-            try:
-                dir_path.rmdir()
-                deleted += 1
-            except OSError as exc:
-                logger.warning(
-                    "utility_trash_delete_failed",
-                    path=str(dir_path),
-                    error=str(exc),
-                )
-    try:
-        path.rmdir()
-        deleted += 1
-    except OSError as exc:
-        logger.warning(
-            "utility_trash_delete_failed",
-            path=str(path),
-            error=str(exc),
-        )
-    return deleted
-
-
-def empty_utility_trash(trash_dir: Path) -> int:
-    """Delete all contents from the utility trash directory, preserving the root."""
-    if not trash_dir.exists():
-        return 0
-
-    deleted = 0
-    for child in sorted(trash_dir.iterdir(), key=lambda entry: entry.name):
-        try:
-            deleted += _remove_tree(child)
-        except OSError as exc:
-            logger.warning(
-                "utility_trash_delete_failed",
-                path=str(child),
-                error=str(exc),
-            )
-
-    logger.info("utility_trash_emptied", directory=str(trash_dir), deleted_entries=deleted)
-    return deleted
-
-
-def cleanup_utility_trash_retention(
-    trash_dir: Path,
-    retention_days: int,
-) -> int:
-    """Delete trash files older than the retention window and prune empty folders."""
-    if not trash_dir.exists():
-        return 0
-
-    cutoff = datetime.now(UTC) - timedelta(days=retention_days)
-    deleted = 0
-
-    for root, dirnames, filenames in trash_dir.walk(top_down=False, on_error=_log_trash_walk_error):
-        dirnames.sort()
-        filenames.sort()
-
-        for filename in filenames:
-            file_path = root / filename
-            try:
-                modified_at = datetime.fromtimestamp(file_path.stat().st_mtime, tz=UTC)
-            except OSError as exc:
-                logger.warning(
-                    "utility_trash_stat_failed",
-                    path=str(file_path),
-                    error=str(exc),
-                )
-                continue
-            if modified_at > cutoff:
-                continue
-            try:
-                file_path.unlink()
-                deleted += 1
-            except OSError as exc:
-                logger.warning(
-                    "utility_trash_delete_failed",
-                    path=str(file_path),
-                    error=str(exc),
-                )
-
-        for dirname in dirnames:
-            dir_path = root / dirname
-            try:
-                if dir_path.exists() and not any(dir_path.iterdir()):
-                    dir_path.rmdir()
-                    deleted += 1
-            except OSError as exc:
-                logger.warning(
-                    "utility_trash_prune_failed",
-                    path=str(dir_path),
-                    error=str(exc),
-                )
-
-    if deleted:
-        logger.info(
-            "utility_trash_retention_cleanup_complete",
-            directory=str(trash_dir),
-            retention_days=retention_days,
-            deleted_entries=deleted,
-        )
-    return deleted

@@ -19,6 +19,7 @@ from pullbox.models.config import DEFAULT_SYSTEM_CONFIG, SystemConfig
 from pullbox.models.library import LibraryFile, LibraryFileStorageMode, LibraryRoot
 from pullbox.services.database_optimization_service import DatabaseOptimizationService
 from pullbox.services.health_helpers import _sqlite_database_path
+from pullbox.services.library_trash_cleanup import cleanup_trash
 from pullbox.utilities.import_guards import (
     ensure_no_active_import_file_mutation,
     ensure_utility_job_allowed_during_import,
@@ -67,8 +68,6 @@ from pullbox.utilities.schemas import (
     QueueStatusResponse,
 )
 from pullbox.utilities.settings import (
-    cleanup_utility_trash_retention,
-    empty_utility_trash,
     resolve_utility_directory,
 )
 from pullbox.utilities.sse import subscribe
@@ -168,7 +167,9 @@ async def _resolve_utility_trash_context(session: DbSession) -> tuple[Path, int]
 
 async def _enforce_utility_trash_retention(session: DbSession) -> int:
     trash_dir, retention_days = await _resolve_utility_trash_context(session)
-    return cleanup_utility_trash_retention(trash_dir, retention_days)
+    # Setup only reads configuration/guards; finish it before per-entry maintenance.
+    await session.commit()
+    return (await cleanup_trash(session, trash_dir, retention_days=retention_days)).deleted_entries
 
 
 async def _delete_job_records(
@@ -235,10 +236,20 @@ async def empty_trash(
     await ensure_no_active_import_file_mutation(session)
     trash_dir, _retention_days = await _resolve_utility_trash_context(session)
     trash_dir.mkdir(parents=True, exist_ok=True)
-    deleted_entries = empty_utility_trash(trash_dir)
+    await session.commit()
+    result = await cleanup_trash(session, trash_dir)
+    if result.retained_entries:
+        return {
+            "message": (
+                "Trash cleanup finished. Protected or changed entries were kept; "
+                "see the logs for details."
+            ),
+            "deleted_entries": result.deleted_entries,
+            "retained_entries": result.retained_entries,
+        }
     return {
         "message": "Trash emptied.",
-        "deleted_entries": deleted_entries,
+        "deleted_entries": result.deleted_entries,
     }
 
 

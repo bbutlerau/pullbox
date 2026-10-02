@@ -10,7 +10,7 @@ from sqlalchemy import false, select, update
 from sqlalchemy.exc import IntegrityError
 
 from pullbox.core.issue_numbers import parse_issue_number_text
-from pullbox.models.issue import Issue
+from pullbox.core.metadata_identity import IdentityNamespace, MetadataEntityKind, MetadataSource
 from pullbox.models.library import LibraryFile
 from pullbox.models.story_arc import (
     IssueStoryArc,
@@ -20,7 +20,25 @@ from pullbox.models.story_arc import (
     StoryArcResolutionState,
     StoryArcSourceKind,
 )
+from pullbox.services.metadata_arc_baselines import persist_arc_metadata
+from pullbox.services.metadata_arc_catalog import (
+    MAX_CATALOG_MEMBERS,
+    MAX_CATALOG_PARENTS,
+    project_source_arc_catalog,
+)
+from pullbox.services.metadata_arc_refresh import ArcMetadataRefresh, require_arc_refresh_state
+from pullbox.services.metadata_assembly import MetadataAssemblyError
+from pullbox.services.metadata_baselines import MetadataBaselineConflictError
+from pullbox.services.story_arc_catalog_evidence import (
+    record_catalog_crosswalks,
+    require_crosswalk_ownership,
+)
+from pullbox.services.story_arc_catalog_identity import (
+    catalog_owners,
+    require_catalog_source_revision,
+)
 from pullbox.services.story_arc_catalog_persistence import (
+    attach_arc_identity,
     canonical_root,
     publisher_id,
     seed_members,
@@ -31,8 +49,8 @@ from pullbox.services.story_arc_catalog_types import (
     StoryArcCatalogPreview,
     StoryArcCatalogRefreshPreview,
     StoryArcCatalogRefreshResult,
+    catalog_provider_id,
     catalog_snapshot,
-    exact_provider_id,
     snapshot_fingerprint,
 )
 from pullbox.services.story_arc_placement_integration import (
@@ -49,19 +67,19 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from pullbox.models.issue import Issue
     from pullbox.providers.base import IssueMetadata, SeriesMetadata
     from pullbox.providers.story_arcs import StoryArcMetadata, StoryArcSearchResult
 
 __all__ = [
+    "MAX_CATALOG_MEMBERS",
+    "MAX_CATALOG_PARENTS",
     "StoryArcCatalogError",
     "StoryArcCatalogPreview",
     "StoryArcCatalogRefreshPreview",
     "StoryArcCatalogRefreshResult",
     "StoryArcCatalogService",
 ]
-
-MAX_CATALOG_MEMBERS = 2_000
-MAX_CATALOG_PARENTS = 200
 
 
 class _CatalogProvider(Protocol):
@@ -82,55 +100,56 @@ class StoryArcCatalogService:
     dispatch searches. UI adapters commit adoption before scheduling acquisition.
     """
 
-    def __init__(self, provider: _CatalogProvider) -> None:
+    def __init__(
+        self,
+        provider: _CatalogProvider | None = None,
+        *,
+        source: MetadataSource = MetadataSource.COMICVINE_API,
+        source_revision: int | None = None,
+    ) -> None:
         self.provider = provider
+        self.source = source
+        self.source_revision = source_revision
         self.domain = StoryArcService()
 
     async def search(
         self, query: str, *, limit: int = 20, offset: int = 0
     ) -> tuple[list[StoryArcSearchResult], int]:
+        if self.provider is None:
+            raise StoryArcCatalogError("provider_required", "Use the source registry to search")
         return await self.provider.search_story_arcs_page(query, limit=limit, offset=offset)
 
     async def find_existing(
         self, session: AsyncSession, provider_ids: Sequence[str]
     ) -> dict[str, int]:
-        ids = [exact_provider_id(value) for value in provider_ids]
-        rows = await session.execute(
-            select(StoryArc.comicvine_id, StoryArc.id).where(StoryArc.comicvine_id.in_(ids))
+        return await catalog_owners(
+            session, MetadataEntityKind.STORY_ARC, provider_ids, self.source
         )
-        existing = {str(provider_id): arc_id for provider_id, arc_id in rows}
-        identities = await session.execute(
-            select(
-                StoryArcExternalIdentity.external_id, StoryArcExternalIdentity.story_arc_id
-            ).where(
-                StoryArcExternalIdentity.source == "comicvine",
-                StoryArcExternalIdentity.namespace == "story_arc",
-                StoryArcExternalIdentity.external_id.in_(provider_ids),
-            )
-        )
-        for provider_id, arc_id in identities:
-            if provider_id in existing and existing[provider_id] != arc_id:
-                raise StoryArcCatalogError(
-                    "identity_conflict", "Provider story arc has conflicting local identities"
-                )
-            existing[provider_id] = arc_id
-        return existing
 
     async def preview(
         self, provider_id: str, *, known_series_provider_ids: Collection[str] = ()
     ) -> StoryArcCatalogPreview:
-        exact_provider_id(provider_id)
+        if self.provider is None:
+            raise StoryArcCatalogError("provider_required", "Use the source registry to preview")
+        catalog_provider_id(provider_id, self.source)
         metadata = await self.provider.get_story_arc(provider_id)
         if metadata.provider_id != provider_id:
             raise StoryArcCatalogError(
                 "identity_conflict", "Provider returned a different story arc"
             )
         ids = metadata.issue_provider_ids
-        self._validate_ids(ids)
-        preview = StoryArcCatalogPreview(metadata=metadata, issues=(), series=(), fingerprint="")
+        self._validate_ids(ids, self.source)
+        preview = StoryArcCatalogPreview(
+            metadata=metadata,
+            issues=(),
+            series=(),
+            fingerprint="",
+            source=self.source,
+            source_revision=self.source_revision,
+        )
         if metadata.membership_complete:
             issues = tuple(await self.provider.get_story_arc_issues(ids)) if ids else ()
-            self._validate_hydration(ids, issues)
+            self._validate_hydration(ids, issues, self.source)
             parent_ids = tuple(dict.fromkeys(issue.series_provider_id for issue in issues))
             if len(parent_ids) > MAX_CATALOG_PARENTS:
                 raise StoryArcCatalogError(
@@ -141,6 +160,7 @@ class StoryArcCatalogService:
                 if parent_id in known_series_provider_ids:
                     continue
                 parent = await self.provider.get_series(parent_id)
+                catalog_provider_id(parent.provider_id, self.source)
                 if parent.provider_id != parent_id or not parent.title.strip():
                     raise StoryArcCatalogError(
                         "identity_conflict", "Provider returned a different parent series"
@@ -192,9 +212,11 @@ class StoryArcCatalogService:
         await self._enclose_savepoint(session)
         try:
             async with session.begin_nested():
+                await require_catalog_source_revision(session, preview)
+                await require_crosswalk_ownership(session, preview)
                 existing_identity = await session.scalar(
                     select(StoryArcExternalIdentity.id).where(
-                        StoryArcExternalIdentity.source == "comicvine",
+                        StoryArcExternalIdentity.source == preview.source.identity_namespace.value,
                         StoryArcExternalIdentity.namespace == "story_arc",
                         StoryArcExternalIdentity.external_id == preview.metadata.provider_id,
                     )
@@ -203,7 +225,6 @@ class StoryArcCatalogService:
                     raise StoryArcCatalogError(
                         "identity_conflict", "This provider story arc identity is already assigned"
                     )
-                issues = await seed_members(session, preview, root, order)
                 arc = await self.domain.create(
                     session,
                     name=preview.metadata.title,
@@ -214,23 +235,20 @@ class StoryArcCatalogService:
                     sync_enabled=policy.synchronize,
                     source_kind=StoryArcSourceKind.PROVIDER,
                 )
-                arc.comicvine_id = exact_provider_id(preview.metadata.provider_id)
-                arc.comicvine_url = preview.metadata.comicvine_url
+                arc.comicvine_url = (
+                    preview.metadata.comicvine_url
+                    if preview.source.identity_namespace is IdentityNamespace.COMICVINE
+                    else None
+                )
                 arc.cover_url = preview.metadata.cover_url
                 arc.publisher_id = await publisher_id(session, preview.metadata.publisher)
                 arc.target_library_root_id = policy.target_library_root_id
                 arc.policy_schema_version = STORY_ARC_PLACEMENT_POLICY_SCHEMA_VERSION
                 arc.policy_snapshot = policy.snapshot
-                session.add(
-                    StoryArcExternalIdentity(
-                        story_arc_id=arc.id,
-                        source="comicvine",
-                        namespace="story_arc",
-                        external_id=preview.metadata.provider_id,
-                        source_url=preview.metadata.comicvine_url,
-                        evidence={"snapshot_fingerprint": preview.fingerprint},
-                    )
-                )
+                await attach_arc_identity(session, arc, preview)
+                await persist_arc_metadata(session, arc, preview, created=True)
+                issues = await seed_members(session, preview, root, order)
+                await record_catalog_crosswalks(session, preview)
                 for position, provider_id in enumerate(order, start=1):
                     member = await self._member(
                         session, arc, preview, issues[provider_id], provider_id, position
@@ -250,6 +268,11 @@ class StoryArcCatalogService:
                         await enqueue_story_arc_sync_work(session, library_file)
                 await initialize_catalog_placements(session, arc)
                 return arc
+        except (MetadataBaselineConflictError, MetadataAssemblyError) as exc:
+            raise StoryArcCatalogError(
+                "metadata_baseline_conflict",
+                "Metadata baseline needs review; preview the arc again",
+            ) from exc
         except IntegrityError as exc:
             raise StoryArcCatalogError(
                 "identity_conflict", "Catalog identities changed; refresh the preview"
@@ -278,13 +301,15 @@ class StoryArcCatalogService:
             for row in rows
             if row.source_kind is StoryArcSourceKind.PROVIDER
             and row.source_arc_id == preview.metadata.provider_id
+            and row.evidence.get("provider", "comicvine") == preview.source.identity_namespace.value
         }
-        canonical_ids = await session.scalars(
-            select(Issue.comicvine_id)
-            .join(IssueStoryArc, IssueStoryArc.issue_id == Issue.id)
-            .where(IssueStoryArc.story_arc_id == arc.id, Issue.comicvine_id.is_not(None))
+        owners = await catalog_owners(
+            session, MetadataEntityKind.ISSUE, preview.metadata.issue_provider_ids, preview.source
         )
-        represented_ids = existing | {str(value) for value in canonical_ids}
+        member_issue_ids = {row.issue_id for row in rows if row.issue_id is not None}
+        represented_ids = existing | {
+            key for key, owner in owners.items() if owner in member_issue_ids
+        }
         incoming = set(preview.metadata.issue_provider_ids)
         return StoryArcCatalogRefreshPreview(
             arc.id,
@@ -298,6 +323,10 @@ class StoryArcCatalogService:
                 row.source_issue_id
                 for row in rows
                 if row.source_issue_id in existing
+                and row.source_kind is StoryArcSourceKind.PROVIDER
+                and row.source_arc_id == preview.metadata.provider_id
+                and row.evidence.get("provider", "comicvine")
+                == preview.source.identity_namespace.value
                 and row.source_issue_id not in incoming
                 and row.source_issue_id is not None
             ),
@@ -311,7 +340,11 @@ class StoryArcCatalogService:
         *,
         expected_revision: int,
         library_root_id: int | None = None,
+        replace_metadata: bool = True,
+        metadata_refresh: ArcMetadataRefresh | None = None,
     ) -> StoryArcCatalogRefreshResult:
+        if metadata_refresh is not None and metadata_refresh.before.entity.local_id != story_arc_id:
+            raise StoryArcCatalogError("metadata_changed", "Story arc changed; refresh the review")
         delta = await self.preview_refresh(session, story_arc_id, preview)
         if isinstance(expected_revision, bool) or delta.revision != expected_revision:
             raise StoryArcCatalogError("revision_conflict", "Story arc changed; refresh the review")
@@ -324,6 +357,10 @@ class StoryArcCatalogService:
         await self._enclose_savepoint(session)
         try:
             async with session.begin_nested():
+                if metadata_refresh is not None:
+                    await require_arc_refresh_state(session, metadata_refresh)
+                await require_catalog_source_revision(session, preview)
+                await require_crosswalk_ownership(session, preview)
                 claimed = await session.execute(
                     update(StoryArc)
                     .where(StoryArc.id == arc.id, StoryArc.revision == expected_revision)
@@ -333,9 +370,19 @@ class StoryArcCatalogService:
                     raise StoryArcCatalogError(
                         "revision_conflict", "Story arc changed; refresh the review"
                     )
+                await attach_arc_identity(session, arc, preview)
+                await persist_arc_metadata(
+                    session,
+                    arc,
+                    preview,
+                    created=False,
+                    replace_managed=replace_metadata,
+                    candidates=metadata_refresh.fetched.candidates if metadata_refresh else None,
+                )
                 issues = await seed_members(
                     session, preview, root, preview.metadata.issue_provider_ids
                 )
+                await record_catalog_crosswalks(session, preview)
                 rows = list(
                     (
                         await session.scalars(
@@ -348,6 +395,8 @@ class StoryArcCatalogService:
                     if (
                         row.source_kind is StoryArcSourceKind.PROVIDER
                         and row.source_arc_id == preview.metadata.provider_id
+                        and row.evidence.get("provider", "comicvine")
+                        == preview.source.identity_namespace.value
                         and row.source_issue_id in issues
                         and row.issue_id is not None
                         and row.issue_id != issues[row.source_issue_id].id
@@ -370,12 +419,32 @@ class StoryArcCatalogService:
                 pending = tuple(
                     row.id for row in rows if row.evidence.get("catalog_review_required") is True
                 ) + tuple(created)
-                arc.cover_url = preview.metadata.cover_url
+                if preview.source_evidence is None:
+                    arc.cover_url = preview.metadata.cover_url
                 self._diagnostics(arc, preview, root.id, delta.removed_issue_provider_ids, pending)
+                if metadata_refresh is not None:
+                    arc.diagnostics = {
+                        **arc.diagnostics,
+                        "metadata_refresh": {
+                            "checked_at": datetime.now(UTC).isoformat(),
+                            "outcomes": [
+                                item.model_dump(
+                                    mode="json",
+                                    include={"source", "status", "retry_after_seconds"},
+                                )
+                                for item in metadata_refresh.fetched.outcomes
+                            ],
+                        },
+                    }
                 await session.flush()
                 return StoryArcCatalogRefreshResult(
                     arc, tuple(created), delta.removed_issue_provider_ids
                 )
+        except (MetadataBaselineConflictError, MetadataAssemblyError) as exc:
+            raise StoryArcCatalogError(
+                "metadata_baseline_conflict",
+                "Metadata baseline needs review; preview the arc again",
+            ) from exc
         except IntegrityError as exc:
             raise StoryArcCatalogError(
                 "identity_conflict", "Catalog identities changed; refresh the preview"
@@ -387,9 +456,11 @@ class StoryArcCatalogService:
         arc = await session.get(StoryArc, story_arc_id)
         if arc is None or arc.lifecycle is not StoryArcLifecycle.ACTIVE:
             raise StoryArcCatalogError("arc_unavailable", "Story arc is unavailable or archived")
-        if arc.comicvine_id != exact_provider_id(preview.metadata.provider_id):
+        owners = await self.find_existing(session, [preview.metadata.provider_id])
+        if owners.get(preview.metadata.provider_id) != arc.id:
             raise StoryArcCatalogError(
-                "identity_conflict", "Provider snapshot belongs to a different story arc"
+                "identity_conflict",
+                "Story arc identity needs review; the snapshot has no matching current owner",
             )
         return arc
 
@@ -425,10 +496,10 @@ class StoryArcCatalogService:
         if parent is not None:
             member.source_series_name = parent.title
             member.source_publisher = parent.publisher
-        member.resolution_method = "exact_comicvine_id"
+        member.resolution_method = f"exact_{preview.source.identity_namespace.value}_id"
         member.resolution_confidence = 1.0
         member.evidence = {
-            "provider": "comicvine",
+            "provider": preview.source.identity_namespace.value,
             "snapshot_fingerprint": preview.fingerprint,
             "order_basis": preview.order_basis,
             "provider_response_ordinal": member.source_ordinal,
@@ -473,7 +544,9 @@ class StoryArcCatalogService:
         }
 
     @staticmethod
-    def _validate_ids(ids: Sequence[str]) -> None:
+    def _validate_ids(
+        ids: Sequence[str], source: MetadataSource = MetadataSource.COMICVINE_API
+    ) -> None:
         if len(ids) > MAX_CATALOG_MEMBERS:
             raise StoryArcCatalogError(
                 "catalog_limit_exceeded", "This arc exceeds the supported membership limit"
@@ -483,16 +556,20 @@ class StoryArcCatalogService:
                 "identity_conflict", "Provider returned duplicate arc members"
             )
         for value in ids:
-            exact_provider_id(value)
+            catalog_provider_id(value, source)
 
     @staticmethod
-    def _validate_hydration(ids: Sequence[str], issues: Sequence[IssueMetadata]) -> None:
+    def _validate_hydration(
+        ids: Sequence[str],
+        issues: Sequence[IssueMetadata],
+        source: MetadataSource = MetadataSource.COMICVINE_API,
+    ) -> None:
         if tuple(issue.provider_id for issue in issues) != tuple(ids):
             raise StoryArcCatalogError(
                 "incomplete_hydration", "Provider did not hydrate the exact complete arc membership"
             )
         for issue in issues:
-            exact_provider_id(issue.series_provider_id)
+            catalog_provider_id(issue.series_provider_id, source)
             try:
                 parse_issue_number_text(issue.issue_number_text or issue.issue_number)
             except ValueError as exc:
@@ -501,6 +578,21 @@ class StoryArcCatalogService:
                 ) from exc
 
     def _validate_preview(self, preview: StoryArcCatalogPreview) -> None:
+        if preview.source_evidence is not None:
+            if preview.source_revision is None:
+                raise StoryArcCatalogError(
+                    "source_changed", "Source snapshot needs a current policy revision"
+                )
+            projected = project_source_arc_catalog(preview.source_evidence, preview.source_revision)
+            if catalog_snapshot(projected) != catalog_snapshot(preview):
+                raise StoryArcCatalogError(
+                    "snapshot_changed",
+                    "Catalog projection disagrees with source evidence; preview the arc again",
+                )
+        if preview.source is not self.source:
+            raise StoryArcCatalogError(
+                "identity_conflict", "Catalog snapshot belongs to another source"
+            )
         if snapshot_fingerprint(preview) != preview.fingerprint:
             raise StoryArcCatalogError(
                 "snapshot_changed", "Catalog snapshot changed; review it again"
@@ -509,5 +601,34 @@ class StoryArcCatalogService:
             raise StoryArcCatalogError(
                 "incomplete_membership", "Provider membership is incomplete; nothing was added"
             )
-        self._validate_ids(preview.metadata.issue_provider_ids)
-        self._validate_hydration(preview.metadata.issue_provider_ids, preview.issues)
+        count = preview.metadata.declared_issue_count
+        if (
+            not preview.metadata.title.strip()
+            or len(preview.metadata.title) > 500
+            or (count is not None and (type(count) is not int or count != len(preview.issues)))
+        ):
+            raise StoryArcCatalogError(
+                "incomplete_membership",
+                "Provider profile and membership disagree; review the arc again",
+            )
+        parent_ids = [parent.provider_id for parent in preview.series]
+        if len(parent_ids) != len(set(parent_ids)) or len(parent_ids) > MAX_CATALOG_PARENTS:
+            raise StoryArcCatalogError(
+                "identity_conflict", "Provider returned duplicate or excessive parent series"
+            )
+        required_parents = {issue.series_provider_id for issue in preview.issues}
+        for parent in preview.series:
+            catalog_provider_id(parent.provider_id, preview.source)
+            if (
+                parent.provider_id not in required_parents
+                or not parent.title.strip()
+                or len(parent.title) > 500
+            ):
+                raise StoryArcCatalogError(
+                    "identity_conflict", "Provider returned an invalid parent series"
+                )
+        catalog_provider_id(preview.metadata.provider_id, preview.source)
+        self._validate_ids(preview.metadata.issue_provider_ids, preview.source)
+        self._validate_hydration(
+            preview.metadata.issue_provider_ids, preview.issues, preview.source
+        )

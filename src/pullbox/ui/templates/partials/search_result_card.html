@@ -4,20 +4,22 @@
 {% set result_card_is_add = result_card_mode == "add" %}
 {% set result_card_is_import_override = result_card_mode == "import_override" %}
 {% set result_card_is_orphaned = result_card_mode == "orphaned" %}
-{% set result_id = r.comicvine_id %}
+{% set result_id = r.external_id if result_card_is_add else r.comicvine_id %}
 {% set result_title = r.title %}
 {% set result_year = r.year_start %}
 {% set result_publisher = r.publisher_name %}
 {% set result_issue_count = r.issue_count %}
-{% set result_cv_url = r.comicvine_url %}
+{% set result_cv_url = r.resource_url if result_card_is_add else r.comicvine_url %}
 {% set result_already_added = r.already_added %}
 {% set result_library_series_id = r.library_series_id %}
 
 {% set library_href = "/series/" ~ result_library_series_id if result_card_is_add and result_already_added and result_library_series_id else none %}
 {% set card_testid = "import-collection-cv-result-" ~ result_id if result_card_is_import_override else "import-orphaned-cv-result-" ~ result_id if result_card_is_orphaned else "add-series-result-card" %}
-{% call(slot) comicvine_result_card("cv-result-" ~ result_id, card_testid, is_static=result_card_is_add and result_already_added) %}
+{% call(slot) comicvine_result_card(r.dom_id if result_card_is_add else "cv-result-" ~ result_id, card_testid, is_static=result_card_is_add and result_already_added) %}
 {% if slot == "cover" %}
-  {{ comicvine_result_cover(r.cover_url, result_title, href=library_href, link_testid="add-series-existing-cover-link" if library_href else none) }}
+  {{ comicvine_result_cover(r.cover_url, result_title, href=library_href, link_testid="add-series-existing-cover-link" if library_href else none,
+    metron_id=result_id if result_card_is_add and r.source == 'metron_api' and not r.cover_url else none,
+    source_revision=(search_source_revisions|default({})).get(r.source) if result_card_is_add else none) }}
 {% elif slot == "details" %}
         <h3 data-testid="add-series-result-title" class="add-series-result-title">
           {% if library_href %}
@@ -48,6 +50,15 @@
           {% if result_publisher %}<span>{{ result_publisher }}</span>{% endif %}
           {% if result_year %}<span>{{ result_year }}</span>{% endif %}
           {% if result_issue_count %}<span>{{ result_issue_count }} issues</span>{% endif %}
+          {% if result_card_is_add %}
+            <span class="pill pill-info">{{ r.source_label }}</span>
+            {% if result_cv_url %}
+              <a href="{{ result_cv_url }}" target="_blank" rel="noopener noreferrer" class="break-all text-pb-text-link hover:underline">{{ r.identity_namespace }} {{ result_id }}</a>
+            {% else %}
+              <span class="break-all">{{ r.identity_namespace }} {{ result_id }}</span>
+            {% endif %}
+            {% if r.series_type %}<span>{{ r.series_type }}</span>{% endif %}
+          {% endif %}
           {% if not result_card_is_add %}<span>CV {{ result_id }}</span>{% endif %}
         </div>
 
@@ -90,10 +101,14 @@
           </button>
         {% elif result_already_added %}
           {{ comicvine_in_library_badge() }}
+        {% elif r.identity_needs_review %}
+          <a href="/series/{{ result_library_series_id }}" class="btn-secondary btn-sm">Identity needs review</a>
         {% else %}
           <button
             type="button"
             data-add-series-trigger="true"
+            data-series-source="{{ r.source }}"
+            data-series-external-id="{{ result_id }}"
             data-series-title="{{ result_title }}"
             data-series-publisher="{{ result_publisher or '' }}"
             data-series-year="{{ result_year or '' }}"
@@ -101,7 +116,7 @@
             data-series-cover-url="{{ r.cover_url or '' }}"
             data-series-description="{{ (r.description|striptags|truncate(260)) if r.description else '' }}"
             data-series-folder-preview="{{ r.folder_preview or '' }}"
-            onclick="selectResult({{ result_id }}, this)"
+            onclick="selectResult(this.dataset.seriesExternalId, this)"
             class="btn-primary btn-sm add-series-result-add"
           >
             <svg class="h-3.5 w-3.5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">

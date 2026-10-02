@@ -477,6 +477,7 @@ class ImportedFile(Base, IdentityMixin, TimestampMixin):
         Index("ix_import_files_job_series", "import_job_id", "import_series_id"),
         Index("ix_import_files_import_series_id", "import_series_id"),
         Index("ix_import_files_matched_issue_id", "matched_issue_id"),
+        Index("ix_import_files_library_file_id", "library_file_id"),
         Index("ix_import_files_duplicate_of_file_id", "duplicate_of_file_id"),
         Index(
             "ix_import_files_job_cohort_order",

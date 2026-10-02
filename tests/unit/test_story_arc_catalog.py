@@ -80,6 +80,73 @@ async def _root(session, tmp_path):
     return root
 
 
+async def test_arc_member_seeding_dual_writes_verified_identities(db_session, tmp_path):
+    from pullbox.models.metadata_identity import (
+        IssueExternalIdentity,
+        IssueIdentityEvent,
+        SeriesExternalIdentity,
+        SeriesIdentityEvent,
+    )
+    from pullbox.services.story_arc_catalog import StoryArcCatalogService
+
+    root = await _root(db_session, tmp_path)
+    provider = _provider()
+    service = StoryArcCatalogService(provider)
+    preview = await service.preview("31")
+    await service.add(
+        db_session, preview, ordered_issue_provider_ids=["11", "12"], library_root_id=root.id
+    )
+    for model in (
+        SeriesExternalIdentity,
+        IssueExternalIdentity,
+        SeriesIdentityEvent,
+        IssueIdentityEvent,
+    ):
+        rows = (await db_session.scalars(select(model))).all()
+        assert len(rows) == 2, f"{model.__name__} must participate in atomic arc adoption"
+        assert all(row.verification_state == "verified" for row in rows)
+        assert all(row.evidence_kind == "provider_result" for row in rows)
+    provider.get_story_arc_issues.assert_awaited_once()
+    assert provider.get_series.await_count == 2
+    assert not list(tmp_path.iterdir())
+
+
+async def test_arc_generic_identity_conflict_rolls_back_member_creation(db_session, tmp_path):
+    from pullbox.core.metadata_identity import IdentityEvidenceKind, IdentityNamespace
+    from pullbox.core.metadata_identity_state import IdentityVerificationState
+    from pullbox.models.metadata_identity import (
+        IssueIdentityEvent,
+        SeriesExternalIdentity,
+        SeriesIdentityEvent,
+    )
+    from pullbox.services.story_arc_catalog import StoryArcCatalogError, StoryArcCatalogService
+
+    root = await _root(db_session, tmp_path)
+    reserved = Series(title="Reserved", sort_title="Reserved")
+    db_session.add(reserved)
+    await db_session.flush()
+    db_session.add(
+        SeriesExternalIdentity(
+            series_id=reserved.id,
+            identity_namespace=IdentityNamespace.COMICVINE,
+            external_id="22",
+            verification_state=IdentityVerificationState.CONFLICTED,
+            evidence_kind=IdentityEvidenceKind.COMICINFO_XML,
+        )
+    )
+    await db_session.flush()
+    service = StoryArcCatalogService(_provider())
+    preview = await service.preview("31")
+    with pytest.raises(StoryArcCatalogError, match="identity needs review"):
+        await service.add(
+            db_session, preview, ordered_issue_provider_ids=["11", "12"], library_root_id=root.id
+        )
+    assert await db_session.scalar(select(func.count()).select_from(Series)) == 1
+    assert await db_session.scalar(select(func.count()).select_from(SeriesExternalIdentity)) == 1
+    for model in (StoryArc, Issue, SeriesIdentityEvent, IssueIdentityEvent):
+        assert await db_session.scalar(select(func.count()).select_from(model)) == 0
+
+
 def _root_policy(root_id, template):
     from pullbox.models.library import LibraryRootPolicy, LibraryRootPolicySource
 

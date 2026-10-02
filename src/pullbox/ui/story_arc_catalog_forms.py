@@ -9,6 +9,7 @@ class StoryArcCatalogAddForm(BaseModel):
     """Validate the submitted order, canonical root and current file defaults."""
 
     fingerprint: str = Field(max_length=128)
+    source_revision: int | None = Field(default=None, ge=1, lt=2**63)
     file_defaults_fingerprint: str = Field(default="", max_length=128)
     issue_provider_ids: list[str] = Field(default_factory=list, max_length=2000)
     reading_orders: list[int] = Field(default_factory=list, max_length=2000)

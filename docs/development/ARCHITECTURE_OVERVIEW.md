@@ -303,6 +303,393 @@ constructed, and provider instances are registered for service use.
 AirDC++ uses `src/pullbox/composition/airdcpp.py` because its authenticated REST
 session and WebSocket lifecycle are supervised per exact configured client.
 
+The v2 metadata platform has a separate source-aware registry in
+`services/metadata_discovery.py`. Its ComicVine local/API adapters share the
+ComicVine identity namespace but retain separate priorities, capabilities,
+pagination, and typed outcomes. Interactive discovery fans out with bounded
+concurrency; automatic discovery cascades and stops only when its caller's
+explicit satisfaction predicate succeeds. Search results do not attach identities.
+
+Series Details exposes existing provider links and an operator-only search,
+comparison, and confirmation flow. The link preview fetches the exact provider
+record outside a database transaction and saves an observation, not ownership.
+Confirmation reuses identity review with source-policy, local summary, and
+other-provider claim freshness checks. Conflicting provider crosswalks stop the
+preview. Linking never adds series/issues, rematches issues, or modifies files.
+The existing Refresh metadata action uses the verified links for enrichment;
+catalog refresh only considers namespaces already owning issues when a catalog
+exists. A newly linked Metron source can supply representative artwork from one
+bounded first issue page without adopting that page as issue membership.
+
+`/api/v1/metadata/sources` exposes operator-only configuration and connection
+checks; `/api/v1/metadata/search` requires authentication. Session writes use
+the existing CSRF contract. Database reads end before provider I/O, clients close
+after each operation, and one provider failure does not hide other results.
+Read-only local catalog work retains at most two owned in-flight operations per
+event loop. Cancelled requests can return without abandoning disk cleanup or
+creating an unbounded background queue.
+The registry also exposes exact series/issue details and bounded issue pages for
+ComicVine local/API and Metron. `/api/v1/metadata/series/preview` returns a profile
+and the first 100-row issue page with separate outcomes. Subsequent
+`/api/v1/metadata/series/issues` requests carry the observed source-policy revision;
+configuration changes reject stale results. Both POST endpoints require
+authentication and the existing session CSRF protection. Source namespace,
+entity identity, issue parent, page completeness and continuation are checked
+before returning data. Preview is read-only and is not an adoption proof.
+
+The separate `recent_issues` capability returns at most 100 issues and never
+claims complete membership. ComicVine local/API return newest-publication slices;
+Metron returns issues modified after an explicit UTC checkpoint. Query totals
+and truncation describe only that slice. A truncated modification window needs
+a full/bounded reconciliation before advancing its checkpoint. Empty local
+results still carry their immutable catalog generation. These reads do not use
+the full-page response cache, follow continuation links or attach identities.
+The daily issue sweep uses these windows with source-specific checkpoints and
+retains the normal continuing/ended-series cadence and full-refresh deadline.
+
+Complete source-aware Add and refresh now persist source-bound catalog
+checkpoints with the same atomic library write. The checkpoint retains the
+source-policy and verified-identity revisions, exact parent and local generation.
+Only proven live catalog reads establish the request-start boundary. Cached
+bundles of unknown age and Add of an existing series do not advance progress.
+Refresh revalidates captured checkpoints along with metadata and policies, so
+an in-flight refresh cannot overwrite newer sync progress. Incremental advancement
+preserves the full-sync date and commits with the corresponding issue writes.
+
+`services/metadata_issue_catalog.py` applies either complete membership or an
+issue-only batch to the caller's locked, revalidated read set. Full refresh uses
+this writer; partial batches do not imply removal, completeness or a new full-sync
+timestamp. Both modes preserve issue ownership, local edits, private reading state
+and registered artifacts while sharing native identity, crosswalk observation and
+canonical-baseline writes. The writer returns exact created issue IDs. Scheduled
+refresh uses that receipt, not an ID range that could include another operation's
+new issues, when deciding whether to search after commit. Daily synchronization
+uses the same writer, overlaps modification cursors by two minutes, and falls back
+to full reconciliation for truncated modification windows, changed local catalog
+generations, or publication slices that cannot account for known membership.
+
+`services/metadata_series_adoption.py` separates a complete server-side catalog
+fetch from transactional adoption. Traversal rejects partial pages, repeated
+identities, changed counts and mixed local catalog generations. The writer locks
+and rechecks source configuration, uses shared identity attachment and caller-owned
+transactions, and preserves existing exact owners rather than treating Add as
+Refresh. Native issues require exact parent evidence; foreign issue crosswalks
+remain observations until independently verified. Unsupported designations and
+conflicting ownership fail without partial library rows. The Add Series API/UI
+uses this command with caller-owned transactions, managed-folder rollback and
+post-commit events. Source-aware Story Arc search, complete command snapshots,
+Add/refresh UI and scheduled membership refresh use the same registry and
+existing catalog ownership, placement and reading-order services.
+
+Normalized remote detail and issue-page reads reuse `metadata_provider_cache`
+through `services/metadata_read_cache.py`. Keys bind source, policy revision,
+operation, external ID and page; credentials are never cache key material.
+Responses are fresh for five minutes (not-found for 15 seconds), with validators
+retained for one day. Add and refresh commands always revalidate. Complete series
+catalog reads that establish sync checkpoints bypass this cache and its shared
+flights; descriptive reads and other consumers retain the existing cache. A not-modified
+response requires an exact saved response; outages never become cached success.
+The cache is limited to 128 entries of at most 256 KiB each, separate from legacy
+ComicVine import entries. It owns short database sessions outside provider I/O,
+coalesces at most eight concurrent reads per database, and drains cancelled work.
+Availability checks precede cache reads; local catalog reads stay generation-bound
+in their existing reader rather than entering this remote-response cache.
+
+`schemas/metadata_snapshot.py` and `services/metadata_assembly.py` define a
+versioned descriptive snapshot with per-field source, domain, observation time
+and override markers. New source-aware series adoption uses that assembler for
+series/issue descriptive fields, after complete-catalog and identity checks.
+Snapshots distinguish verified identities from observed crosswalks. Exact-ID or
+issue-parent disagreement stops assembly; priority cannot resolve it. Local edits,
+including intentional clears, are preserved. Background assembly fills gaps;
+explicit refresh can replace tracked provider-managed values under domain priority.
+
+`services/metadata_refresh_snapshot.py` supplies the bounded read phase for
+series, issue and Story Arc descriptive refresh. It requests only known exact
+identities, revalidates cached responses, cascades by requested domain, stops
+unnecessary lower-priority reads and retains typed partial outcomes. It does not
+write metadata, attach identities or change catalog membership. The caller must
+revalidate ownership and all captured source-policy revisions before applying it.
+`services/metadata_baselines.py` persists versioned canonical snapshots in separate
+series, issue and Story Arc tables with real cascading foreign keys. Writes are
+bounded batches, use caller-owned transactions, recheck verified ownership and
+require the expected baseline revision. They acquire the same parent-first locks
+as identity writers; the baseline never establishes identity ownership itself.
+Corrupt or incompatible snapshots fail explicitly rather than silently removing
+override protection. No legacy backfill invents provenance for existing values.
+
+Source-aware Add Series saves series/issue baselines in its catalog transaction,
+including final lifecycle/format inference. Derived values have a distinct origin,
+not provider attribution or user-override markers. Explicit refresh may replace
+those values; background enrichment still fills gaps only. Existing-owner Add
+does not replace its baseline or local edits. Manual and scheduled Series refresh
+use the revision-checked canonical/catalog writer. Source-bound Story Arc Add also
+persists arc provenance and baselines for newly seeded parents/issues in its
+existing atomic graph transaction. Reused members retain their metadata and history.
+Arc refresh reads current descriptive values under the claimed arc revision,
+preserves edits and intentional clears, and saves the new baseline atomically with
+membership changes. Scheduled enrichment fills gaps; explicit refresh may replace
+provider-managed values. Managed placements keep the arc name fixed without
+blocking other safe changes; the baseline records that restriction separately
+from user overrides. Existing order, skipped and removed members, partial parent
+catalogs and pending-placement review remain unchanged. Legacy snapshots without
+normalized source evidence are not silently assigned canonical provenance.
+Source-bound manual and scheduled Arc refresh use the shared descriptive cascade
+over verified attached identities. Fresh catalog evidence is reused without a
+second read of that transport; higher-priority sources can supply descriptive
+fields without taking over membership. The read set captures values, baseline,
+identity revisions/history, arc state, placement restrictions and source policies.
+Provider I/O runs after releasing the reader. Policy-first/arc locks and read-set
+revalidation precede the atomic catalog write; concurrent changes reject the whole
+refresh. Partial source outcomes are retained as bounded diagnostics. Legacy Arc
+browser URLs now delegate to the same source-bound search, preview, Add and refresh
+commands. Pre-upgrade forms without a source revision must be previewed again;
+existing ComicVine arcs retain their identity and reviewed membership. New Add
+adopts the selected source, while refresh uses the descriptive cascade. Provider
+cleanup failure cannot supply a successful read for a write; primary cancellation
+and rate-limit outcomes remain intact.
+
+Normalized issue reads and canonical snapshots retain bounded descriptive creator
+credits. Credit lists follow core-domain authority as a whole; lower-priority
+lists do not merge over an existing list. User edits and intentional clears remain
+overrides. Source-aware Add, issue catalog writes and newly seeded Story Arc
+members persist credits through the existing Creator/IssueCreator relations in
+the same transaction as their baseline. Refresh captures current relations in its
+read set before provider I/O and rejects in-flight changes. Reads/writes batch at
+200 issues; descriptive names never establish a foreign creator identity. No
+additional provider detail calls or archive writes are introduced. Remaining
+rich metadata/membership fields, legacy consumers and coordinated XML/sidecar
+writers are pending.
+This does not complete the full metadata feature.
+
+The bounded MetronInfo reader preserves descriptive fields, creator/role resources,
+localized aliases and schema-specific resource IDs alongside exact issue/series
+evidence. Resource IDs remain opaque document data, not foreign identity claims.
+Missing credits differ from an explicit empty list; malformed or over-limit
+credits cannot produce a partial list. Unsupported elements and attributes still
+raise preservation diagnostics. The paired archive probe reads both XML documents
+in one open pass without changing reference files. This is read support, not
+offline XSD validation or permission to rewrite either document; coordinated
+canonical output remains pending.
+
+`services/archive_metadata_reconciliation.py` compares both embedded documents
+into canonical-shaped series/issue values without I/O or persistence. It retains
+each document and its raw payload, exposes descriptive disagreements separately
+from exact-ID conflicts, and leaves disputed shared fields unset. Missing and
+explicitly empty credits remain distinct. Partial ComicInfo publication dates
+never become invented dates or series start years. Scoped ComicVine markers and
+validated resource URLs yield unverified evidence, not attachments or crosswalks.
+Both XML paths share the same bounded envelope; duplicate fields and archive
+probe diagnostics remain reviewable. The shared canonical assembler accepts this
+comparison only for an independently resolved file/target and parent binding;
+it does not perform that matching. Adopted fields retain bounded document-name
+provenance, never fabricated API attribution. Local values and explicit empty
+credits survive later provider refreshes; user edits/clears remain authoritative.
+Unchanged XML that agrees with an existing provider-managed baseline retains its
+normal explicit-refresh authority; external XML edits instead require review.
+Exact target/parent conflicts and differing issue designations abort assembly.
+Descriptive disagreements and unsupported XML remain durable review/preservation
+diagnostics rather than becoming provider-filled gaps. Previously observed IDs
+survive refreshes without acquiring verified ownership. Existing baseline storage
+retains this additive provenance with the same revision/transaction checks.
+This comparison and adoption are not write authorization: production file-binding
+integration and coordinated atomic writers remain required before the existing
+import/writer consumers switch to them.
+
+`core/metroninfo_schema.py` provides the offline output-schema gate. It validates
+a bounded, defused document with the bundled, pinned MetronInfo 1.1 XSD through
+`XMLSchema11`, including its primary-ID/URL assertions. Schema location hints
+cannot trigger network or filesystem access. Validation errors expose fixed
+codes, not XML payloads. The schema, MIT license and provenance ship in the
+Python package. This gate checks representation, not identity or write authority;
+archive integration and ownership authorization are still required.
+
+`services/archive_metadata_rendering.py` renders both XML documents together from
+independently bound canonical series/issue snapshots. It preserves supported
+schema-specific metadata and refuses unassembled local changes, conflicting exact
+IDs, unverified identity promotion, ambiguous primary sources, and resource-ID
+reinterpretation. Explicit edits may replace descriptive values; provider refresh
+requires an unchanged managed baseline. Shared credit comparisons project only
+ComicInfo-supported roles while retaining richer Metron roles. Partial dates are
+not expanded into invented days. Existing arc names/order are coordinated without
+creating provider identities or canonical membership. Unknown extensions and
+unrepresentable values stop for review instead of disappearing. Output passes the
+offline XSD and a shared-value cross-check before either document is returned.
+This pure renderer makes no provider/database calls or archive-file mutations;
+the offline validator loads only its bundled schema resource. Production
+archive rewrite/conversion integration, canonical rich-field/membership expansion,
+production consumer migration and managed-root authorization remain required;
+legacy writers have not switched to this boundary yet.
+
+`services/archive_metadata_writing.py` provides the coordinated CBZ publication
+primitive for independently authorized callers. It reads both XML members from
+one source archive session, renders the pair, streams approved entries into one
+same-directory temporary archive, verifies its manifest and payload CRCs, and
+publishes without overwriting an existing destination. Explicit same-path
+refresh uses atomic replacement after closing the source handle. Source/staging
+identity checks reject detected changes; invoking workflows still own per-file
+serialization, binding, managed-root authorization, rollback journals and
+interruptible process cleanup. Cooperative cancellation is checked through
+streaming, verification and immediately before publication, never after a
+successful commit point. Reference-only/keep-in-place callers are not authorized
+by this primitive. `core/metadata_archive_source.py` also accepts RAR, 7z and TAR
+sources without an intermediate CBZ. RAR/TAR members are streamed; solid 7z is
+decompressed once into bounded, private numbered spools under the owner's staging
+directory, never archive-supplied filesystem paths. Special/encrypted/split
+members and unsafe or oversized payloads fail closed. Cancellation checks cover
+extraction, copying and verification. PDF input uses bounded, private page spools
+under the same owner workspace. Poppler inspects the page count, encryption and
+dimensions before rendering, then renders one page at a time at the requested
+quality without silently downscaling. Output bytes, page pixels and helper
+deadlines are bounded; cancellation kills/reaps the helper before cleanup.
+Both XML documents are still written during the single CBZ construction.
+Production conversion callers have not yet switched their metadata content
+policy to this paired boundary.
+
+`utilities/executors/archive_metadata_staging.py` hands paired CBZ work to the
+interruptible archive worker without giving it a final library destination.
+Canonical snapshots use a bounded private request file, not process arguments.
+The worker produces one verified private archive; its fingerprint and the
+original source fingerprint must still agree when the parent hands it off.
+The async context removes its own workspace on failure, cancellation or exit,
+without following a replaced workspace or deleting an artifact published out
+of it. The owner must recheck current binding/ownership/policy, journal intent,
+and revalidate the supplied fingerprints before publication. This context is
+not a durable journal, permission to mutate reference files or a filesystem lock.
+The shared supervisor reaps workers after task cancellation, including during
+spawn and repeated cancellation, and shields pipe draining during kill escalation.
+Paired workers on POSIX run in isolated process groups, unwind helper cleanup on
+SIGTERM, and terminate remaining helpers after cancellation or abnormal exit.
+Legacy operations still publish inside their workers; they have not migrated to
+the staged owner-publication contract. Production binding, journal recovery and
+consumer migration remain required.
+
+`services/archive_metadata_binding.py` captures one registered managed CBZ's
+issue/parent, verified identities and revisions, current values/credits, canonical
+baselines, source policies and root policy. It reuses the series refresh mapper
+with a bounded exact issue selection rather than loading the whole catalog.
+Legacy ComicVine columns must agree with active ownership; stale or conflicted
+claims do not disappear from the check. Local XML is assembled only after this
+independent binding and cannot acquire identity ownership. Database reads do not
+commit or flush pending caller edits. Filesystem probes run separately, off the
+event loop, and capture a writable regular file plus its directory identities
+inside the recorded root. Final revalidation checks both database state and
+canonical-path reference ownership; the owner separately rechecks filesystem
+evidence immediately before publication. These read sets are not locks or a
+durable journal. Production migration still requires a serialized recoverable
+publication boundary, output baseline persistence and crash reconciliation.
+
+`services/archive_metadata_publication.py` now retains bounded publication intent
+before replacement. Independent file/path reservations do not expire, and deleting
+a library row does not erase recovery evidence. Preparation validates the staged
+XML against its canonical snapshots and hashes source/output outside DB sessions.
+Publication rechecks binding under policy/parent/issue/root/file locks and holds
+the journal lock through the short offloaded stat/rename/directory-sync boundary.
+Cancellation joins file work before releasing the lock. Recovery hashes outside
+the transaction, then rechecks file evidence and journal revision under that same
+lock. It recognizes the verified staged inode/content after a rename/DB-commit
+failure, abandons only a proven untouched original, and retains unknown outcomes
+for review. Recovery never republishes or deletes a file. The published state is
+filesystem evidence only, not completed canonical DB adoption; its reservation
+stays active. Production callers remain unchanged pending finalization, rollback,
+shared mutation coordination and restart orchestration. Existing legacy writers
+and external filesystem programs are not fenced by this new journal.
+
+`services/archive_metadata_finalization.py` completes a proven publication in a
+caller-owned transaction. It revalidates identity, policy, user values, baseline
+revisions and output evidence before applying one canonical snapshot to entity
+values, credits, baselines and file state. The shared descriptive projection is
+also used by catalog refresh; finalization never fabricates a catalog refresh or
+changes import naming/source evidence. Completed receipts release reservations,
+survive file deletion and replay without changing later edits. Failure or
+cancellation retains recoverable publication state. Known writer format labels
+normalize through a shared reversible mapping when read back; unknown formats and
+real disagreements remain intact. File timestamps retain the same stat conversion
+used by registration. ComicInfo Count participates in bounded canonical issue-count
+comparison, including zero when MetronInfo omits it; malformed, repeated and
+disagreeing counts remain reviewable rather than silently falling back.
+Import-owner binding now connects publication/finalization to the exact pending
+import and placement action. Finalization acknowledges that owner and records a
+successor reference without replacing original ownership evidence. Import rollback
+accepts only a finalized, action-bound successor whose registered owner and actual
+bytes still match. Active publications and later reassignment remain protected.
+Startup/enrichment and rollback orchestration now recover retained import-owned
+publications before using the legacy writer or removing artifacts. Stopped owners
+receive a separate settled receipt and file accounting, not a stale canonical
+update; unresolved reservations block legacy enrichment. Recovery never repeats
+a filesystem replacement. Shared mutation coordination across other writers,
+paired enrichment-worker activation and no-op archive-write avoidance remain required.
+
+Short Library browser and series-folder renames now share a database admission
+mutex with new publication intent. They reject retained source/stage reservations,
+including folder descendants and orphaned file records, instead of relying only
+on a reference-file preflight. Library browser rename cancellation joins workers
+and commits before releasing coordination; compensation is identity-checked and
+never overwrites another destination. Folder path updates treat `%` and `_` as
+literal filename characters. Conversion, deletion, bulk utility writers and
+other mutation routes have not yet joined this contract. This does not authorize
+paired-writer activation or claim crash recovery for arbitrary legacy renames.
+
+Library browser conversion now prepares output and an independent original backup
+in private, interruptible workers, records durable intent, publishes exclusively,
+and updates the existing registration before deleting the original. Recovery runs
+before startup file writers and never guesses ownership from a filename or removes
+unproven output after an ambiguous commit. Same-root and cross-filesystem trash use
+the same staged protocol. This retains the existing conversion content behavior;
+the paired renderer is not activated by this lifecycle change. Bulk conversion,
+deletion and other writers still need to join coordination before paired background
+metadata writing can be enabled.
+
+`library_removal.py` adds durable reservation and same-filesystem private staging
+for deletion owners. Startup restores uncommitted staging before conversion
+recovery. `library_removal_cleanup.py` finishes explicitly authorized, committed
+detachment without holding the database writer across copying, hashing or recursive
+cleanup. Retained receipts and an OS file lock fence overlapping cleanup workers;
+trash publication never overwrites an existing destination. Same-filesystem trash
+renames rather than copying large collections. Cancellation leaves owned partial
+copies/deletions retryable, and cleanup never follows the old public source path.
+The browser, series and bulk deletion commands still need to adopt this lifecycle;
+the primitives alone do not enable paired production writers or change public
+deletion semantics. Non-POSIX removal locking remains open.
+
+`library_trash_cleanup.py` owns startup retention and interactive trash cleanup.
+It checks retained publication/conversion/removal reservations under shared
+admission before each short unlink, keeps private preparation directories, and
+refuses registered files or library roots inside trash. Directory traversal runs
+off-thread in bounded pages without a database transaction. Completed removal
+receipts protect a newly trashed tree for its full retention window even when
+child files have old modification times. The settings surface reports retained
+entries instead of claiming that protected trash was emptied. Public deletion
+owner integration remains separate work.
+
+`library_removal_workspaces.py` prunes only proven empty workspaces after a
+committed completion or restored abandonment. It keeps original journal receipts,
+checks directory identity through non-following descriptors and refuses live
+cleanup locks, unknown contents or replaced directories. Startup retries terminal
+workspace cleanup in bounded pages, but never resumes payload deletion. An indexed
+completion marker prevents repeated filesystem inspection of cleaned workspaces.
+Cancellation joins the short worker before releasing mutation admission. No public
+series/browser/bulk deletion behavior is activated by this housekeeping boundary.
+
+The existing import/cache consumers have not yet migrated to this registry.
+Metron has token settings, bounded transport and
+series/issue/arc adapter operations. GCD Local validates and reads an official
+SQLite dump in query-only mode for bounded series/issue discovery and refresh;
+GCD API v2 execution remains disabled by the release feature flag. Capability
+lists describe implemented adapter operations, not planned features.
+
+`series_sidecar.py` exposes an explicit Series Details preview/write boundary for
+`series.json`. It assembles the saved canonical series snapshot without provider
+calls or issue-catalog reads, retains verified links and provenance, and preserves
+safe existing Mylar/custom JSON fields. Approval binds metadata, root policy,
+folder ownership, and existing file evidence. Reference-only, shared, ambiguous,
+linked, and read-only locations remain untouched. Split series receive equivalent
+compiled metadata only in their individually eligible managed folders. Staging
+runs off-thread outside write admission; short atomic publication revalidates
+metadata, folder evidence, active imports, and existing publication/removal guards.
+Cancellation drains the current short item and its cleanup before stopping. This
+does not activate automatic import writers, rewrite archives, or change deletion.
+
 **Required standard**
 
 - Keep provider quirks inside provider modules.
@@ -562,10 +949,49 @@ Nightly issue and metadata sweeps checkpoint their last completed series and
 initial upper bound in `SystemConfig`. Each batch handles at most 25 series and
 checks a two-minute budget between series; an individual series has a separate
 15-minute timeout. Pending batches resume through hidden continuations, including
-after restart. Provider throttling pauses the sweep at its saved position instead
-of repeatedly failing every remaining series. Series metadata writes are committed
-before subsequent cover or issue-provider waits.
-Removing the ComicVine key stops the active sweep and clears its continuation.
+after restart. Deferred provider work lives in `metadata_series_retries`, keyed
+by task, series and source, rather than holding the shared sweep cursor. Batches
+reserve space for fresh work and due retries. Provider reads happen before the
+atomic library/progress write; optional cover work follows its commit.
+The scheduled metadata refresh selects verified identities backed by executable,
+configured sources, including native Metron and local ComicVine without an API
+key. It uses the same revision-checked writer as manual refresh but fills gaps
+only, preserving existing descriptive values and user overrides. Its metadata
+write and sweep checkpoint commit together before search scheduling or optional
+cover-cache work. Structured source failures preserve durable retry deadlines;
+disabling the last eligible source clears the continuation.
+The daily issue sweep uses the same configured-source eligibility, with partial
+windows where a valid source checkpoint permits them. Native and local sources
+do not require a ComicVine API key. Failed sources retain their checkpoints,
+including when a fallback succeeds. Retry attempts restrict reads to deferred
+sources and commit retry settlement with library/cursor changes. Authentication
+failures have no timed retry. Changed entity configuration can make an entity
+retry eligible, but the account guard still blocks known-failing credentials;
+priority edits cannot bypass an authentication hold. Only one-way configuration
+scope keys are stored, never credentials.
+Cancellation, failed commits and stale attempts cannot discard or resurrect
+settled retry work. Infrastructure lock failures retain a sweep-level pause.
+Account-wide cooldown admission is separate from entity retries. The source
+registry uses `metadata_source_accounts` for remote-source authentication holds,
+rate limits and transient outages across tasks, series and process restarts.
+Credential scope, not source priority, identifies the account. Local catalogs
+and fresh response-cache hits do not depend on account admission. Each provider
+read obtains its request slot before claiming a bounded recovery probe; one
+probe runs after a cooldown expires and an abandoned probe expires after 45
+seconds. Cancellation releases its lease without clearing the previous failure.
+Revision-checked outcome writes cannot clear a newer hold. Account transactions
+are short and independent of library transactions; provider I/O starts only
+after the admission transaction ends. Existing client request pacing remains
+in force. Settings shows current credential-scoped holds and a bounded, paginated
+list of deferred series work without provider calls or automatic polling. An
+authenticated, CSRF-protected Test connection explicitly permits one bounded
+authentication probe, never bypassing a timed rate limit. Success makes matching
+held retries due in the same transaction as account recovery; failed/cancelled or
+stale probes cannot clear newer holds. Older held retries without an account row
+are handled by the same manual check. Late authentication results are reconciled
+against recovered account state rather than recreating an indefinite hold.
+Successful recovery schedules existing continuations after commit, and startup
+also restores eligible retries for previously inactive sweeps.
 Post-restore aftercare keeps its recovery marker while continuation batches remain
 active; it observes completion without retaining a database transaction between checks.
 Cancellation leaves the marker and sweep checkpoint available for the next startup.

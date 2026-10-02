@@ -1,5 +1,12 @@
-{% macro comicvine_result_cover(cover_url, title, href=none, link_testid=none) -%}
-  <div class="add-series-result-cover">
+{% macro comicvine_result_cover(cover_url, title, href=none, link_testid=none, metron_id=none, source_revision=none) -%}
+  <div class="add-series-result-cover"
+    {% if metron_id and source_revision is not none %}
+      x-data="metronSeriesCover()"
+      data-cover-series-id="{{ metron_id }}"
+      data-cover-source-revision="{{ source_revision }}"
+      :data-cover-state="coverState"
+    {% endif %}
+  >
     {% if href %}
       <a
         href="{{ href }}"
@@ -7,7 +14,17 @@
         class="block h-full w-full transition-opacity hover:opacity-95"
       >
     {% endif %}
-    {% if cover_url %}
+    {% if metron_id and source_revision is not none %}
+      <img :src="coverUrl || null" alt="{{ title }}" class="h-full w-full object-cover"
+        data-metadata-series-cover x-show="coverLoaded" x-cloak
+        @load="coverLoaded = true; coverState = 'ready'"
+        @error="coverLoaded = false; coverState = 'unavailable'">
+      <div class="add-series-result-cover-empty" x-show="!coverLoaded" aria-hidden="true">
+        <svg class="h-6 w-6" fill="none" stroke="currentColor" stroke-width="1" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5s3.332.477 4.5 1.253v13C19.832 18.477 18.246 18 16.5 18s-3.332.477-4.5 1.253"/>
+        </svg>
+      </div>
+    {% elif cover_url %}
       <img
         src="{{ cover_url }}"
         alt="{{ title }}"

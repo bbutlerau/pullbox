@@ -189,6 +189,7 @@ class StoryArcDetailView:
     catalog_refresh_error: str | None = None
     initial_placements: StoryArcInitialPlacementView | None = None
     manual_editable: bool = True
+    catalog_source_label: str | None = None
 
     @property
     def active(self) -> bool:
@@ -997,6 +998,17 @@ async def load_story_arc_detail(
         )
         if fallback_issue_id is not None:
             cover_src = f"/api/v1/issues/{int(fallback_issue_id)}/cover"
+    from pullbox.services.metadata_arc_commands import saved_arc_source
+    from pullbox.ui.metadata_series_search import SOURCE_LABELS
+
+    source_selection = saved_arc_source(arc)
+    source_label = (
+        SOURCE_LABELS[source_selection.source]
+        if source_selection
+        else "Comic Vine"
+        if arc.comicvine_id
+        else None
+    )
     return StoryArcDetailView(
         id=arc.id,
         name=arc.name,
@@ -1046,10 +1058,11 @@ async def load_story_arc_detail(
         publisher_name=publisher_name,
         cover_src=cover_src,
         catalog_removed_count=_catalog_diagnostic_count(arc, "removed_issue_provider_ids"),
-        catalog_added_review_count=pending_count if arc.comicvine_id else 0,
+        catalog_added_review_count=pending_count if source_label else 0,
         catalog_refresh_error=_catalog_refresh_error(arc),
         initial_placements=_initial_placement_view(arc),
         manual_editable=can_manually_edit_arc(arc),
+        catalog_source_label=source_label,
     )
 
 

@@ -140,6 +140,11 @@ class JobQueueManager:
         """Create a queued rollback child job for ``job``."""
         if job.job_type == JobType.SERIES_RESCAN:
             raise ValueError("Rescans do not support rollback; source files were not changed.")
+        if job.job_type == JobType.FILE_METADATA:
+            raise ValueError(
+                "Metadata writes do not support utility rollback. "
+                "Preview the current metadata before writing again."
+            )
         existing_result = await session.execute(
             select(UtilityJob)
             .where(
@@ -510,6 +515,9 @@ class JobQueueManager:
 
     async def recover_and_dispatch(self) -> int:
         """Recover interrupted jobs, then restart serial dispatch for queued work."""
+        from pullbox.services.issue_file_metadata_recovery import recover_file_metadata_jobs
+
+        await recover_file_metadata_jobs(self._session_factory)
         async with self._session_factory() as session:
             recovered = await self.recover_interrupted_jobs(session)
             await session.commit()

@@ -1579,10 +1579,12 @@ class TestSettingsPage:
 
         assert requested_paths == [expected_trash, expected_export]
 
+    @pytest.mark.parametrize("retained", [0, 3])
     def test_settings_utilities_empty_trash_uses_confirm_modal_and_endpoint(
         self,
         authed_page,
         seeded_server: str,  # type: ignore[no-untyped-def]
+        retained: int,
     ) -> None:
         settings = SettingsPage(authed_page, seeded_server)
         settings.goto("utilities")
@@ -1594,7 +1596,13 @@ class TestSettingsPage:
             route.fulfill(
                 status=200,
                 content_type="application/json",
-                body=json.dumps({"message": "Trash emptied.", "deleted_entries": 3}),
+                body=json.dumps(
+                    {
+                        "message": "Trash emptied.",
+                        "deleted_entries": 3,
+                        "retained_entries": retained,
+                    }
+                ),
             )
 
         authed_page.route("**/api/v1/utilities/trash/empty", handle_empty_trash)
@@ -1608,7 +1616,7 @@ class TestSettingsPage:
             exact=True,
         ).is_visible()
         assert authed_page.get_by_text(
-            "Delete everything currently in the utility trash folder? This cannot be undone.",
+            "Permanently delete disposable contents from the utility trash folder? Protected recovery files will be kept. This cannot be undone.",
             exact=True,
         ).is_visible()
         authed_page.locator("#pb-confirm-dialog").get_by_role(
@@ -1619,3 +1627,14 @@ class TestSettingsPage:
 
         authed_page.wait_for_timeout(200)
         assert requests == ["POST"]
+        if retained:
+            expect(
+                authed_page.get_by_text(
+                    "Cleanup finished. Deleted 3 items; kept 3 protected or changed entries. See the logs for details.",
+                    exact=True,
+                )
+            ).to_be_visible()
+        else:
+            expect(
+                authed_page.get_by_text("Trash emptied. Deleted 3 items.", exact=True)
+            ).to_be_visible()

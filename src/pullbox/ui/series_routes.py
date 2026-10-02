@@ -4,7 +4,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import date, timedelta
-from typing import Any
+from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 
 import structlog
@@ -12,28 +12,37 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import ColumnElement, Float, String, case, cast, func, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import contains_eager
 from starlette.responses import Response
 
-from pullbox.api.deps import AuthenticatedUser, DbSession, get_request_session_factory
+from pullbox.api.deps import AuthenticatedUser, DbSession
+from pullbox.config import get_settings
+from pullbox.core.metadata_identity import MetadataSource
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.library import LibraryFile, LibraryRoot
 from pullbox.models.publisher import Publisher
 from pullbox.models.series import IssueCatalogState, Series, SeriesStatus
+from pullbox.models.user import User
+from pullbox.schemas.metadata_sources import SeriesDiscoveryQuery, SourceCapability
 from pullbox.services.cover_url_service import build_series_cover_url
 from pullbox.services.library_root_management import list_library_roots
+from pullbox.services.metadata_discovery import describe_source_policies
+from pullbox.services.metadata_search_cache import MetadataSearchBusyError, MetadataSearchCache
+from pullbox.services.metadata_sources import load_source_runtime, read_source_policies
 from pullbox.services.reading_query_service import load_series_reading_aggregates
-from pullbox.ui.comicvine_provider import open_comicvine_ui_provider
 from pullbox.ui.comicvine_series_search import (
     ADD_SERIES_PER_PAGE,
-    COMICVINE_SERIES_SEARCH_LIMIT,
     COMICVINE_SERIES_SORT_OPTIONS,
-    format_comicvine_series_results,
-    load_existing_series_by_cv_id,
     normalize_comicvine_series_sort,
     parse_comicvine_series_query,
     sort_comicvine_series_results,
+)
+from pullbox.ui.metadata_series_search import (
+    SOURCE_LABELS,
+    format_source_series_results,
+    search_snapshot,
+    source_messages,
 )
 
 logger = structlog.get_logger(__name__)
@@ -524,8 +533,9 @@ async def add_series_page(
     sort: str | None = Query("relevance"),
     page: int = Query(1, ge=1),
     search_mode: str | None = Query(None),
+    source: Annotated[MetadataSource | Literal["all"], Query()] = "all",
 ) -> Response:
-    """Render the add series page with ComicVine search."""
+    """Render Add Series with shared, source-aware metadata discovery."""
     roots = [
         root
         for root in await list_library_roots(session)
@@ -553,8 +563,12 @@ async def add_series_page(
         sort,
         page,
         search_mode=search_mode,
-        session_factory=get_request_session_factory(request),
+        source=source if isinstance(source, MetadataSource) else None,
+        cache=_request_search_cache(request),
     )
+    if isinstance(user, User) and user in session:
+        # Search releases its read transaction before provider I/O.
+        await session.refresh(user)
 
     template_context = _ctx(
         request,
@@ -582,6 +596,16 @@ def normalize_add_series_sort(sort: str | None) -> str:
     return normalize_comicvine_series_sort(sort)
 
 
+def _request_search_cache(request: Request) -> MetadataSearchCache:
+    state = getattr(getattr(request, "app", None), "state", None)
+    cache = getattr(state, "metadata_search_cache", None)
+    if not isinstance(cache, MetadataSearchCache):
+        cache = MetadataSearchCache()
+        if state is not None:
+            state.metadata_search_cache = cache
+    return cache
+
+
 def sort_add_series_results(
     results: list[Any],
     sort: str,
@@ -599,11 +623,13 @@ async def load_add_series_search_context(
     page: int = 1,
     *,
     search_mode: str | None = None,
-    session_factory: async_sessionmaker[AsyncSession] | None = None,
+    source: MetadataSource | None = None,
+    cache: MetadataSearchCache | None = None,
 ) -> dict[str, object]:
-    from pullbox.services.catalog.reader import get_catalog_reader
-
-    local_catalog = get_catalog_reader().available
+    settings = get_settings()
+    descriptors = describe_source_policies(
+        await read_source_policies(session), gcd_api_enabled=settings.metadata_gcd_api_v2_enabled
+    )
     per_page = ADD_SERIES_PER_PAGE
     normalized_query = (query or "").strip()
     normalized_sort = normalize_add_series_sort(sort)
@@ -618,7 +644,16 @@ async def load_add_series_search_context(
     ) or 0
 
     base_context: dict[str, object] = {
-        "local_catalog": local_catalog,
+        "local_catalog": source is MetadataSource.COMICVINE_LOCAL,
+        "search_source": source.value if source else "all",
+        "search_source_label": SOURCE_LABELS[source] if source else "metadata sources",
+        "search_source_options": [("all", "All enabled sources")]
+        + [
+            (item.source.value, SOURCE_LABELS[item.source])
+            for item in descriptors
+            if SourceCapability.SERIES_SEARCH in item.capabilities
+        ],
+        "search_source_messages": [],
         "search_query": normalized_query,
         "add_series_sort": normalized_sort,
         "is_preview_search": False,
@@ -642,15 +677,19 @@ async def load_add_series_search_context(
     if preview_mode and not _is_add_series_preview_query_ready(parsed_query.title_query):
         return base_context
 
-    full_search_url = "/series/add?" + urlencode(
-        {
-            "q": normalized_query,
-            "sort": normalized_sort,
-        }
-    )
+    search_params = {"q": normalized_query, "sort": normalized_sort}
+    if source is not None:
+        search_params["source"] = source.value
+    full_search_url = "/series/add?" + urlencode(search_params)
     base_context["add_series_full_search_url"] = full_search_url
 
     try:
+        runtime = await load_source_runtime(
+            session, gcd_api_enabled=settings.metadata_gcd_api_v2_enabled
+        )
+        base_context["search_source_revisions"] = {
+            item.policy.source.value: item.policy.revision for item in runtime
+        }
         naming_config = await _system_config_values(
             session,
             (
@@ -662,49 +701,45 @@ async def load_add_series_search_context(
         folder_template = naming_config.get("series_folder_template", "{Series} ({Year})")
         replace_illegal = naming_config.get("replace_illegal_characters", "true") == "true"
         colon_replacement = naming_config.get("colon_replacement", "dash")
-        async with open_comicvine_ui_provider(
-            session,
-            session_factory=session_factory,
-            prefer_catalog=True,
-        ) as provider:
-            if preview_mode:
-                cv_results, _total_results = await provider.search_series_page(
-                    parsed_query.title_query,
-                    parsed_query.year_hint,
-                    limit=per_page,
-                )
-            else:
-                cv_results, _total_results = await provider.search_series_globally(
-                    parsed_query.title_query,
-                    max_results=COMICVINE_SERIES_SEARCH_LIMIT,
-                )
-        searchable_total = len(cv_results)
+        await session.rollback()
+        snapshot = await search_snapshot(
+            SeriesDiscoveryQuery(
+                query=parsed_query.title_query,
+                year=parsed_query.year_hint,
+                sources=[source] if source else None,
+                search_mode="preview" if preview_mode else "full",
+                limit_per_source=per_page if preview_mode else 100,
+            ),
+            runtime,
+            cache or MetadataSearchCache(),
+            gcd_api_enabled=settings.metadata_gcd_api_v2_enabled,
+        )
+        base_context["search_source_messages"] = source_messages(snapshot)
+        searchable_total = len(snapshot.results)
         total_pages = max(1, (searchable_total + per_page - 1) // per_page)
         resolved_page = min(requested_page, total_pages)
 
         sorted_results = sort_add_series_results(
-            list(cv_results),
+            list(snapshot.results),
             normalized_sort,
             query=parsed_query.title_query,
             year_hint=parsed_query.year_hint,
         )
         page_start = (resolved_page - 1) * per_page
         visible_results = sorted_results[page_start : page_start + per_page]
-        existing_series_by_cv_id = await load_existing_series_by_cv_id(session, visible_results)
-        search_results = format_comicvine_series_results(
+        search_results = await format_source_series_results(
+            session,
             visible_results,
-            existing_series_by_cv_id=existing_series_by_cv_id,
             folder_template=folder_template,
             replace_illegal=replace_illegal,
             colon_replacement=colon_replacement,
         )
+    except MetadataSearchBusyError as exc:
+        base_context["search_error"] = str(exc)
+        return base_context
     except Exception:
-        logger.exception("comicvine_search_failed", query=normalized_query)
-        base_context["search_error"] = (
-            "Local catalog search failed. Check its status in Metadata settings."
-            if local_catalog
-            else "ComicVine search failed. Check your API key in settings."
-        )
+        logger.warning("metadata_series_search_failed")
+        base_context["search_error"] = "Search could not finish. Retry or check Metadata settings."
         return base_context
 
     in_library_count = sum(1 for item in search_results if bool(item.get("already_added")))
@@ -719,7 +754,8 @@ async def load_add_series_search_context(
             "search_in_library_count": in_library_count,
             "search_page": resolved_page,
             "search_total_pages": total_pages,
-            "search_pagination_base_url": full_search_url,
+            "search_pagination_base_url": full_search_url
+            + ("&search_mode=preview" if preview_mode else ""),
         }
     )
     return base_context
@@ -734,16 +770,20 @@ async def htmx_search_series(
     sort: str | None = Query("relevance"),
     page: int = Query(1, ge=1),
     search_mode: str | None = Query(None),
+    source: Annotated[MetadataSource | Literal["all"], Query()] = "all",
 ) -> Response:
-    """Search ComicVine and return results as an HTMX partial."""
+    """Search selected metadata sources and return an HTMX results bundle."""
     add_series_search_ctx = await load_add_series_search_context(
         session,
         q,
         sort,
         page,
         search_mode=search_mode,
-        session_factory=get_request_session_factory(request),
+        source=source if isinstance(source, MetadataSource) else None,
+        cache=_request_search_cache(request),
     )
+    if isinstance(user, User) and user in session:
+        await session.refresh(user)
     return _templates().TemplateResponse(
         request,
         "partials/add_series_results_bundle.html",

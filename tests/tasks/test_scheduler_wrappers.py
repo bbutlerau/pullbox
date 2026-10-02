@@ -20,6 +20,7 @@ from pullbox.models.download import DownloadClientType, DownloadHistory, Downloa
 from pullbox.models.health import HealthCheckResult, HealthStatus
 from pullbox.models.issue import Issue, IssueStatus
 from pullbox.models.series import Series, SeriesStatus, SeriesType
+from pullbox.services.metadata_scheduled_refresh import ScheduledSeriesRefresh
 from pullbox.services.update_check import UpdateCheckResult
 from pullbox.tasks.backup_task import run_backups
 from pullbox.tasks.blocklist_task import expire_blocklist_entries
@@ -376,27 +377,32 @@ class TestRefreshMetadataWrapper:
             failing_id = series_two.id
             fresh_id = fresh_series.id
 
-        async def _refresh_series(session: AsyncSession, series_id: int, **kwargs: object) -> None:
+        async def _refresh_series(
+            session: AsyncSession, series_id: int, *, registry: object
+        ) -> ScheduledSeriesRefresh:
             series = await session.get(Series, series_id)
             assert series is not None
             if series_id == failing_id:
                 raise RuntimeError("boom")
             series.metadata_last_refreshed = refreshed_time
+            return ScheduledSeriesRefresh(0, False, None, Path("/unused-test-covers"))
 
         fake_service = SimpleNamespace(refresh_series=AsyncMock(side_effect=_refresh_series))
 
         monkeypatch.setattr("pullbox.tasks.metadata_task.get_session_factory", lambda: db_factory)
         monkeypatch.setattr(
             "pullbox.tasks.metadata_task.get_settings",
-            lambda: SimpleNamespace(metadata_refresh_days=7, comicvine_rate_limit=1),
+            lambda: SimpleNamespace(
+                metadata_refresh_days=7, comicvine_rate_limit=1, metadata_gcd_api_v2_enabled=False
+            ),
         )
         monkeypatch.setattr(
-            "pullbox.tasks.metadata_task.get_comicvine_api_key",
-            AsyncMock(return_value="cv-key"),
+            "pullbox.tasks.metadata_task.scheduled_series_eligibility",
+            AsyncMock(return_value=Series.comicvine_id.isnot(None)),
         )
         monkeypatch.setattr(
-            "pullbox.tasks.metadata_task._create_metadata_service",
-            AsyncMock(return_value=fake_service),
+            "pullbox.tasks.metadata_task.refresh_scheduled_series",
+            fake_service.refresh_series,
         )
 
         await refresh_metadata()

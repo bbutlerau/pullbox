@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in Metron API and read-only GCD Local series search, provider linking,
+  and reviewed metadata refresh alongside the existing ComicVine sources.
+- Added explicit existing-CBZ metadata review and coordinated ComicInfo.xml and
+  MetronInfo.xml output, including source choices for conflicting descriptive
+  values. Identity conflicts, reference-only files, and unsafe archives remain blocked.
+- Added a Series Details preview and approved `series.json` write using the saved
+  reconciled metadata, verified provider links, and field provenance. Safe custom
+  JSON fields are preserved; shared, reference-only, and read-only folders stay
+  unchanged. Split managed folders are reviewed individually.
+
+Automatic import metadata writing, GCD API v2, and LOCG enrichment are not enabled
+by this development preview. This is not the completed v2.0 general release.
+
 ## [1.3.0] - 2026-09-15
 
 Minor release adding Story Arc management, an optional local Comic Vine catalog,

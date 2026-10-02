@@ -15,12 +15,12 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from starlette.responses import Response
 
-from pullbox.api.deps import (
+from pullbox.api.deps import (  # noqa: TC001 - FastAPI resolves route annotations at runtime.
     AuthenticatedUser,
     DbSession,
-    get_request_session_factory,
 )
 from pullbox.config import get_settings
+from pullbox.core.metadata_identity import MetadataSource  # noqa: TC001
 from pullbox.core.story_arc_naming import (
     DEFAULT_STORY_ARC_FILE_TEMPLATE,
     DEFAULT_STORY_ARC_FOLDER_TEMPLATE,
@@ -57,7 +57,8 @@ from pullbox.services.story_arc_service import (
     StoryArcServiceError,
     StoryArcValidationError,
 )
-from pullbox.ui import story_arc_catalog_routes
+from pullbox.ui import story_arc_catalog_routes, story_arc_source_routes
+from pullbox.ui.metadata_arc_search import arc_search_context
 from pullbox.ui.story_arc_local_issue_search import search_story_arc_local_issues
 from pullbox.ui.story_arc_presenters import (
     load_story_arc_detail,
@@ -68,6 +69,7 @@ from pullbox.ui.story_arc_presenters import (
 
 router = APIRouter()
 router.include_router(story_arc_catalog_routes.router)
+router.include_router(story_arc_source_routes.router)
 
 _GetTemplates = Callable[[], Jinja2Templates]
 _BuildContext = Callable[..., dict[str, object]]
@@ -466,19 +468,21 @@ async def story_arc_add(
     request: Request,
     user: AuthenticatedUser,
     session: DbSession,
-    q: Annotated[str, Query(max_length=500)] = "",
+    q: Annotated[str, Query(max_length=200)] = "",
     page: Annotated[int, Query(ge=1, le=100)] = 1,
     error: str | None = Query(None),
+    source: Annotated[MetadataSource | Literal[""], Query()] = "",
 ) -> Response:
     """Render provider-first Story Arc discovery on its own add page."""
     template_user = _StoryArcTemplateUser(username=user.username)
     manual_create_enabled = get_settings().story_arc_manual_create_enabled
-    search_context = await story_arc_catalog_routes.load_story_arc_catalog_search_context(
+    search_context = await arc_search_context(
+        request,
         session,
         q=q,
         page=page,
+        source=source or None,
         base_url="/story-arcs/add",
-        session_factory=get_request_session_factory(request),
     )
     search_context["error_message"] = _ERROR_MESSAGES.get(error or "", "") or str(
         search_context["error_message"]

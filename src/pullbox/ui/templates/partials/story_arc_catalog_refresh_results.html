@@ -10,7 +10,7 @@
 {% endmacro %}
 
 <div data-testid="story-arc-update-results" class="grid grid-cols-1 gap-4 lg:grid-cols-2">
-  {% call result_card("story-arc-update-additions", "New issues", additions|length, "Issues listed by Comic Vine that aren't in this arc yet.") %}
+  {% call result_card("story-arc-update-additions", "New issues", additions|length, "Issues listed by " ~ (source_label|default('Comic Vine')) ~ " that aren't in this arc yet.") %}
     {% if additions %}
       <ul class="divide-y divide-pb-border text-sm">
         {% for member in members %}{% if member.provider_id in additions %}
@@ -27,10 +27,10 @@
   {% call result_card("story-arc-update-removals", "No longer listed", removals|length, "These issues stay in your arc. Their memberships and files won't be removed.") %}
     {% if removals %}
       <ul class="divide-y divide-pb-border text-sm text-pb-text">
-        {% for provider_id in removals %}<li class="py-3 first:pt-0 last:pb-0 break-words">Comic Vine issue ID {{ provider_id }} — preserved</li>{% endfor %}
+        {% for provider_id in removals %}<li class="py-3 first:pt-0 last:pb-0 break-words">{{ source_label|default('Comic Vine') }} issue ID {{ provider_id }} — preserved</li>{% endfor %}
       </ul>
     {% else %}
-      <p class="text-sm text-pb-text-sec">No issues have been removed from Comic Vine's list.</p>
+      <p class="text-sm text-pb-text-sec">No issues have been removed from {{ source_label|default('Comic Vine') }}'s list.</p>
     {% endif %}
   {% endcall %}
 </div>

@@ -1,5 +1,6 @@
 """Exercise local scan gates without Docker, network access, or real findings."""
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -164,7 +165,7 @@ def test_approved_glibc_exceptions_are_exact_version_and_package_scoped() -> Non
     } | {
         ("CVE-2026-5435", "libc6", "2.41-12+deb13u4"),
         ("CVE-2026-5435", "libc6", "2.41-12+deb13u4+dhi0"),
-        ("CVE-2026-5435", "libc6", "2.41-12+deb13u4+dhi1"),
+        ("CVE-2026-5435", "^libc6$", "2.41-12+deb13u4+dhi1"),
     }
     assert all(entry["package"]["type"] == "deb" for entry in entries)
 
@@ -201,7 +202,7 @@ def test_strfmon_exception_is_limited_to_the_approved_package_and_review_deadlin
         for entry in entries
     } == {
         ("libc6", "2.41-12+deb13u4+dhi0", "deb"),
-        ("libc6", "2.41-12+deb13u4+dhi1", "deb"),
+        ("^libc6$", "2.41-12+deb13u4+dhi1", "deb"),
     }
     assert "Approved by Adam Hernandez on 2026-09-15" in config_text
     assert "strfmon/strfmon_l" in config_text
@@ -224,8 +225,8 @@ def test_september_26_runtime_refresh_exceptions_are_exact_and_expiring() -> Non
         )
         for entry in entries
     } == {
-        ("CVE-2026-5435", "libc6", "2.41-12+deb13u4+dhi1", "deb"),
-        ("CVE-2026-19499", "libc6", "2.41-12+deb13u4+dhi1", "deb"),
+        ("CVE-2026-5435", "^libc6$", "2.41-12+deb13u4+dhi1", "deb"),
+        ("CVE-2026-19499", "^libc6$", "2.41-12+deb13u4+dhi1", "deb"),
         *{
             (cve, "libexpat1", "2.8.3-1~deb13u1+dhi4", "deb")
             for cve in (
@@ -240,6 +241,45 @@ def test_september_26_runtime_refresh_exceptions_are_exact_and_expiring() -> Non
     assert "2026-09-30" in config_text
     assert "2026-10-07" in config_text
     assert "NOT fixes" in config_text
+
+
+def test_october_1_renewal_is_limited_to_five_exact_matches() -> None:
+    config_text = (ROOT / ".grype.yaml").read_text()
+    config = yaml.safe_load(config_text)
+    entries = [
+        entry
+        for entry in config["ignore"]
+        if entry["vulnerability"] == "CVE-2026-102010"
+        or (
+            entry["vulnerability"] in {"CVE-2026-5435", "CVE-2026-19499"}
+            and entry["package"]["version"] == "2.41-12+deb13u4+dhi1"
+        )
+    ]
+    expected = {
+        ("CVE-2026-102010", name, "14.2.0-19+dhi3")
+        for name in ("gcc-14-base", "libgcc-s1", "libstdc++6")
+    } | {(cve, "libc6", "2.41-12+deb13u4+dhi1") for cve in ("CVE-2026-5435", "CVE-2026-19499")}
+    assert len(entries) == 5
+    assert {
+        (entry["vulnerability"], entry["package"]["name"], entry["package"]["version"])
+        for entry in entries
+    } == {
+        (cve, "^" + re.escape(name).replace(r"\-", "-") + "$", version)
+        for cve, name, version in expected
+    }
+    for entry in entries:
+        assert set(entry) == {"vulnerability", "package"}
+        assert set(entry["package"]) == {"name", "version", "type"}
+        assert entry["package"]["type"] == "deb"
+        pattern = entry["package"]["name"]
+        name = next(name for _cve, name, _version in expected if re.search(pattern, name))
+        assert not re.search(pattern, "other-" + name)
+        assert not re.search(pattern, name + "-dev")
+        if name == "libstdc++6":
+            assert not re.search(pattern, "libstdcc6")
+    assert "Re-reviewed and renewed by Adam Hernandez on 2026-10-01 ONLY" in config_text
+    assert "Re-review by 2026-10-04 or at the next DHI refresh" in config_text
+    assert "dependency\n  # reachability remains unproven" in config_text
 
 
 def test_september_13_dhi_renewal_covers_only_eight_approved_matches() -> None:

@@ -373,7 +373,7 @@ async def test_materializes_exact_ordered_entries_identities_and_multiple_arcs(
     ]
     assert {item.issue_id for item in memberships if item.issue_id == million.id} == {million.id}
     assert {(item.source, item.namespace, item.external_id) for item in identities} == {
-        ("comicvine", "story_arc", "4045-12"),
+        ("comicvine", "story_arc", "12"),
         ("mylar3", "story_arc", "arc-local-1"),
         ("mylar3", "story_arc", "arc-local-2"),
     }
@@ -1655,7 +1655,7 @@ async def test_actual_mutations_are_journaled_once_in_reverse_safe_order(
     assert [action.action_type for action in first_actions] == [
         "story_arc_created",
         "story_arc_external_identity_created",
-        "story_arc_external_identity_created",
+        "story_arc_identity_verified",
         "story_arc_membership_created",
     ]
     assert [action.id for action in second_actions] == [action.id for action in first_actions]

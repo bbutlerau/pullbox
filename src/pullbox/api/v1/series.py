@@ -11,6 +11,7 @@ from sqlalchemy import case, func, inspect, select, update
 from sqlalchemy.orm import contains_eager
 
 from pullbox.api.deps import AuthenticatedUser, DbSession
+from pullbox.config import get_settings
 from pullbox.core.events import IssueWanted, get_event_bus
 from pullbox.core.exceptions import NotFoundError, ValidationError
 from pullbox.core.library_policy import load_search_on_add_default
@@ -28,9 +29,19 @@ from pullbox.schemas.series import (
     SeriesListResponse,
     SeriesResponse,
     SeriesUpdate,
+    SourceSeriesCreate,
 )
 from pullbox.services.cover_url_service import build_series_cover_url
+from pullbox.services.metadata_catalog_review import approve_catalog_review
+from pullbox.services.metadata_discovery import MetadataSourceRegistry
+from pullbox.services.metadata_read_cache import source_read_cache
+from pullbox.services.metadata_series_add import source_series_add_transaction
+from pullbox.services.metadata_series_adoption import (
+    SeriesAdoptionError,
+    fetch_source_series_bundle,
+)
 from pullbox.services.metadata_service import MetadataService
+from pullbox.services.metadata_sources import load_source_runtime
 from pullbox.services.search_targets import load_series_wanted_search_targets
 from pullbox.services.series_service import SeriesService
 from pullbox.tasks.search_task import search_series_issues
@@ -372,14 +383,45 @@ async def get_series(
 
 @router.post("", response_model=SeriesResponse, status_code=201)
 async def add_series(
-    body: SeriesCreate,
+    body: SeriesCreate | SourceSeriesCreate,
     _user: AuthenticatedUser,
     session: DbSession,
 ) -> SeriesResponse:
-    """Add a series to the library from ComicVine."""
+    """Add a source-selected series, retaining the legacy ComicVine request."""
     search_on_add = await load_search_on_add_default(session)
     if body.search_on_add is not None and body.search_on_add != search_on_add:
         raise ValidationError("Search on add is now controlled by the global import policy.")
+
+    if isinstance(body, SourceSeriesCreate):
+        gcd_enabled = get_settings().metadata_gcd_api_v2_enabled
+        runtime = await load_source_runtime(session, gcd_api_enabled=gcd_enabled)
+        await session.rollback()
+        try:
+            bundle = await fetch_source_series_bundle(
+                MetadataSourceRegistry(
+                    runtime,
+                    gcd_api_enabled=gcd_enabled,
+                    read_cache=source_read_cache(session),
+                    revalidate_reads=True,
+                ),
+                body.source,
+                body.external_id,
+                source_revision=body.source_revision,
+            )
+            bundle = approve_catalog_review(bundle, body.catalog_review_token)
+            # This command owns commit/cleanup; serialize before committing so
+            # a failed response cannot leave an unexpected library addition.
+            async with source_series_add_transaction(
+                session,
+                bundle,
+                library_root_id=body.library_root_id,
+                search_on_add=search_on_add,
+                event_bus=get_event_bus(),
+            ) as result:
+                response = await _load_series_response(session, result.series.id)
+            return response
+        except SeriesAdoptionError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     series_svc = await _build_series_service(session)
 
@@ -566,7 +608,12 @@ async def refresh_series(
     _user: AuthenticatedUser,
     session: DbSession,
 ) -> SeriesResponse:
-    """Refresh series metadata from ComicVine."""
+    """Refresh metadata and the issue catalog from configured, verified sources."""
+    from pullbox.services.metadata_series_refresh import (
+        SeriesRefreshError,
+        source_series_refresh_transaction,
+    )
+
     series = await session.get(Series, series_id)
     if series is None:
         raise NotFoundError("Series", series_id)
@@ -575,9 +622,12 @@ async def refresh_series(
             status_code=409,
             detail="Initial metadata sync is already in progress.",
         )
-    metadata_svc = await _build_metadata_service(session)
-    await metadata_svc.refresh_series(session, series_id, force=True)
-    return await _load_series_response(session, series_id)
+    try:
+        async with source_series_refresh_transaction(session, series_id):
+            response = await _load_series_response(session, series_id)
+        return response
+    except SeriesRefreshError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/{series_id}/rename-folder", status_code=200)

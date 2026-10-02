@@ -1,0 +1,363 @@
+"""Provider priority uses stable keyed rows and the real authenticated API."""
+
+import pytest
+from playwright.sync_api import expect
+
+from tests.e2e.accessibility import assert_no_axe_violations
+from tests.e2e.pages.settings import SettingsPage
+
+pytestmark = pytest.mark.e2e
+
+
+@pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 320)])
+def test_gcd_settings_validate_real_dump_and_preserve_invalid_draft(
+    authed_page, seeded_server, tmp_path, theme, width
+):
+    from tests.api.test_gcd_local import gcd_dump
+
+    page = authed_page
+    page.set_viewport_size({"width": width, "height": 1000})
+    SettingsPage(page, seeded_server).goto("metadata")
+    page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
+    card = page.get_by_test_id("gcd-local-access")
+    field = card.get_by_label("GCD SQLite database")
+    field.fill(str(gcd_dump(tmp_path / "gcd.db")))
+    card.evaluate("node => { node.keepThisCard = true; }")
+    with page.expect_response("**/api/v1/metadata/sources/gcd_local") as result:
+        card.get_by_role("button", name="Validate and enable GCD", exact=True).click()
+    assert result.value.status == 200
+    expect(card.get_by_role("status")).to_contain_text("GCD is enabled")
+    expect(card.get_by_role("button", name="Disable GCD", exact=True)).to_be_enabled()
+    field.fill(str(tmp_path / "missing.db"))
+    card.get_by_role("button", name="Validate and enable GCD", exact=True).click()
+    expect(card.get_by_role("alert")).to_contain_text("cannot be read")
+    expect(field).to_have_value(str(tmp_path / "missing.db"))
+    assert card.evaluate("node => node.keepThisCard")
+    card.get_by_role("button", name="Load saved GCD settings", exact=True).click()
+    expect(field).to_have_value(str(tmp_path / "gcd.db"))
+    assert card.evaluate("node => node.scrollWidth <= node.clientWidth + 1")
+    assert_no_axe_violations(
+        page, name=f"gcd-settings-{theme}-{width}", include=["[data-testid='gcd-local-access']"]
+    )
+    card.get_by_role("button", name="Disable GCD", exact=True).click()
+    expect(card.get_by_role("status")).to_contain_text("GCD is disabled")
+
+
+@pytest.mark.parametrize("theme,width", [("light", 1280), ("dark", 320)])
+def test_account_hold_and_deferred_work_keep_draft_and_allow_paged_review(
+    authed_page, seeded_server, theme, width
+):
+    page = authed_page
+    page.set_viewport_size({"width": width, "height": 1000})
+    SettingsPage(page, seeded_server).goto("metadata")
+    page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
+    sources = page.request.get(seeded_server + "/api/v1/metadata/sources").json()
+    for item in sources:
+        if item["source"] == "metron_api":
+            item.update(
+                enabled=True,
+                availability=None,
+                credential_configured=True,
+                account={"status": "authentication_failed", "retry_at": None, "probe_until": None},
+                deferred_series=13,
+                deferred_work=26,
+            )
+    page.route("**/api/v1/metadata/sources", lambda route: route.fulfill(json=sources))
+    page.evaluate("window.dispatchEvent(new CustomEvent('metadata-credentials-updated'))")
+    card = page.get_by_test_id("metadata-source-priority")
+    order = card.get_by_test_id("metadata-order-global")
+    expect(card.get_by_role("button", name="Test Metron", exact=True)).to_be_enabled()
+    order.locator('[data-order-direction="down"]').first.click()
+    draft = order.locator("[data-source-label]").all_text_contents()
+
+    def retries(route):
+        from urllib.parse import parse_qs, urlparse
+
+        offset = int(parse_qs(urlparse(route.request.url).query).get("offset", [0])[0])
+        route.fulfill(
+            json={
+                "total": 26,
+                "limit": 10,
+                "offset": offset,
+                "has_more": offset < 20,
+                "items": [
+                    {
+                        "id": index,
+                        "series_id": 1,
+                        "series_title": f"Waiting series {index}",
+                        "source": "metron_api",
+                        "task_id": "refresh_metadata",
+                        "state": "authentication_required",
+                        "retry_at": None,
+                    }
+                    for index in range(offset + 1, min(offset + 11, 27))
+                ],
+            }
+        )
+
+    page.route("**/api/v1/metadata/retries?**", retries)
+    button = card.get_by_role("button", name="View deferred work for Metron", exact=True)
+    expect(card.get_by_text("13 series have deferred metadata work.", exact=True)).to_be_visible()
+    button.press("Enter")
+    panel = page.get_by_test_id("metadata-deferred-work")
+    expect(panel.get_by_text("Waiting series 1", exact=True)).to_be_visible()
+    panel.get_by_role("button", name="Next", exact=True).press("Enter")
+    expect(panel.get_by_text("Waiting series 11", exact=True)).to_be_visible()
+    expect(panel.get_by_text("Waiting series 1", exact=True)).to_have_count(0)
+    expect(order.locator("[data-source-label]")).to_have_text(draft)
+    expect(card.get_by_role("button", name="Save metadata priority", exact=True)).to_be_enabled()
+    assert panel.evaluate("node => node.scrollWidth <= node.clientWidth + 1")
+    assert_no_axe_violations(
+        page,
+        name=f"metadata-deferred-{theme}-{width}",
+        include=["[data-testid='metadata-source-health']"],
+    )
+    panel.evaluate("node => node.scrollIntoView({block: 'start'})")
+    page.screenshot(
+        path=f"test-results/metadata-deferred-{theme}-{width}.png", animations="disabled"
+    )
+    panel.evaluate("node => { node.keepThisPanel = true; }")
+    page.route(
+        "**/api/v1/metadata/retries?**",
+        lambda route: route.fulfill(status=503, json={"detail": "Unavailable"}),
+    )
+    panel.get_by_role("button", name="Next", exact=True).press("Enter")
+    expect(panel.get_by_role("alert")).to_contain_text("Could not load deferred work")
+    expect(panel.get_by_text("Waiting series 11", exact=True)).to_be_visible()
+    assert panel.evaluate("node => node.keepThisPanel") is True
+    panel.get_by_role("button", name="Close deferred work", exact=True).press("Enter")
+    expect(panel).to_be_hidden()
+    expect(button).to_be_focused()
+
+
+def test_metadata_priorities_save_reload_and_domain_reset(authed_page, seeded_server):
+    page = authed_page
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    SettingsPage(page, seeded_server).goto("metadata")
+    card = page.get_by_test_id("metadata-source-priority")
+    expect(card).to_be_visible()
+    global_order = card.get_by_test_id("metadata-order-global")
+    rows = global_order.locator("[data-source-row]")
+    initial = rows.locator("[data-source-label]").all_text_contents()
+    assert len(initial) == 5
+    down = global_order.locator('[data-order-direction="down"]')
+    down.first.press("Enter")
+    expected = [initial[1], initial[0], *initial[2:]]
+    expect(rows.locator("[data-source-label]")).to_have_text(expected)
+    expect(
+        global_order.get_by_role("button", name=f"Move {initial[0]} down", exact=True)
+    ).to_be_focused()
+    card.get_by_text("Advanced domain priorities", exact=True).click()
+    card.get_by_label("Use a separate order for Artwork").check()
+    artwork = card.get_by_test_id("metadata-order-artwork")
+    expect(artwork.locator("[data-source-row]")).to_have_count(3)
+    artwork.locator('[data-order-direction="down"]').first.click()
+    with page.expect_response("**/api/v1/metadata/priorities") as saved:
+        card.get_by_role("button", name="Save metadata priority", exact=True).click()
+    assert saved.value.status == 200
+    expect(card.get_by_role("status")).to_contain_text("Metadata priority saved")
+    page.reload()
+    expect(rows.locator("[data-source-label]")).to_have_text(expected)
+    card.get_by_text("Advanced domain priorities", exact=True).click()
+    expect(card.get_by_label("Use a separate order for Artwork")).to_be_checked()
+    card.get_by_label("Use a separate order for Artwork").uncheck()
+    global_order.locator('[data-order-direction="up"]').nth(1).click()
+    with page.expect_response("**/api/v1/metadata/priorities") as saved:
+        card.get_by_role("button", name="Save metadata priority", exact=True).click()
+    assert saved.value.status == 200
+    assert all(not row["domain_priorities"] for row in saved.value.json())
+    assert not errors
+
+
+@pytest.mark.parametrize("external_change", [False, True])
+def test_gcd_save_updates_only_the_seen_priority_revision(
+    authed_page, seeded_server, tmp_path, external_change
+):
+    from tests.api.test_gcd_local import gcd_dump
+
+    page = authed_page
+    SettingsPage(page, seeded_server).goto("metadata")
+    priority = page.get_by_test_id("metadata-source-priority")
+    priority.evaluate("node => { node.keepThisNode = true; }")
+    order = priority.get_by_test_id("metadata-order-global")
+    order.locator('[data-order-direction="down"]').first.click()
+    draft = order.locator("[data-source-label]").all_text_contents()
+    gcd = page.get_by_test_id("gcd-local-access")
+
+    if external_change:
+        sources = page.request.get(seeded_server + "/api/v1/metadata/sources").json()
+        base = next(source for source in sources if source["source"] == "gcd_local")
+        response = page.request.put(
+            seeded_server + "/api/v1/metadata/sources/gcd_local",
+            headers={"X-CSRF-Token": page.evaluate("readCsrfTokenFromBody()")},
+            data={
+                "revision": base["revision"],
+                "enabled": False,
+                "priority": base["priority"],
+                "domain_priorities": base["domain_priorities"],
+                "settings": base["settings"],
+            },
+        )
+        assert response.status == 200
+        with page.expect_response("**/api/v1/metadata/sources"):
+            gcd.get_by_role("button", name="Load saved GCD settings", exact=True).click()
+        expect(gcd.get_by_role("button", name="Load saved GCD settings")).to_be_enabled()
+
+    gcd.get_by_label("GCD SQLite database").fill(str(gcd_dump(tmp_path / "gcd.db")))
+    with page.expect_response("**/api/v1/metadata/sources/gcd_local") as enabled:
+        gcd.get_by_role("button", name="Validate and enable GCD", exact=True).click()
+    assert enabled.value.status == 200
+    expect(
+        priority.get_by_role("button", name="Test GCD Local Database", exact=True)
+    ).to_be_enabled()
+    expect(order.locator("[data-source-label]")).to_have_text(draft)
+    path_draft = str(tmp_path / "next-dump.db")
+    gcd.get_by_label("GCD SQLite database").fill(path_draft)
+    with page.expect_response("**/api/v1/metadata/priorities") as saved:
+        priority.get_by_role("button", name="Save metadata priority", exact=True).click()
+    assert saved.value.status == (409 if external_change else 200)
+    expect(order.locator("[data-source-label]")).to_have_text(draft)
+    expect(gcd.get_by_label("GCD SQLite database")).to_have_value(path_draft)
+    assert priority.evaluate("node => node.keepThisNode") is True
+
+    order.locator('[data-order-direction="down"]').nth(2).click()
+    draft = order.locator("[data-source-label]").all_text_contents()
+    with page.expect_response("**/api/v1/metadata/sources/gcd_local") as disabled:
+        gcd.get_by_role("button", name="Disable GCD", exact=True).click()
+    assert disabled.value.status == 200
+    expect(gcd.get_by_role("status")).to_contain_text("GCD is disabled")
+    with page.expect_response("**/api/v1/metadata/priorities") as saved:
+        priority.get_by_role("button", name="Save metadata priority", exact=True).click()
+    assert saved.value.status == (409 if external_change else 200)
+    expect(order.locator("[data-source-label]")).to_have_text(draft)
+    assert priority.evaluate("node => node.keepThisNode") is True
+
+
+def test_metadata_priority_conflict_keeps_draft_and_rows(authed_page, seeded_server):
+    page = authed_page
+    SettingsPage(page, seeded_server).goto("metadata")
+    card = page.get_by_test_id("metadata-source-priority")
+    expect(card).to_be_visible()
+    card.evaluate("node => { node.keepThisNode = true; }")
+    order = card.get_by_test_id("metadata-order-global")
+    order.locator('[data-order-direction="down"]').first.click()
+    draft = order.locator("[data-source-label]").all_text_contents()
+    page.route(
+        "**/api/v1/metadata/priorities",
+        lambda route: route.fulfill(
+            status=409,
+            json={"detail": "Source settings changed; reload before saving"},
+        ),
+    )
+    card.get_by_role("button", name="Save metadata priority", exact=True).click()
+    expect(card.get_by_role("alert")).to_contain_text("Settings changed")
+    expect(order.locator("[data-source-label]")).to_have_text(draft)
+    assert card.evaluate("node => node.keepThisNode") is True
+    card.get_by_role("button", name="Load saved priority", exact=True).click()
+    expect(card.get_by_role("button", name="Save metadata priority", exact=True)).to_be_disabled()
+    assert card.evaluate("node => node.keepThisNode") is True
+
+
+def test_metadata_health_is_scoped_and_keeps_priority_draft(authed_page, seeded_server):
+    page = authed_page
+    SettingsPage(page, seeded_server).goto("metadata")
+    card = page.get_by_test_id("metadata-source-priority")
+    expect(card).to_be_visible()
+    card.get_by_test_id("metadata-order-global").locator(
+        '[data-order-direction="down"]'
+    ).first.click()
+    page.route(
+        "**/api/v1/metadata/sources/comicvine_local/test",
+        lambda route: route.fulfill(
+            json={
+                "outcome": {
+                    "source": "comicvine_local",
+                    "status": "rate_limited",
+                    "retry_after_seconds": 30,
+                },
+                "recorded": True,
+            }
+        ),
+    )
+    health = card.get_by_test_id("metadata-source-health")
+    health.get_by_role("button", name="Test ComicVine Local Catalog", exact=True).click()
+    expect(health.get_by_role("status")).to_contain_text("Rate limited")
+    expect(health.get_by_role("status")).to_contain_text("30")
+    expect(card.get_by_role("button", name="Save metadata priority", exact=True)).to_be_enabled()
+    disabled = health.get_by_role("button", name="Test GCD API v2", exact=True)
+    expect(disabled).to_be_disabled()
+    assert "feature_disabled" not in disabled.inner_text()
+
+
+def test_metadata_credential_refresh_preserves_unsaved_priority(authed_page, seeded_server):
+    page = authed_page
+    SettingsPage(page, seeded_server).goto("metadata")
+    card = page.get_by_test_id("metadata-source-priority")
+    order = card.get_by_test_id("metadata-order-global")
+    order.locator('[data-order-direction="down"]').first.click()
+    draft = order.locator("[data-source-label]").all_text_contents()
+    sources = page.request.get(seeded_server + "/api/v1/metadata/sources").json()
+    for item in sources:
+        if item["source"] == "comicvine_api":
+            item["credential_configured"] = True
+            item["availability"] = None
+    page.route("**/api/v1/metadata/sources", lambda route: route.fulfill(json=sources))
+    page.evaluate("window.dispatchEvent(new CustomEvent('metadata-credentials-updated'))")
+    expect(card.get_by_role("button", name="Test ComicVine API", exact=True)).to_be_enabled()
+    expect(order.locator("[data-source-label]")).to_have_text(draft)
+    expect(card.get_by_role("button", name="Save metadata priority", exact=True)).to_be_enabled()
+
+
+def test_metadata_save_keeps_controls_and_focus_while_pending(authed_page, seeded_server):
+    page = authed_page
+    SettingsPage(page, seeded_server).goto("metadata")
+    card = page.get_by_test_id("metadata-source-priority")
+    card.get_by_test_id("metadata-order-global").locator(
+        '[data-order-direction="down"]'
+    ).first.click()
+    page.evaluate("""() => {
+      const original = window.fetch.bind(window);
+      window.fetch = (url, options) => url.endsWith('/api/v1/metadata/priorities')
+        ? new Promise(() => {}) : original(url, options);
+    }""")
+    button = card.get_by_role("button", name="Save metadata priority", exact=True)
+    button.evaluate("node => { node.keepThisButton = true; }")
+    button.click()
+    button = card.get_by_role("button", name="Saving...", exact=True)
+    expect(button).to_be_visible()
+    expect(button).to_be_disabled()
+    assert button.evaluate("node => node.keepThisButton") is True
+    expect(card.get_by_role("button", name="Reset", exact=True)).to_be_disabled()
+    expect(card.get_by_test_id("metadata-order-global").locator("[data-source-row]")).to_have_count(
+        5
+    )
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+@pytest.mark.parametrize("width", [1280, 320])
+def test_metadata_priority_accessibility_and_boundary_focus(
+    authed_page, seeded_server, theme, width
+):
+    page = authed_page
+    page.set_viewport_size({"width": width, "height": 900})
+    page.emulate_media(reduced_motion="reduce")
+    SettingsPage(page, seeded_server).goto("metadata")
+    page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
+    card = page.get_by_test_id("metadata-source-priority")
+    order = card.get_by_test_id("metadata-order-global")
+    first = order.locator("[data-source-label]").first.inner_text()
+    order.locator('[data-order-direction="down"]').first.press("Enter")
+    order.get_by_role("button", name=f"Move {first} up", exact=True).press("Enter")
+    expect(order.get_by_role("button", name=f"Move {first} down", exact=True)).to_be_focused()
+    card.get_by_text("Advanced domain priorities", exact=True).click()
+    card.get_by_label("Use a separate order for Artwork").check()
+    assert card.evaluate("element => element.scrollWidth <= element.clientWidth + 1")
+    assert_no_axe_violations(
+        page,
+        name=f"metadata-priority-{theme}-{width}",
+        include=["[data-testid='metadata-source-priority']"],
+    )
+    card.screenshot(
+        path=f"test-results/metadata-priority-{theme}-{width}.png", animations="disabled"
+    )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import sqlite3
 import threading
@@ -43,6 +44,11 @@ class CatalogIssueSummary(IssueSummary):
     source_cutoff_at: datetime | None = None
 
 
+@dataclass(frozen=True)
+class CatalogIssueMetadata(IssueMetadata):
+    source_cutoff_at: datetime | None = None
+
+
 class CatalogReader:
     """Pin a file per query; verify a generation once before serving its rows."""
 
@@ -54,6 +60,19 @@ class CatalogReader:
     @property
     def available(self) -> bool:
         return (self.root / "active.json").exists()
+
+    async def cache_token(self) -> str | None:
+        """Fingerprint the validated active file without exposing its location."""
+
+        def token() -> str | None:
+            if not self.available:
+                return None
+            path, cutoff = self._generation()
+            stat = path.stat()
+            identity = (str(path), stat.st_ino, stat.st_mtime_ns, stat.st_size, cutoff.isoformat())
+            return hashlib.sha256(repr(identity).encode()).hexdigest()
+
+        return await disk_work(token)
 
     def _generation(self) -> tuple[Path, datetime]:
         reference = load_json(self.root / "active.json")
@@ -160,7 +179,9 @@ class CatalogReader:
             cutoff,
         )
 
-    async def issue(self, issue_id: int) -> IssueMetadata | None:
+    async def issue(
+        self, issue_id: int, *, preserve_number_text: bool = False
+    ) -> IssueMetadata | None:
         """Return only the basic identity fields used during import file matching."""
         rows, cutoff = await disk_work(
             self._query, f"SELECT {ISSUE_COLUMNS} FROM issues WHERE id=?", (issue_id,)
@@ -168,8 +189,13 @@ class CatalogReader:
         if not rows:
             return None
         row = rows[0]
+        return self._issue_metadata(row, cutoff, preserve_number_text=preserve_number_text)
+
+    def _issue_metadata(
+        self, row: Any, cutoff: datetime, *, preserve_number_text: bool
+    ) -> CatalogIssueMetadata:
         summary = self._summary(row, cutoff)
-        return IssueMetadata(
+        return CatalogIssueMetadata(
             summary.provider_id,
             str(row[1]),
             summary.issue_number,
@@ -180,7 +206,54 @@ class CatalogReader:
             summary.cover_url,
             None,
             f"https://comicvine.gamespot.com/issue/4000-{row[0]}/",
-            issue_number_text=summary.issue_number_text,
+            issue_number_text=(
+                str(row[2] or row[3] or "") if preserve_number_text else summary.issue_number_text
+            ),
+            source_cutoff_at=cutoff,
+        )
+
+    async def recent_issues(self, series_id: int) -> tuple[list[IssueMetadata], int, datetime]:
+        """Newest publication slice and total, pinned to one immutable generation."""
+        if type(series_id) is not int or not 0 < series_id < 2**63:
+            raise ValueError("Invalid catalog series identity")
+        rows, cutoff = await disk_work(
+            self._query,
+            f"WITH page AS (SELECT {ISSUE_COLUMNS} FROM issues WHERE series_id=? "
+            "ORDER BY store_date DESC,id DESC LIMIT 100), "
+            "tally AS (SELECT COUNT(*) AS total FROM issues WHERE series_id=?) "
+            "SELECT page.*,tally.total FROM tally LEFT JOIN page ON 1=1 "
+            "ORDER BY page.store_date DESC,page.id DESC",
+            (series_id, series_id),
+        )
+        return (
+            [
+                self._issue_metadata(row, cutoff, preserve_number_text=True)
+                for row in rows
+                if row[0] is not None
+            ],
+            int(rows[0][-1]),
+            cutoff,
+        )
+
+    async def issue_page(self, series_id: int, *, page: int = 1) -> tuple[list[IssueMetadata], int]:
+        """Count and read a bounded page in one query on one immutable generation."""
+        if type(page) is not int or not 1 <= page <= 10000:
+            raise ValueError("Invalid catalog page")
+        rows, cutoff = await disk_work(
+            self._query,
+            f"WITH page AS (SELECT {ISSUE_COLUMNS} FROM issues WHERE series_id=? "
+            "ORDER BY id LIMIT 100 OFFSET ?), "
+            "tally AS (SELECT COUNT(*) AS total FROM issues WHERE series_id=?) "
+            "SELECT page.*,tally.total FROM tally LEFT JOIN page ON 1=1 ORDER BY page.id",
+            (series_id, (page - 1) * 100, series_id),
+        )
+        return (
+            [
+                self._issue_metadata(row, cutoff, preserve_number_text=True)
+                for row in rows
+                if row[0] is not None
+            ],
+            int(rows[0][-1]),
         )
 
 

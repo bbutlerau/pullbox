@@ -1,4 +1,4 @@
-/* The complete bounded preview stays local: paging never refetches Comic Vine
+/* The complete bounded preview stays local: paging never refetches a source
  * or drops order/skip choices for members on another page. */
 function storyArcPreview() {
   return {
@@ -6,6 +6,7 @@ function storyArcPreview() {
     libraryRootId: '', monitored: false, rootOptions: [],
     title: '', description: '', coverUrl: '', coverFailed: false,
     fingerprint: '', fileDefaultsFingerprint: '', fileSummary: '', fileExample: '',
+    sourceRevision: null, sourceLabel: 'Metadata source',
     error: '', submitError: '', notice: '', busy: '', controller: null, endpoint: '', reorderAnnouncement: '',
 
     init() {
@@ -86,6 +87,8 @@ function storyArcPreview() {
       if (this.coverUrl !== data.coverUrl) this.coverFailed = false;
       this.coverUrl = data.coverUrl;
       this.fingerprint = data.fingerprint;
+      this.sourceRevision = data.sourceRevision ?? null;
+      this.sourceLabel = data.sourceLabel || 'Metadata source';
       const defaultsChanged = preserve && this.fileDefaultsFingerprint !== data.fileDefaultsFingerprint;
       this.fileDefaultsFingerprint = data.fileDefaultsFingerprint;
       this.fileSummary = data.fileSummary;
@@ -160,7 +163,7 @@ function storyArcPreview() {
         if (!this.$el.isConnected) return;
         this.ready = false;
         this.error = error.name === 'AbortError'
-          ? 'Comic Vine took too long to respond. Your edits are still here. Retry preview.'
+          ? `${this.sourceLabel} took too long to respond. Your edits are still here. Retry preview.`
           : error instanceof TypeError || error instanceof SyntaxError
             ? 'The connection failed. Your edits are still here. Retry preview.' : error.message;
       } finally {

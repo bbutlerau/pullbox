@@ -1873,7 +1873,26 @@ class TestMigrationChain:
     def test_root_removal_protects_dependencies_without_losing_other_fk_actions(self, alembic_cfg):
         cfg, sync_url = alembic_cfg
         script = ScriptDirectory.from_config(cfg)
-        assert script.get_heads() == ["o6i7j8k9l012"]
+        assert script.get_heads() == ["h5b6c7d8e901"]
+        assert script.get_revision("h5b6c7d8e901").down_revision == "g4a5b6c7d890"
+        assert script.get_revision("g4a5b6c7d890").down_revision == "f3z4a5b6c789"
+        assert script.get_revision("f3z4a5b6c789").down_revision == "e2y3z4a5b678"
+        assert script.get_revision("e2y3z4a5b678").down_revision == "d1x2y3z4a567"
+        assert script.get_revision("d1x2y3z4a567").down_revision == "c0w1x2y3z456"
+        assert script.get_revision("c0w1x2y3z456").down_revision == "b9v0w1x2y345"
+        assert script.get_revision("b9v0w1x2y345").down_revision == "a8u9v0w1x234"
+        assert script.get_revision("a8u9v0w1x234").down_revision == "z7t8u9v0w123"
+        assert script.get_revision("z7t8u9v0w123").down_revision == "y6s7t8u9v012"
+        assert script.get_revision("y6s7t8u9v012").down_revision == "x5r6s7t8u901"
+        assert script.get_revision("x5r6s7t8u901").down_revision == "w4q5r6s7t890"
+        assert script.get_revision("w4q5r6s7t890").down_revision == "v3p4q5r6s789"
+        assert script.get_revision("v3p4q5r6s789").down_revision == "u2o3p4q5r678"
+        assert script.get_revision("u2o3p4q5r678").down_revision == "t1n2o3p4q567"
+        assert script.get_revision("t1n2o3p4q567").down_revision == "s0m1n2o3p456"
+        assert script.get_revision("s0m1n2o3p456").down_revision == "r9l0m1n2o345"
+        assert script.get_revision("r9l0m1n2o345").down_revision == "q8k9l0m1n234"
+        assert script.get_revision("q8k9l0m1n234").down_revision == "p7j8k9l0m123"
+        assert script.get_revision("p7j8k9l0m123").down_revision == "o6i7j8k9l012"
         assert script.get_revision("o6i7j8k9l012").down_revision == "n5h6i7j8k901"
         assert script.get_revision("n5h6i7j8k901").down_revision == _IMPORT_JOB_ARCHIVE_REVISION
         command.upgrade(cfg, _IMPORT_JOB_ARCHIVE_REVISION)

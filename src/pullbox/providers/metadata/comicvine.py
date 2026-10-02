@@ -16,6 +16,7 @@ import html
 import re
 import time
 import weakref
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -319,6 +320,24 @@ def _issue_metadata_from_item(
     )
 
 
+def _strict_issue_metadata(item: dict[str, Any]) -> IssueMetadata:
+    if not isinstance(item, dict):
+        raise ValueError("Invalid ComicVine issue detail")
+    volume, number = item.get("volume"), item.get("issue_number")
+    if (
+        re.fullmatch(r"[1-9][0-9]{0,18}", str(item.get("id"))) is None
+        or not isinstance(volume, dict)
+        or re.fullmatch(r"[1-9][0-9]{0,18}", str(volume.get("id"))) is None
+        or not isinstance(number, str)
+        or not number.strip()
+        or len(number) > 320
+    ):
+        raise ValueError("Invalid ComicVine issue identity")
+    return replace(
+        _issue_metadata_from_item(item, fallback_provider_id=""), issue_number_text=number.strip()
+    )
+
+
 def _normalize_bulk_provider_ids(provider_ids: Sequence[str]) -> list[str]:
     if isinstance(provider_ids, (str, bytes)) or len(provider_ids) > _MAX_BULK_PROVIDER_IDS:
         raise ValueError("ComicVine batch requests require at most 5000 provider IDs")
@@ -396,10 +415,12 @@ class ComicVineError(Exception):
         *,
         retryable: bool = False,
         retry_after_seconds: int | None = None,
+        timed_out: bool = False,
     ) -> None:
         self.status_code = status_code
         self.retryable = retryable
         self.retry_after_seconds = retry_after_seconds
+        self.timed_out = timed_out
         super().__init__(message)
 
 
@@ -495,6 +516,7 @@ class ComicVineProvider:
                 0,
                 f"Request timed out: {endpoint}",
                 retryable=True,
+                timed_out=True,
             ) from None
         except httpx.HTTPStatusError as exc:
             http_status = exc.response.status_code
@@ -600,6 +622,7 @@ class ComicVineProvider:
         limit: int = 20,
         offset: int = 0,
         suppress_errors: bool = True,
+        strict_response: bool = False,
     ) -> tuple[list[SeriesSearchResult], int]:
         """Search for series and return the current page plus ComicVine's total."""
         log = logger.bind(query=query, year=year, limit=limit, offset=offset)
@@ -624,6 +647,13 @@ class ComicVineProvider:
                 return [], 0
             raise
 
+        if strict_response and (
+            not isinstance(data.get("results"), list)
+            or type(data.get("number_of_total_results")) is not int
+            or data["number_of_total_results"] < 0
+        ):
+            raise ValueError("Invalid ComicVine search response")
+
         total_results = _safe_int(data.get("number_of_total_results")) or 0
 
         results: list[SeriesSearchResult] = []
@@ -638,6 +668,47 @@ class ComicVineProvider:
 
         log.debug("comicvine_search_results", count=len(results), total_results=total_results)
         return results, total_results
+
+    async def search_series_candidates_page(
+        self,
+        query: str,
+        *,
+        limit: int = _GLOBAL_SERIES_SEARCH_BATCH_SIZE,
+        offset: int = 0,
+        strict_response: bool = True,
+    ) -> tuple[list[SeriesSearchResult], int]:
+        """Read one volume-filter page without hiding failures as empty matches."""
+        if type(limit) is not int or not 1 <= limit <= _GLOBAL_SERIES_SEARCH_BATCH_SIZE:
+            raise ValueError("Invalid ComicVine candidate page size")
+        if type(offset) is not int or offset < 0 or (strict_response and offset > 10000):
+            raise ValueError("Invalid ComicVine candidate offset")
+        filter_value = _comicvine_name_filter(query)
+        if not filter_value:
+            return [], 0
+        data = await self._request(
+            "/volumes/",
+            {
+                "filter": filter_value,
+                "field_list": (
+                    "id,name,start_year,publisher,count_of_issues,image,"
+                    "description,deck,site_detail_url"
+                ),
+                "sort": "date_last_updated:desc",
+                "limit": limit,
+                "offset": offset,
+            },
+        )
+        if strict_response and (
+            not isinstance(data.get("results"), list)
+            or type(data.get("number_of_total_results")) is not int
+            or data["number_of_total_results"] < 0
+        ):
+            raise ValueError("Invalid ComicVine candidate response")
+        items = list(data.get("results", []))
+        total = _safe_int(data.get("number_of_total_results")) or 0
+        if strict_response and (len(items) > limit or (items and total < offset + len(items))):
+            raise ValueError("Inconsistent ComicVine candidate page")
+        return [_series_search_result_from_item(item) for item in items], total
 
     async def search_series_globally(
         self,
@@ -687,7 +758,6 @@ class ComicVineProvider:
             inflight = asyncio.create_task(
                 self._fetch_global_series_search(
                     normalized_query,
-                    filter_value,
                     normalized_max,
                     normalized_batch,
                     cache_key,
@@ -714,7 +784,6 @@ class ComicVineProvider:
     async def _fetch_global_series_search(
         self,
         normalized_query: str,
-        filter_value: str,
         normalized_max: int,
         normalized_batch: int,
         cache_key: tuple[str, int, int],
@@ -729,15 +798,6 @@ class ComicVineProvider:
         )
         log.debug("comicvine_global_series_search")
 
-        params_base: dict[str, Any] = {
-            "filter": filter_value,
-            "field_list": (
-                "id,name,start_year,publisher,count_of_issues,image,"
-                "description,deck,site_detail_url"
-            ),
-            "sort": "date_last_updated:desc",
-        }
-
         results: list[SeriesSearchResult] = []
         seen_ids: set[str] = set()
         total_results = 0
@@ -745,13 +805,10 @@ class ComicVineProvider:
 
         while offset < normalized_max:
             limit = min(normalized_batch, normalized_max - offset)
-            params = {
-                **params_base,
-                "limit": limit,
-                "offset": offset,
-            }
             try:
-                data = await self._request("/volumes/", params)
+                items, page_total = await self.search_series_candidates_page(
+                    normalized_query, limit=limit, offset=offset, strict_response=False
+                )
             except ComicVineError:
                 log.exception("comicvine_global_series_search_failed")
                 if suppress_errors:
@@ -759,14 +816,11 @@ class ComicVineProvider:
                 raise
 
             if offset == 0:
-                total_results = _safe_int(data.get("number_of_total_results")) or 0
-
-            items = list(data.get("results", []))
+                total_results = page_total
             if not items:
                 break
 
-            for item in items:
-                result = _series_search_result_from_item(item)
+            for result in items:
                 if result.provider_id in seen_ids:
                     continue
                 seen_ids.add(result.provider_id)
@@ -798,7 +852,9 @@ class ComicVineProvider:
         )
         return result_tuple, effective_total
 
-    async def get_series(self, provider_id: str) -> SeriesMetadata:
+    async def get_series(
+        self, provider_id: str, *, strict_response: bool = False
+    ) -> SeriesMetadata:
         """Get full series (volume) metadata by ComicVine volume ID."""
         if re.fullmatch(r"[1-9][0-9]{0,18}", provider_id) is None:
             raise ValueError("ComicVine provider IDs must be positive integers")
@@ -815,6 +871,14 @@ class ComicVineProvider:
 
         data = await self._request(f"/volume/{_VOLUME_PREFIX}-{resource_id}/", params)
         item: dict[str, Any] = data.get("results", {})
+
+        if strict_response and (
+            not isinstance(item, dict)
+            or str(item.get("id")) != provider_id
+            or not isinstance(item.get("name"), str)
+            or not item["name"].strip()
+        ):
+            raise ValueError("Invalid ComicVine series detail")
 
         return _series_metadata_from_item(item, fallback_provider_id=provider_id)
 
@@ -845,7 +909,7 @@ class ComicVineProvider:
             provider_id: found[provider_id] for provider_id in normalized if provider_id in found
         }
 
-    async def get_issue(self, provider_id: str) -> IssueMetadata:
+    async def get_issue(self, provider_id: str, *, strict_response: bool = False) -> IssueMetadata:
         """Get full issue metadata by ComicVine issue ID."""
         if re.fullmatch(r"[1-9][0-9]{0,18}", provider_id) is None:
             raise ValueError("ComicVine provider IDs must be positive integers")
@@ -864,7 +928,50 @@ class ComicVineProvider:
         data = await self._request(f"/issue/{_ISSUE_PREFIX}-{resource_id}/", params)
         item: dict[str, Any] = data.get("results", {})
 
+        if strict_response:
+            metadata = _strict_issue_metadata(item)
+            if metadata.provider_id != provider_id:
+                raise ValueError("Different ComicVine issue identity")
+            return metadata
         return _issue_metadata_from_item(item, fallback_provider_id=provider_id)
+
+    async def get_issues_page(
+        self, series_provider_id: str, *, page: int = 1, newest_first: bool = False
+    ) -> tuple[list[IssueMetadata], int]:
+        """Read one complete page with explicit parent identity, without auto-pagination."""
+        if re.fullmatch(r"[1-9][0-9]{0,18}", series_provider_id) is None:
+            raise ValueError("ComicVine provider IDs must be positive integers")
+        if type(page) is not int or not 1 <= page <= 10000:
+            raise ValueError("Invalid ComicVine page")
+        if type(newest_first) is not bool or (newest_first and page != 1):
+            raise ValueError("Recent ComicVine reads are limited to one page")
+        offset = (page - 1) * 100
+        data = await self._request(
+            "/issues/",
+            {
+                "filter": f"volume:{series_provider_id}",
+                "field_list": (
+                    "id,volume,issue_number,name,cover_date,store_date,image,site_detail_url"
+                ),
+                "sort": "store_date:desc" if newest_first else "id:asc",
+                "limit": 100,
+                "offset": offset,
+            },
+        )
+        total, rows = data.get("number_of_total_results"), data.get("results")
+        if (
+            type(total) is not int
+            or not 0 <= total <= 1_000_000_000
+            or not isinstance(rows, list)
+            or len(rows) != min(100, max(0, total - offset))
+        ):
+            raise ValueError("Incomplete ComicVine issue page")
+        issues = [_strict_issue_metadata(row) for row in rows]
+        if any(issue.series_provider_id != series_provider_id for issue in issues) or len(
+            {issue.provider_id for issue in issues}
+        ) != len(issues):
+            raise ValueError("Invalid ComicVine issue membership")
+        return issues, total
 
     async def get_issue_batch(self, provider_ids: Sequence[str]) -> dict[str, IssueMetadata]:
         """Fetch full issue metadata in bounded ID-filter batches."""

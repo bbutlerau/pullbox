@@ -2,19 +2,31 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import structlog
 from sqlalchemy import select
 
 from pullbox.core.exceptions import ValidationError
-from pullbox.core.library_file_ownership import require_mutable_library_target
 from pullbox.models.library import FileFormat, LibraryFile
-from pullbox.utilities.executors.file_converter import convert_file
-from pullbox.utilities.settings import move_file_to_utility_trash, restore_file_from_utility_trash
+from pullbox.services.library_conversion_files import prepare_conversion
+from pullbox.services.library_conversion_recovery import (
+    publish_conversion,
+    read_conversion_binding,
+    record_conversion,
+    recover_conversion,
+)
+from pullbox.services.library_mutation_coordination import (
+    finish_short_mutation,
+    lock_file_mutation_admission,
+    require_no_archive_publication,
+)
+from pullbox.utilities.settings import build_trash_destination
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,6 +60,7 @@ async def _sync_converted_file_record(
     library_file.file_path = after_path
     library_file.file_name = updated_path.name
     library_file.file_format = FileFormat.CBZ
+    library_file.file_hash = None
     if metadata_embedded:
         library_file.has_comicinfo = True
     if updated_path.exists():
@@ -73,62 +86,42 @@ async def convert_library_file(
     trash_dir: Path,
     trash_relative_path: str | Path,
 ) -> LibraryConvertOutcome:
-    """Convert a single Library browser file immediately and sync tracked DB metadata."""
-    converted_path: Path | None = None
-    trash_path: Path | None = None
-
+    """Own the conversion session lifecycle, retaining recoverable public artifacts."""
+    if session.new or session.dirty or session.deleted or session.in_nested_transaction():
+        raise ValidationError("Conversion requires a clean session.")
+    source = source.absolute()
+    operation_id = uuid4()
+    target = source.with_suffix(".cbz")
+    relative = Path(trash_relative_path)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValidationError("Invalid conversion trash location.")
+    backup = build_trash_destination(trash_dir.absolute(), source, relative_path=relative)
+    backup = backup.parent / f"conversion-{operation_id.hex}" / backup.name
     try:
-        await require_mutable_library_target(
-            session,
-            source,
-            include_descendants=False,
-            operation="converted",
+        await lock_file_mutation_admission(session)
+        await require_no_archive_publication(
+            session, source, target, backup, include_descendants=False
         )
-        converted_path = await convert_file(source, "cbz")
-        trash_path = move_file_to_utility_trash(
-            source,
-            trash_dir,
-            relative_path=trash_relative_path,
-        )
-        await _sync_converted_file_record(
-            session,
-            before_path=str(source),
-            after_path=str(converted_path),
-            metadata_embedded=False,
-        )
+        binding = await read_conversion_binding(session, source)
+        if target.exists() or target.is_symlink() or target == source:
+            raise FileExistsError
         await session.commit()
-        return LibraryConvertOutcome(
-            kind="file",
-            source_path=str(source),
-            target_path=str(converted_path),
-            original_trash_path=str(trash_path),
+        async with prepare_conversion(source, backup, binding) as plan:
+            await record_conversion(session, plan, operation_id)
+            await finish_short_mutation(asyncio.create_task(session.commit()))
+            await publish_conversion(session, operation_id)
+            await finish_short_mutation(asyncio.create_task(session.commit()))
+            state = await recover_conversion(session, operation_id)
+            if state != "complete":
+                raise ValidationError(
+                    "Conversion needs review. The original and recovery evidence were preserved."
+                )
+        return LibraryConvertOutcome("file", str(source), str(target), str(backup))
+    except BaseException as exc:
+        await session.rollback()
+        if isinstance(exc, ValidationError) or not isinstance(exc, Exception):
+            raise
+        logger.warning(
+            "library_conversion_interrupted", operation_id=str(operation_id), exc_info=True
         )
-    except ValidationError:
-        await session.rollback()
-        raise
-    except Exception as exc:
-        await session.rollback()
-
-        restored = False
-        if trash_path is not None and trash_path.exists() and not source.exists():
-            try:
-                restore_file_from_utility_trash(
-                    trash_path,
-                    source,
-                    converted_path=converted_path,
-                )
-                restored = True
-            except Exception:
-                logger.exception(
-                    "library_convert_rollback_failed",
-                    source_path=str(source),
-                    target_path=str(converted_path) if converted_path is not None else None,
-                    trash_path=str(trash_path),
-                )
-        elif converted_path is not None and converted_path.exists():
-            converted_path.unlink()
-
-        message = _conversion_error_message(exc)
-        if restored and message == "Conversion could not be completed.":
-            message += " The original file was restored."
-        raise ValidationError(message) from exc
+        raise ValidationError(_conversion_error_message(exc)) from exc

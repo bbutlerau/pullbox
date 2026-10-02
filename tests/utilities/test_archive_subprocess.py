@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
+import signal
+import subprocess
+import sys
 import zipfile
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -404,6 +409,175 @@ async def test_terminate_worker_process_handles_completed_and_kill_paths(
     assert proc.kill_called is True
 
 
+@pytest.mark.parametrize("ignore_terminate", [False, True])
+async def test_task_cancellation_reaps_real_worker_before_returning(
+    tmp_path, monkeypatch, ignore_terminate
+):
+    """Task.cancel is distinct from a polled utility cancel/pause exception."""
+    import os
+
+    if ignore_terminate and os.name == "nt":
+        pytest.skip("Windows termination cannot be ignored by a signal handler")
+    started = asyncio.Event()
+    captured = []
+    spawn = asyncio.create_subprocess_exec
+    marker = tmp_path / "ready"
+    partial = tmp_path / "partial.cbz"
+    partial.write_bytes(b"partial")
+    script = (
+        "import signal,time,pathlib; "
+        + ("signal.signal(signal.SIGTERM, signal.SIG_IGN); " if ignore_terminate else "")
+        + f"pathlib.Path({str(marker)!r}).touch(); time.sleep(60)"
+    )
+
+    async def launch(*_args, **kwargs):
+        proc = await spawn(sys.executable, "-c", script, **kwargs)
+        captured.append(proc)
+        started.set()
+        return proc
+
+    monkeypatch.setattr(archive_subprocess.asyncio, "create_subprocess_exec", launch)
+    monkeypatch.setattr(archive_subprocess, "_PROCESS_TERMINATE_TIMEOUT_SECONDS", 0.05)
+    task = asyncio.create_task(_run_archive_operation("convert", {}, cleanup_paths=[partial]))
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        async with asyncio.timeout(5):
+            while not marker.exists():
+                await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert captured[0].returncode is not None, "cancel returned while child was still alive"
+        assert not partial.exists()
+    finally:
+        if captured and captured[0].returncode is None:
+            captured[0].kill()
+            await captured[0].wait()
+
+
+async def test_cancellation_during_spawn_still_reaps_acquired_worker(tmp_path, monkeypatch):
+    acquired = asyncio.Event()
+    release = asyncio.Event()
+    captured = []
+    spawn = asyncio.create_subprocess_exec
+
+    async def launch(*_args, **kwargs):
+        proc = await spawn(sys.executable, "-c", "import time; time.sleep(60)", **kwargs)
+        captured.append(proc)
+        acquired.set()
+        await release.wait()
+        return proc
+
+    monkeypatch.setattr(archive_subprocess.asyncio, "create_subprocess_exec", launch)
+    task = asyncio.create_task(_run_archive_operation("convert", {}))
+    try:
+        await asyncio.wait_for(acquired.wait(), 5)
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert captured[0].returncode is not None, "spawn cancellation orphaned the worker"
+    finally:
+        release.set()
+        if captured and captured[0].returncode is None:
+            captured[0].kill()
+            await captured[0].wait()
+
+
+async def test_second_cancel_cannot_interrupt_worker_reaping(tmp_path, monkeypatch):
+    ready = asyncio.Event()
+    terminating = asyncio.Event()
+    done = asyncio.Event()
+
+    class Process:
+        returncode = None
+
+        async def communicate(self):
+            ready.set()
+            await done.wait()
+            return b"{}", b""
+
+        def terminate(self):
+            terminating.set()
+
+        def kill(self):
+            self.returncode = -9
+            done.set()
+
+    proc = Process()
+
+    async def launch(*_args, **_kwargs):
+        return proc
+
+    monkeypatch.setattr(archive_subprocess.asyncio, "create_subprocess_exec", launch)
+    monkeypatch.setattr(archive_subprocess, "_PROCESS_TERMINATE_TIMEOUT_SECONDS", 0.05)
+    task = asyncio.create_task(_run_archive_operation("convert", {}))
+    await asyncio.wait_for(ready.wait(), 5)
+    task.cancel()
+    await asyncio.wait_for(terminating.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert proc.returncode == -9
+    assert done.is_set()
+
+
+@pytest.mark.parametrize("control", ["task", "cancel", "pause", "failure"])
+async def test_interrupted_move_preserves_destination_after_source_was_moved(
+    tmp_path, monkeypatch, control
+):
+    source = tmp_path / "source.cbz"
+    target = tmp_path / "destination.cbz"
+    source.write_bytes(b"only copy")
+    moved = asyncio.Event()
+    done = asyncio.Event()
+
+    class Process:
+        returncode = None
+
+        async def communicate(self):
+            source.rename(target)
+            moved.set()
+            if control == "failure":
+                self.returncode = 1
+                return b"", b'{"type":"RuntimeError","message":"worker failed after move"}'
+            await done.wait()
+            return b"{}", b""
+
+        def terminate(self):
+            self.returncode = -15
+            done.set()
+
+    async def launch(*_args, **_kwargs):
+        return Process()
+
+    async def check():
+        if control == "cancel":
+            raise JobCancelledError("stop")
+        if control == "pause":
+            raise JobPausedError("stop")
+
+    monkeypatch.setattr(archive_subprocess.asyncio, "create_subprocess_exec", launch)
+    monkeypatch.setattr(archive_subprocess, "_CONTROL_POLL_INTERVAL_SECONDS", 0.01)
+    task = asyncio.create_task(
+        transfer_file_interruptible(source, target, "move", cancellation_check=check)
+    )
+    await asyncio.wait_for(moved.wait(), 5)
+    if control == "task":
+        task.cancel()
+    expected = {
+        "task": asyncio.CancelledError,
+        "cancel": JobCancelledError,
+        "pause": JobPausedError,
+        "failure": RuntimeError,
+    }[control]
+    with pytest.raises(expected):
+        await task
+    assert target.exists(), "cleanup deleted the sole surviving copy after the move"
+    assert target.read_bytes() == b"only copy"
+    assert not source.exists()
+
+
 def test_progress_state_cleanup_and_worker_error_branches(tmp_path: Path) -> None:
     missing = tmp_path / "missing.json"
     invalid = tmp_path / "invalid.json"
@@ -636,3 +810,45 @@ def test_copy_with_retries_cleans_partial_file_before_success(
 
     assert calls == 2
     assert target.read_text() == "comic"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX isolated worker group contract")
+async def test_crashed_paired_worker_does_not_leave_a_running_helper(tmp_path, monkeypatch):
+    from pullbox.utilities.executors.archive_metadata_staging import ArchiveMetadataStagingError
+
+    spawn = asyncio.create_subprocess_exec
+    marker = tmp_path / "child.pid"
+    script = (
+        "import pathlib,subprocess,sys,time; "
+        "child=subprocess.Popen([sys.executable, '-c', "
+        "'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'], "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+        f"pathlib.Path({str(marker)!r}).write_text(str(child.pid)); "
+        "time.sleep(0.1); sys.exit(1)"
+    )
+
+    async def launch(*_args, **kwargs):
+        return await spawn(sys.executable, "-c", script, **kwargs)
+
+    monkeypatch.setattr(archive_subprocess.asyncio, "create_subprocess_exec", launch)
+    child_pid = None
+    try:
+        with pytest.raises(ArchiveMetadataStagingError):
+            await _run_archive_operation("paired_stage", {})
+        child_pid = int(marker.read_text())
+        for _attempt in range(50):
+            state = subprocess.run(
+                ["ps", "-o", "stat=", "-p", str(child_pid)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=1,
+            ).stdout.strip()
+            if not state or state.startswith("Z"):
+                break
+            await asyncio.sleep(0.01)
+        assert not state or state.startswith("Z"), "worker exited but its helper is still executing"
+    finally:
+        if child_pid is not None:
+            with suppress(ProcessLookupError):
+                os.kill(child_pid, signal.SIGKILL)

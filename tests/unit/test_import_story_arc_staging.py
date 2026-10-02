@@ -226,10 +226,11 @@ async def test_mylar_staging_preserves_exact_gapped_duplicate_and_missing_entrie
         {
             "source": "comicvine",
             "namespace": "story_arc",
-            "external_id": "4045-12",
+            "external_id": "12",
         }
     ]
     assert [entry.reading_order for entry in entries] == [2, 7, 7]
+    assert entries[0].evidence["cv_arc_id"] == "4045-12"
     assert [entry.reading_order_raw for entry in entries] == ["002", "007", "7"]
     assert [entry.source_issue_number_text for entry in entries] == [
         "1000000",

@@ -17,10 +17,13 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     event,
+    text,
 )
 from sqlalchemy import Enum as SQLAlchemyEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
+from pullbox.core.metadata_identity import IdentityEvidenceKind
+from pullbox.core.metadata_identity_state import IdentityVerificationState
 from pullbox.core.story_arc_identity import normalize_story_arc_name
 from pullbox.models.base import Base, IdentityMixin, TimestampMixin, UTCDateTime
 
@@ -311,6 +314,23 @@ class StoryArcExternalIdentity(Base, IdentityMixin, TimestampMixin):
             name="uq_story_arc_external_identity",
         ),
         Index("ix_story_arc_external_identities_arc_id", "story_arc_id", "id"),
+        Index(
+            "uq_story_arc_canonical_provider",
+            "story_arc_id",
+            "source",
+            unique=True,
+            sqlite_where=text(
+                "namespace = 'story_arc' AND source IN ('comicvine','metron','gcd','locg')"
+            ),
+            postgresql_where=text(
+                "namespace = 'story_arc' AND source IN ('comicvine','metron','gcd','locg')"
+            ),
+        ),
+        CheckConstraint(
+            "verification_state IN ('verified','stale','conflicted')",
+            name="ck_story_arc_identity_active_state",
+        ),
+        CheckConstraint("revision > 0", name="ck_story_arc_identity_revision"),
     )
 
     story_arc_id: Mapped[int] = mapped_column(
@@ -323,6 +343,17 @@ class StoryArcExternalIdentity(Base, IdentityMixin, TimestampMixin):
     evidence: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
         JSON, default=dict, server_default="{}", nullable=False
     )
+    # Scoped import references are not provider ownership and keep null proof.
+    verification_state: Mapped[IdentityVerificationState | None] = mapped_column(
+        story_arc_enum(IdentityVerificationState)
+    )
+    evidence_kind: Mapped[IdentityEvidenceKind | None] = mapped_column(
+        story_arc_enum(IdentityEvidenceKind)
+    )
+    evidence_locator: Mapped[str | None] = mapped_column(Text)
+    verified_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    last_seen_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
 
     story_arc: Mapped[StoryArc] = relationship(back_populates="external_identities")
 

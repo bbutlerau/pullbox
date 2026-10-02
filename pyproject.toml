@@ -22,7 +22,7 @@ classifiers = [
 dependencies = [
     "fastapi~=0.135",
     "uvicorn[standard]~=0.34",
-    "sqlalchemy[asyncio]~=2.0",
+    "sqlalchemy[asyncio]~=2.0.0",  # Keep the qualified 2.0 typing/runtime contract.
     "alembic~=1.14",
     "mako>=1.3.12",  # transitive via alembic — floor for CVE-2026-44307
     "aiosqlite~=0.20",
@@ -38,6 +38,7 @@ dependencies = [
     "cryptography>=50.0.0",  # floor for CVE-2026-69247
     "msgpack>=1.2.1,<2.0",  # transitive via py7zr — floor for GHSA-6v7p-g79w-8964
     "defusedxml~=0.7",
+    "xmlschema~=4.3.2",  # Offline MetronInfo XSD 1.1 validation, including assertions.
     "apscheduler~=3.10",
     "starlette>=1.3.1",  # transitive via fastapi — floors for PYSEC-2026-161/CVE-2026-54282/CVE-2026-54283
     "structlog>=25.5,<27.0",
@@ -92,6 +93,9 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 pullbox = [
+    "core/metadata_schemas/*.xsd",
+    "core/metadata_schemas/*-LICENSE",
+    "core/metadata_schemas/README.md",
     "ui/templates/*.html",
     "ui/templates/components/*.html",
     "ui/templates/pages/*.html",

@@ -6,12 +6,14 @@ import hashlib
 import json
 import re
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import select
 
+from pullbox.core.comicvine_arc_identity import normalize_comicvine_arc_id
 from pullbox.core.mylar_story_arc_policy import build_mylar_story_arc_policy_draft
 from pullbox.models.import_job import ImportedFile, ImportedFileStatus
 from pullbox.models.story_arc import (
@@ -791,6 +793,9 @@ def _mylar_external_identities(
     external_id = _bounded_identifier(source_arc.cv_arc_id, 255)
     if external_id is None:
         return []
+    # Retain invalid source evidence for review; materialization refuses it.
+    with suppress(ValueError):
+        external_id = normalize_comicvine_arc_id(external_id)
     return [
         {
             "source": "comicvine",

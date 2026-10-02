@@ -1083,6 +1083,9 @@ async def load_import_results_context(
         files_no_match - orphaned_file_no_match_count,
         0,
     )
+    from pullbox.services.import_metadata_follow_up import count_failed_metadata_writes
+
+    archive_metadata_failed_count = await count_failed_metadata_writes(session, job_id)
     catalog_sync_series = await _load_catalog_sync_series(session, job_id)
     catalog_sync_failed_count = sum(
         1
@@ -1103,6 +1106,7 @@ async def load_import_results_context(
         + int(job.status is ImportJobStatus.FAILED and files_safety_blocked > 0)
         + int(story_arc_results_summary["story_arcs_follow_up_count"] > 0)
         + int(catalog_sync_failed_count > 0)
+        + int(archive_metadata_failed_count > 0)
     )
     rollback_incomplete = bool(
         rollback_journal_summary["rollback_manual_recovery_count"]
@@ -1133,6 +1137,7 @@ async def load_import_results_context(
         "orphaned_file_no_match_count": orphaned_file_no_match_count,
         "identified_series_file_no_match_count": identified_series_file_no_match_count,
         "catalog_sync_pending_count": catalog_sync_pending_count,
+        "archive_metadata_failed_count": archive_metadata_failed_count,
         "catalog_sync_failed_count": catalog_sync_failed_count,
         "catalog_sync_attention_count": len(catalog_sync_series),
         "catalog_sync_series": catalog_sync_series,

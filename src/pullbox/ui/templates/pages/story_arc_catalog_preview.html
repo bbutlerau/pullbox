@@ -5,9 +5,11 @@
 {% from "components/order_chevrons.html" import order_chevrons %}
 
 {% set can_add = preview and preview.membership_complete and members %}
+{% set source_label = source_label|default("Comic Vine") %}
+{% set preview_url = preview_url|default('/story-arcs/catalog/' ~ provider_id) %}
 {% set preview_error = error_message %}
 {% if preview and not preview.membership_complete %}
-  {% set preview_error = "Incomplete member list. Comic Vine did not return every member. Nothing can be added until all members load; retry preview." %}
+  {% set preview_error = "Incomplete member list. " ~ source_label ~ " did not return every member. Nothing can be added until all members load; retry preview." %}
 {% elif preview and not members %}
   {% set preview_error = "No members available. Nothing can be added yet; retry preview later." %}
 {% endif %}
@@ -17,7 +19,9 @@
   "ready": true if can_add else false,
   "title": preview.metadata.title if preview else "Review Story Arc",
   "description": preview.metadata.description|striptags if preview else "",
-  "coverUrl": preview.metadata.cover_url if preview and preview.metadata.cover_url else "",
+  "coverUrl": preview_cover_url if preview_cover_url is defined else preview.metadata.cover_url if preview and preview.metadata.cover_url else "",
+  "sourceLabel": source_label,
+  "sourceRevision": source_revision|default(none),
   "members": members, "error": preview_error, "roots": root_options,
   "fingerprint": preview.fingerprint if preview else "",
   "fileDefaultsFingerprint": arc_file_defaults.fingerprint,
@@ -32,7 +36,7 @@
 {% block content %}
 <div class="series-domain-page space-y-4" data-testid="story-arc-catalog-preview"
      data-preview-ready="{{ 'true' if can_add else 'false' }}" :data-preview-ready="ready.toString()"
-     data-preview-url="/story-arcs/catalog/{{ provider_id }}" x-data="storyArcPreview()" hx-history="false"
+     data-preview-url="{{ preview_url }}" x-data="storyArcPreview()" hx-history="false"
      @story-arc-preview-page.window="setPage($event.detail.page)"
      @story-arc-preview-request-status.window="publish()">
   <script type="application/json" data-preview-data>{{ preview_data|tojson }}</script>
@@ -62,14 +66,15 @@
       </details>
     </div>
   </header>
-  <p class="text-sm text-pb-text-sec">Issues are listed in Comic Vine's returned order. Reorder or skip issues if needed.</p>
+  <p class="text-sm text-pb-text-sec">Issues are listed in {{ source_label }}'s returned order. Reorder or skip issues if needed.</p>
   <p x-show="error" x-text="error" role="alert" class="rounded-lg border border-pb-error/40 bg-pb-error/10 px-4 py-3 text-sm text-pb-text">{{ preview_error }}</p>
   <p x-show="notice" x-text="notice" x-cloak role="status" class="rounded-lg border border-pb-border bg-pb-card px-4 py-3 text-sm text-pb-text-sec"></p>
 
-  <form action="/story-arcs/catalog/{{ provider_id }}" method="post" hx-boost="false" novalidate
+  <form action="{{ preview_url }}" method="post" hx-boost="false" novalidate
         @submit.prevent="submit($el)" data-testid="story-arc-catalog-add-form" class="space-y-4" :aria-busy="Boolean(busy).toString()">
     <input type="hidden" name="fingerprint" value="{{ preview_data.fingerprint }}" :value="fingerprint">
     <input type="hidden" name="file_defaults_fingerprint" value="{{ arc_file_defaults.fingerprint }}" :value="fileDefaultsFingerprint">
+    {% if source_revision is defined %}<input type="hidden" name="source_revision" value="{{ source_revision }}" :value="sourceRevision">{% endif %}
     <div class="series-toolbar-shell">
       <div class="series-toolbar-frame series-toolbar-body flex flex-wrap items-center justify-end gap-3">
         <div class="flex items-center gap-2">
@@ -125,7 +130,7 @@
               <span class="toggle-switch"></span>
             </label>
           </div>
-          <p class="mt-2 text-xs leading-5 text-pb-text-sec">Checks Comic Vine daily for new members and searches missing issues when released. Your global search-on-add setting controls the initial search.</p>
+          <p class="mt-2 text-xs leading-5 text-pb-text-sec">Searches missing issues when released. Use Check for updates to review new members from {{ source_label }}. Your global search-on-add setting controls the initial search.</p>
         </div>
       </div>
       <details class="border-t border-pb-border pt-4" data-testid="story-arc-create-storage">

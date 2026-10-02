@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import and_, or_, select
 
-from pullbox.core.exceptions import ConfigurationError
+from pullbox.core.exceptions import ConfigurationError, ValidationError
 from pullbox.core.library_file_ownership import build_file_identity_signature
 from pullbox.core.name_matcher import NameMatcher
 from pullbox.models.import_job import (
@@ -36,6 +36,10 @@ from pullbox.services.import_recovery_identity import (
     catalog_file_identity,
     catalog_target_agrees,
     record_catalog_review,
+)
+from pullbox.services.metadata_writer_identity import (
+    attach_issue_summary_identities,
+    metadata_write_scope,
 )
 
 if TYPE_CHECKING:
@@ -206,10 +210,6 @@ async def repair_catalog_references(
     progress: Callable[[int, int], Awaitable[None]] | None = None,
 ) -> int:
     """Create missing metadata targets and reuse ownership repair, never file import."""
-    from pullbox.services.import_completed_cleanup import (
-        _apply_mixed_folder_resolutions,
-        _MixedFolderResolution,
-    )
     from pullbox.services.import_workflow_state import raise_if_job_cancelled
 
     current = await reference_candidates(session, job.id)
@@ -276,143 +276,29 @@ async def repair_catalog_references(
             or root.path != inspected_root_path
         ):
             continue
-        cv_id = int(target["cv_id"])
-        issue_cv_id = int(target["summary"]["provider_id"])
-        series = await session.scalar(select(Series).where(Series.comicvine_id == cv_id))
-        created_series = series is None
-        issue = await session.scalar(select(Issue).where(Issue.comicvine_id == issue_cv_id))
-        reparent_issue = issue is not None and (series is None or issue.series_id != series.id)
-        if reparent_issue and (
-            issue is None
-            or issue.id != library.issue_id
-            or issue.series_id != item.series_id
-            or identity.get("issue_cv_id") != issue.comicvine_id
-            or identity["evidence"] != "comicinfo"
-        ):
-            continue
-        if issue is not None and (
-            issue.effective_issue_number_text != identity["issue_number"]
-            or issue.issue_type.value != str(target["summary"].get("issue_type") or "issue")
-        ):
-            continue
-        if issue is not None and await session.scalar(
-            select(LibraryFile.id).where(
-                LibraryFile.issue_id == issue.id, LibraryFile.id != library.id
-            )
-        ):
-            continue
-        if (
-            reparent_issue
-            and issue is not None
-            and await session.scalar(
-                select(ImportedFile.id).where(
-                    ImportedFile.matched_issue_id == issue.id,
-                    ImportedFile.id != file.id,
-                    ImportedFile.status == ImportedFileStatus.IMPORTED,
+        try:
+            async with metadata_write_scope(session):
+                changed = await _repair_reference(
+                    session,
+                    job,
+                    metadata,
+                    file,
+                    item,
+                    library,
+                    root,
+                    inspected_root_path,
+                    identity,
+                    target,
                 )
-            )
-        ):
+        except ValidationError as exc:
+            if (exc.details or {}).get("reason") != "metadata_identity_conflict":
+                raise
+            await session.refresh(file)
+            record_catalog_review(file, identity, "Identity ownership needs review before repair.")
+            await session.commit()
             continue
-        if await session.scalar(
-            select(ImportedFile.id).where(
-                ImportedFile.matched_issue_cv_id == issue_cv_id,
-                ImportedFile.include_in_import.is_(True),
-                ImportedFile.status.in_((ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED)),
-            )
-        ):
+        if not changed:
             continue
-        if series is not None and (issue is None or reparent_issue):
-            existing = list(
-                await session.scalars(select(Issue).where(Issue.series_id == series.id))
-            )
-            if any(row.effective_issue_number_text == identity["issue_number"] for row in existing):
-                continue
-        if series is None:
-            series = await metadata.upsert_series_metadata(
-                session,
-                cv_id,
-                CatalogSeriesMetadata(
-                    provider_id=str(cv_id),
-                    title=str(target["title"]),
-                    sort_title=str(target["title"]),
-                    year_start=target.get("year"),
-                    year_end=None,
-                    status=None,
-                    publisher=target.get("publisher"),
-                    description=None,
-                    cover_url=target.get("cover_url"),
-                    issue_count=target.get("issue_count"),
-                    comicvine_url=target.get("comicvine_url"),
-                ),
-            )
-            series.monitored = False
-            series.issue_catalog_state = IssueCatalogState.PARTIAL
-        previous_series_id = issue.series_id if reparent_issue and issue is not None else None
-        if reparent_issue and issue is not None:
-            # The exact embedded identity and catalog agree, and this is the
-            # only registration. Retain the issue ID (including reader state).
-            issue.series_id = series.id
-        if issue is None:
-            payload = target["summary"]
-            cutoff = payload.get("source_cutoff_at")
-            summary = CatalogIssueSummary(
-                source_cutoff_at=datetime.fromisoformat(cutoff) if cutoff else None,
-                **{
-                    key: payload[key] for key in IssueSummary.__dataclass_fields__ if key in payload
-                },
-            )
-            await metadata.upsert_issue_summaries(session, series, [summary])
-            issue = await session.scalar(select(Issue).where(Issue.comicvine_id == issue_cv_id))
-        if issue is None or issue.series_id != series.id:
-            continue
-        resolution = _MixedFolderResolution(
-            file_id=file.id,
-            source_import_series_id=item.id,
-            source_import_series_name=item.raw_series_name,
-            target_series_id=series.id,
-            target_series_title=series.title,
-            target_issue_id=issue.id,
-            target_issue_cv_id=issue.comicvine_id,
-            target_issue_number=issue.issue_number,
-            target_issue_number_text=issue.effective_issue_number_text,
-            target_library_file_id=None,
-            source_library_file_id=library.id,
-            source_issue_id=library.issue_id,
-            source_library_updated_at=library.updated_at.isoformat(),
-            evidence_source=identity["evidence"],
-            source_series_name=identity["query"],
-            source_updated_at=file.updated_at.isoformat(),
-        )
-        affected, _ = await _apply_mixed_folder_resolutions(session, job, resolutions=(resolution,))
-        if previous_series_id is not None:
-            file.diagnostics = {
-                **file.diagnostics,
-                "completed_import_cleanup": {
-                    **file.diagnostics["completed_import_cleanup"],
-                    "source_catalog_series_id": previous_series_id,
-                    "issue_identity_preserved": True,
-                },
-            }
-        previous_issue = await session.get(Issue, resolution.source_issue_id)
-        if (
-            previous_issue is not None
-            and previous_issue.comicvine_id is None
-            and previous_issue.metadata_source in {"provisional_import", "import_placeholder"}
-            and not await session.scalar(
-                select(LibraryFile.id).where(LibraryFile.issue_id == previous_issue.id)
-            )
-        ):
-            # Keep the audit/reader row, but do not search for an issue invented
-            # from a misplaced filename under the wrong series.
-            previous_issue.status = IssueStatus.SKIPPED
-        if created_series:
-            target_group = await session.get(ImportedSeries, file.import_series_id)
-            assert target_group is not None
-            target_group.status = ImportSeriesStatus.IMPORTED
-        apply_proven_identity(
-            file, issue_cv_id=issue_cv_id, series_cv_id=cv_id, summary=target["summary"]
-        )
-        await refresh_recovered_groups(session, job, affected)
         repaired += 1
         state = dict(job.progress_snapshot.get("deferred_recovery") or {})
         state["reference_files_repaired"] = repaired
@@ -421,3 +307,190 @@ async def repair_catalog_references(
     if progress is not None and plans:
         await progress(len(plans), len(plans))
     return repaired
+
+
+async def _repair_reference(
+    session: AsyncSession,
+    job: ImportJob,
+    metadata: MetadataService,
+    file: ImportedFile,
+    item: ImportedSeries,
+    library: LibraryFile,
+    root: LibraryRoot,
+    inspected_root_path: str,
+    identity: dict[str, Any],
+    target: dict[str, Any],
+) -> bool:
+    """Keep assignment and identity evidence in the same per-file savepoint."""
+    from pullbox.services.import_completed_cleanup import (
+        _apply_mixed_folder_resolutions,
+        _MixedFolderResolution,
+    )
+
+    cv_id = int(target["cv_id"])
+    issue_cv_id = int(target["summary"]["provider_id"])
+    series = await session.scalar(select(Series).where(Series.comicvine_id == cv_id))
+    issue = await session.scalar(select(Issue).where(Issue.comicvine_id == issue_cv_id))
+    source_issue = await session.get(Issue, library.issue_id)
+    expected_parents = {row.id: row.series_id for row in (issue, source_issue) if row is not None}
+    parent_ids = set(expected_parents.values())
+    if series is not None:
+        parent_ids.add(series.id)
+    await session.execute(
+        select(Series.id).where(Series.id.in_(parent_ids)).order_by(Series.id).with_for_update()
+    )
+    locked = list(
+        await session.scalars(
+            select(Issue)
+            .where(Issue.id.in_(expected_parents))
+            .order_by(Issue.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    )
+    if len(locked) != len(expected_parents) or any(
+        row.series_id != expected_parents[row.id] for row in locked
+    ):
+        return False
+    for row in (file, item, library, root):
+        await session.refresh(row)
+    if (
+        _stamp(file, item, library) != identity["stamp"]
+        or not root.enabled
+        or not root.allow_referenced_registrations
+        or root.path != inspected_root_path
+    ):
+        return False
+
+    created_series = series is None
+    reparent_issue = issue is not None and (series is None or issue.series_id != series.id)
+    if reparent_issue and (
+        issue is None
+        or issue.id != library.issue_id
+        or issue.series_id != item.series_id
+        or identity.get("issue_cv_id") != issue.comicvine_id
+        or identity["evidence"] != "comicinfo"
+    ):
+        return False
+    if issue is not None and (
+        issue.effective_issue_number_text != identity["issue_number"]
+        or issue.issue_type.value != str(target["summary"].get("issue_type") or "issue")
+    ):
+        return False
+    if issue is not None and await session.scalar(
+        select(LibraryFile.id).where(LibraryFile.issue_id == issue.id, LibraryFile.id != library.id)
+    ):
+        return False
+    if (
+        reparent_issue
+        and issue is not None
+        and await session.scalar(
+            select(ImportedFile.id).where(
+                ImportedFile.matched_issue_id == issue.id,
+                ImportedFile.id != file.id,
+                ImportedFile.status == ImportedFileStatus.IMPORTED,
+            )
+        )
+    ):
+        return False
+    if await session.scalar(
+        select(ImportedFile.id).where(
+            ImportedFile.matched_issue_cv_id == issue_cv_id,
+            ImportedFile.include_in_import.is_(True),
+            ImportedFile.status.in_((ImportedFileStatus.MATCHED, ImportedFileStatus.CONFIRMED)),
+        )
+    ):
+        return False
+    if series is not None and (issue is None or reparent_issue):
+        existing = list(await session.scalars(select(Issue).where(Issue.series_id == series.id)))
+        if any(row.effective_issue_number_text == identity["issue_number"] for row in existing):
+            return False
+    if series is None:
+        series = await metadata.upsert_series_metadata(
+            session,
+            cv_id,
+            CatalogSeriesMetadata(
+                provider_id=str(cv_id),
+                title=str(target["title"]),
+                sort_title=str(target["title"]),
+                year_start=target.get("year"),
+                year_end=None,
+                status=None,
+                publisher=target.get("publisher"),
+                description=None,
+                cover_url=target.get("cover_url"),
+                issue_count=target.get("issue_count"),
+                comicvine_url=target.get("comicvine_url"),
+            ),
+        )
+        series.monitored = False
+        series.issue_catalog_state = IssueCatalogState.PARTIAL
+    previous_series_id = issue.series_id if reparent_issue and issue is not None else None
+    if reparent_issue and issue is not None:
+        # Preserve the issue ID and reader state when exact embedded and catalog
+        # identities agree. The surrounding savepoint also encloses its history.
+        issue.series_id = series.id
+    payload = target["summary"]
+    cutoff = payload.get("source_cutoff_at")
+    summary = CatalogIssueSummary(
+        source_cutoff_at=datetime.fromisoformat(cutoff) if cutoff else None,
+        **{key: payload[key] for key in IssueSummary.__dataclass_fields__ if key in payload},
+    )
+    if issue is None:
+        await metadata.upsert_issue_summaries(session, series, [summary])
+        issue = await session.scalar(select(Issue).where(Issue.comicvine_id == issue_cv_id))
+    else:
+        await attach_issue_summary_identities(session, series, [(issue, summary)], None)
+    if issue is None or issue.series_id != series.id:
+        raise ValidationError(
+            "The recovery target changed. Review the match before retrying.",
+            details={"reason": "metadata_identity_conflict"},
+        )
+    resolution = _MixedFolderResolution(
+        file_id=file.id,
+        source_import_series_id=item.id,
+        source_import_series_name=item.raw_series_name,
+        target_series_id=series.id,
+        target_series_title=series.title,
+        target_issue_id=issue.id,
+        target_issue_cv_id=issue.comicvine_id,
+        target_issue_number=issue.issue_number,
+        target_issue_number_text=issue.effective_issue_number_text,
+        target_library_file_id=None,
+        source_library_file_id=library.id,
+        source_issue_id=library.issue_id,
+        source_library_updated_at=library.updated_at.isoformat(),
+        evidence_source=identity["evidence"],
+        source_series_name=identity["query"],
+        source_updated_at=file.updated_at.isoformat(),
+    )
+    affected, _ = await _apply_mixed_folder_resolutions(session, job, resolutions=(resolution,))
+    if previous_series_id is not None:
+        file.diagnostics = {
+            **file.diagnostics,
+            "completed_import_cleanup": {
+                **file.diagnostics["completed_import_cleanup"],
+                "source_catalog_series_id": previous_series_id,
+                "issue_identity_preserved": True,
+            },
+        }
+    previous_issue = await session.get(Issue, resolution.source_issue_id)
+    if (
+        previous_issue is not None
+        and previous_issue.comicvine_id is None
+        and previous_issue.metadata_source in {"provisional_import", "import_placeholder"}
+        and not await session.scalar(
+            select(LibraryFile.id).where(LibraryFile.issue_id == previous_issue.id)
+        )
+    ):
+        # Keep audit/reader state without searching for an invented issue.
+        previous_issue.status = IssueStatus.SKIPPED
+    if created_series:
+        target_group = await session.get(ImportedSeries, file.import_series_id)
+        assert target_group is not None
+        target_group.status = ImportSeriesStatus.IMPORTED
+    apply_proven_identity(
+        file, issue_cv_id=issue_cv_id, series_cv_id=cv_id, summary=target["summary"]
+    )
+    await refresh_recovered_groups(session, job, affected)
+    return True

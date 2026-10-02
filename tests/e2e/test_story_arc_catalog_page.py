@@ -4,30 +4,84 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, Mock
 from urllib.parse import parse_qs, urlparse
+from uuid import uuid4
 
 import pytest
 from playwright.sync_api import Page, Route, expect
+from sqlalchemy import delete, select
 
+from pullbox.database import get_session_factory
+from pullbox.models import StoryArc
 from tests.e2e.accessibility import assert_no_axe_violations
+from tests.e2e.conftest import _TEST_COVER_PNG, _run_async_blocking
 from tests.e2e.story_arc_file_helpers import configure_arc_file_defaults
 from tests.story_arc_catalog_fixtures import CatalogProvider
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Generator
 
 pytestmark = pytest.mark.e2e
 
 
+async def _arc_ids() -> tuple[int, ...]:
+    async with get_session_factory()() as session:
+        return tuple(await session.scalars(select(StoryArc.id)))
+
+
+async def _remove_created_arcs(existing: tuple[int, ...]) -> None:
+    async with get_session_factory().begin() as session:
+        await session.execute(delete(StoryArc).where(StoryArc.id.not_in(existing)))
+
+
 @pytest.fixture
-def catalog_provider(monkeypatch: pytest.MonkeyPatch) -> CatalogProvider:
+def catalog_provider(
+    monkeypatch: pytest.MonkeyPatch, page: Page, seeded_server: str
+) -> Generator[CatalogProvider, None, None]:
+    # Each browser creates the same fixture identities in the session-scoped DB.
+    # Remove only arcs created by this test, never the original library seed.
+    existing = _run_async_blocking(_arc_ids())
+    page.route(
+        "https://comicvine.gamespot.com/a/uploads/story-arcs/42.jpg",
+        lambda route: route.fulfill(status=200, content_type="image/png", body=_TEST_COVER_PNG),
+    )
     provider = CatalogProvider()
+    credential = f"arc-browser-{uuid4().hex}"
     monkeypatch.setattr(
-        "pullbox.core.comicvine_key.get_comicvine_api_key", AsyncMock(return_value="test")
+        "pullbox.core.comicvine_key.get_comicvine_api_key", AsyncMock(return_value=credential)
     )
     monkeypatch.setattr(
         "pullbox.providers.metadata.comicvine.ComicVineProvider", lambda **_: provider
     )
-    return provider
+    monkeypatch.setattr(
+        "pullbox.services.metadata_sources.get_comicvine_api_key",
+        AsyncMock(return_value=credential),
+    )
+    monkeypatch.setattr(
+        "pullbox.providers.metadata.sources.ComicVineProvider", lambda *_args, **_kw: provider
+    )
+    try:
+        yield provider
+    finally:
+        _run_async_blocking(_remove_created_arcs(existing))
+
+
+@pytest.fixture
+def advance_account_clock(monkeypatch: pytest.MonkeyPatch) -> Callable[[timedelta], None]:
+    offset = timedelta()
+    clock = Mock(wraps=datetime)
+    clock.now.side_effect = lambda tz=UTC: datetime.now(tz) + offset
+    monkeypatch.setattr("pullbox.services.metadata_account_admission.datetime", clock)
+
+    def advance(duration: timedelta) -> None:
+        nonlocal offset
+        offset += duration
+
+    return advance
 
 
 def test_catalog_search_uses_standard_comicvine_loading_popup(
@@ -45,7 +99,7 @@ def test_catalog_search_uses_standard_comicvine_loading_popup(
 
     page.route("**/story-arcs/add**", hold_search)
     page.goto(f"{seeded_server}/story-arcs/add", wait_until="networkidle")
-    query = page.get_by_label("Comic Vine arc name")
+    query = page.get_by_label("Story Arc name")
     query.fill("Numbering")
     query.press("Enter")
 
@@ -53,7 +107,7 @@ def test_catalog_search_uses_standard_comicvine_loading_popup(
     expect(indicator).to_be_visible()
     expect(indicator).to_have_attribute("aria-live", "polite")
     expect(indicator).to_have_attribute("data-comicvine-search-loading-contract", "v1")
-    expect(indicator.get_by_text("Searching ComicVine", exact=True)).to_be_visible()
+    expect(indicator.get_by_text("Searching metadata sources", exact=True)).to_be_visible()
     expect(indicator.get_by_text("Large catalogs can take a moment.", exact=True)).to_be_visible()
     spinner = indicator.locator("svg").first
     expect(spinner).to_have_css("width", "20px")
@@ -91,7 +145,9 @@ def test_catalog_results_use_add_series_card_layout(
         "A test event across multiple comic series."
     )
     expect(card).not_to_have_class(re.compile(r"add-series-result-card-static"))
-    expect(card.locator(".add-series-result-meta")).to_have_text("Fixture Publisher 2 issues")
+    expect(card.locator(".add-series-result-meta")).to_have_text(
+        "ComicVine API Fixture Publisher 2 issues"
+    )
     expect(results.get_by_text("2 matching Story Arcs", exact=True)).to_have_count(0)
     expect(results.locator("nav")).to_have_count(0)
     unknown = results.locator(".add-series-result-card").nth(1)
@@ -120,25 +176,31 @@ def test_catalog_results_use_add_series_card_layout(
 
 
 def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
-    authed_page: Page, seeded_server: str, catalog_provider: CatalogProvider
+    authed_page: Page,
+    seeded_server: str,
+    catalog_provider: CatalogProvider,
+    advance_account_clock: Callable[[timedelta], None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     page = authed_page
     errors: list[str] = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     configure_arc_file_defaults(page, seeded_server, prefix=True)
     page.goto(f"{seeded_server}/story-arcs/add", wait_until="domcontentloaded")
-    query = page.get_by_label("Comic Vine arc name")
+    query = page.get_by_label("Story Arc name")
     query.fill("Numbering")
     cover = page.get_by_role("img", name="Numbering Event")
     expect(cover).to_be_visible()
-    expect(cover).to_have_attribute("src", "https://example.test/story-arcs/42.jpg")
+    expect(cover).to_have_attribute(
+        "src", "https://comicvine.gamespot.com/a/uploads/story-arcs/42.jpg"
+    )
     expect(page.get_by_role("link", name="Preview Numbering Event")).to_be_visible()
     query.press("Tab")
     page.get_by_role("link", name="Preview Numbering Event").focus()
     page.keyboard.press("Enter")
-    page.wait_for_url("**/story-arcs/catalog/42")
+    page.wait_for_url("**/story-arcs/catalog/comicvine_api/42")
     expect(
-        page.get_by_text("Issues are listed in Comic Vine's returned order.", exact=False)
+        page.get_by_text("Issues are listed in ComicVine API's returned order.", exact=False)
     ).to_be_visible()
     form = page.get_by_test_id("story-arc-catalog-add-form")
     form.get_by_role("button", name="Move Exact Comics #1000000 down", exact=True).press("Enter")
@@ -290,15 +352,25 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
     )
 
     # Provider failures and incomplete responses must never look like no changes.
+    arc_reads = AsyncMock(wraps=catalog_provider.get_story_arc)
+    monkeypatch.setattr(catalog_provider, "get_story_arc", arc_reads)
     catalog_provider.fail = True
     page.get_by_role("link", name="Check again", exact=True).click()
-    expect(page.get_by_role("alert")).to_contain_text("couldn't load this arc")
+    expect(page.get_by_role("alert")).to_contain_text("Could not finish the story arc")
     expect(page.get_by_text("This story arc is up to date", exact=True)).to_have_count(0)
     expect(page.get_by_test_id("story-arc-update-results")).to_have_count(0)
+    failed_reads = arc_reads.await_count
+    assert failed_reads > 0
     catalog_provider.fail = False
     catalog_provider.metadata = replace(catalog_provider.metadata, membership_complete=False)
+    with page.expect_response(re.compile(r"/catalog-refresh$")):
+        page.get_by_role("link", name="Check again", exact=True).click()
+    expect(page.get_by_role("alert")).to_contain_text("unavailable")
+    assert arc_reads.await_count == failed_reads, "The durable cooldown must prevent another call"
+    advance_account_clock(timedelta(minutes=6))
     page.get_by_role("link", name="Check again", exact=True).click()
-    expect(page.get_by_role("alert")).to_contain_text("Incomplete member list")
+    expect(page.get_by_role("alert")).to_contain_text(re.compile("incomplete", re.I))
+    assert arc_reads.await_count > failed_reads, "An expired cooldown admits a recovery probe"
     expect(page.get_by_label("I reviewed these provider changes")).to_have_count(0)
     catalog_provider.metadata = replace(catalog_provider.metadata, membership_complete=True)
     page.get_by_role("navigation", name="Breadcrumb").get_by_role(
@@ -309,7 +381,7 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
         catalog_provider.metadata, issue_provider_ids=("101", "103")
     )
     page.get_by_role("link", name="Check for updates", exact=True).click()
-    expect(page.get_by_text("Comic Vine issue ID 102 — preserved")).to_be_visible()
+    expect(page.get_by_text("ComicVine API issue ID 102 — preserved")).to_be_visible()
     additions = page.get_by_test_id("story-arc-update-additions")
     removals = page.get_by_test_id("story-arc-update-removals")
     page.set_viewport_size({"width": 1440, "height": 1000})
@@ -347,14 +419,19 @@ def test_keyboard_catalog_add_and_refresh_preserve_reviewed_order(
     expect(page.locator("[data-membership-id]").nth(0)).to_have_attribute(
         "data-exact-issue-number", "1AU"
     )
-    page.get_by_role("button", name="Review issue 2 match").click()
+    # URL/rows appear before the boosted navigation's settle and scroll reset.
+    expect(page.locator("#content .htmx-added, #content.htmx-settling")).to_have_count(0)
+    review_toggle = page.get_by_role("button", name="Review issue 2 match")
+    expect(review_toggle).to_have_attribute("aria-expanded", "false")
+    review_toggle.click()
+    expect(review_toggle).to_have_attribute("aria-expanded", "true")
     expect(page.get_by_role("button", name="Confirm reading order")).to_be_visible()
     expect(page.get_by_role("button", name="Search local issues")).to_have_count(0)
     page.get_by_role("button", name="Confirm reading order").click()
     page.wait_for_url(re.compile(r"/story-arcs/\d+\?.*notice=resolved.*$"))
     expect(page.get_by_role("button", name="Review issue 2 match")).to_have_count(0)
     page.goto(f"{seeded_server}/story-arcs/add")
-    page.get_by_label("Comic Vine arc name").fill("Numbering")
+    page.get_by_label("Story Arc name").fill("Numbering")
     expect(page.get_by_test_id("story-arc-existing-title-link")).to_have_attribute(
         "href", arc_url.removeprefix(seeded_server)
     )
@@ -391,8 +468,8 @@ def test_catalog_add_is_enabled_and_explains_missing_root(
     page.get_by_role("option").nth(1).click()
     expect(error).not_to_be_visible()
     held: list[Route] = []
-    page.route("**/story-arcs/catalog/80", lambda route: held.append(route))
-    with page.expect_request("**/story-arcs/catalog/80"):
+    page.route("**/story-arcs/catalog/comicvine_api/80", lambda route: held.append(route))
+    with page.expect_request("**/story-arcs/catalog/comicvine_api/80"):
         add.click()
     expect(add).to_be_disabled()
     expect(page.get_by_role("button", name="Retry preview")).to_be_disabled()
@@ -409,7 +486,7 @@ def test_catalog_add_explains_no_available_roots(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "pullbox.ui.story_arc_catalog_routes.load_story_arc_placement_roots",
+        "pullbox.ui.story_arc_source_routes.load_story_arc_placement_roots",
         AsyncMock(return_value=((), False)),
     )
     page = authed_page
@@ -425,7 +502,10 @@ def test_catalog_add_explains_no_available_roots(
 
 
 def test_catalog_partial_failure_and_retry_are_visible(
-    authed_page: Page, seeded_server: str, catalog_provider: CatalogProvider
+    authed_page: Page,
+    seeded_server: str,
+    catalog_provider: CatalogProvider,
+    advance_account_clock: Callable[[timedelta], None],
 ) -> None:
     page = authed_page
     catalog_provider.metadata = replace(
@@ -448,11 +528,12 @@ def test_catalog_partial_failure_and_retry_are_visible(
     catalog_provider.fail = True
     page.get_by_role("button", name="Retry preview").click()
     expect(page.get_by_test_id("story-arc-preview-submit-error")).not_to_be_visible()
-    expect(page.get_by_role("alert")).to_contain_text("couldn't load this arc")
+    expect(page.get_by_role("alert")).to_contain_text("Could not finish the story arc")
     catalog_provider.fail = False
     catalog_provider.metadata = replace(
         catalog_provider.metadata, membership_complete=True, declared_issue_count=2
     )
+    advance_account_clock(timedelta(minutes=6))
     page.get_by_role("button", name="Retry preview").click()
     expect(page.get_by_test_id("story-arc-catalog-add-form")).to_be_visible()
     page.set_viewport_size({"width": 640, "height": 900})
@@ -463,7 +544,10 @@ def test_catalog_partial_failure_and_retry_are_visible(
 
 
 def test_preview_pagination_retry_and_add_keep_all_page_choices(
-    authed_page: Page, seeded_server: str, catalog_provider: CatalogProvider
+    authed_page: Page,
+    seeded_server: str,
+    catalog_provider: CatalogProvider,
+    advance_account_clock: Callable[[timedelta], None],
 ) -> None:
     page = authed_page
     catalog_provider.metadata = replace(
@@ -531,7 +615,7 @@ def test_preview_pagination_retry_and_add_keep_all_page_choices(
     expect(page.get_by_role("switch", name="Monitor this story arc")).to_be_checked()
     catalog_provider.fail = True
     page.get_by_role("button", name="Retry preview").click()
-    expect(page.get_by_role("alert")).to_contain_text("couldn't load this arc")
+    expect(page.get_by_role("alert")).to_contain_text("Could not finish the story arc")
     expect(first.locator("[data-reading-position]")).to_have_text("2")
     expect(page.get_by_role("button", name="Add Story Arc", exact=True)).to_be_enabled()
     catalog_provider.fail = False
@@ -539,6 +623,7 @@ def test_preview_pagination_retry_and_add_keep_all_page_choices(
         catalog_provider.metadata,
         issue_provider_ids=tuple(str(number) for number in range(101, 153) if number != 103),
     )
+    advance_account_clock(timedelta(minutes=6))
     page.get_by_role("button", name="Retry preview").click()
     expect(workspace.get_by_role("status")).to_contain_text("1 added, 1 no longer listed")
     expect(first.locator("[data-reading-position]")).to_have_text("2")
@@ -560,7 +645,9 @@ def test_preview_pagination_retry_and_add_keep_all_page_choices(
     expect(page.get_by_test_id("page-dock-pagination")).not_to_be_visible()
     page.get_by_role("switch", name="Monitor this story arc").press("Space")
     with page.expect_request(
-        lambda request: request.method == "POST" and "/story-arcs/catalog/77" in request.url
+        lambda request: (
+            request.method == "POST" and "/story-arcs/catalog/comicvine_api/77" in request.url
+        )
     ) as submitted:
         page.get_by_role("button", name="Add Story Arc", exact=True).click()
     page.wait_for_url(re.compile(r"/story-arcs/\d+\?notice=catalog-added$"))
@@ -696,8 +783,8 @@ def test_preview_reorder_single_member_and_pending_retry_are_disabled(
     expect(controls).to_have_count(4)
     expect(controls.nth(1)).to_be_enabled()
     held: list[Route] = []
-    page.route("**/story-arcs/catalog/79", lambda route: held.append(route))
-    with page.expect_request("**/story-arcs/catalog/79"):
+    page.route("**/story-arcs/catalog/comicvine_api/79", lambda route: held.append(route))
+    with page.expect_request("**/story-arcs/catalog/comicvine_api/79"):
         retry.click()
     expect(retry).to_be_disabled()
     for index in range(4):

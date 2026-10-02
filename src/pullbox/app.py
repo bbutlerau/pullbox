@@ -297,6 +297,18 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         logger.warning("library_path_reconciliation_failed", exc_info=True)
 
+    # Restore uncommitted removals before conversion recovery or background writers.
+    from pullbox.services.library_removal import recover_library_removals
+
+    async with get_session_factory()() as session:
+        await recover_library_removals(session)
+
+    # Retained conversion intent must be reconciled before background file writers.
+    from pullbox.services.library_conversion_recovery import recover_library_conversions
+
+    async with get_session_factory()() as session:
+        await recover_library_conversions(session)
+
     # One-time migration: move covers from series folders to .covers/
     from pullbox.core.cover_migration import migrate_covers_to_dotcovers
 
@@ -309,8 +321,8 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("cover_migration_failed", subsystem="cover_migration", exc_info=True)
 
     # Ensure utility directories (trash and export) exist
+    from pullbox.services.library_trash_cleanup import cleanup_trash
     from pullbox.utilities.settings import (
-        cleanup_utility_trash_retention,
         ensure_utility_directories,
         resolve_utility_directory,
     )
@@ -351,7 +363,8 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         )
         await ensure_utility_directories(trash_dir, export_dir)
         retention_days = int(util_cfg.get("utility_trash_retention_days", "30") or "30")
-        cleanup_utility_trash_retention(trash_dir, retention_days)
+        async with factory() as session:
+            await cleanup_trash(session, trash_dir, retention_days=retention_days)
     except Exception:
         logger.warning("utility_directory_creation_failed", subsystem="utility_dirs", exc_info=True)
 
@@ -750,6 +763,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     from pullbox.utilities.executors.db_check_cleanup import DBCheckCleanupExecutor
     from pullbox.utilities.executors.export_library import ExportLibraryExecutor
     from pullbox.utilities.executors.file_converter import FileConverterExecutor
+    from pullbox.utilities.executors.file_metadata import FileMetadataExecutor
     from pullbox.utilities.executors.integrity_checker import IntegrityCheckerExecutor
     from pullbox.utilities.executors.library_permissions import LibraryPermissionsExecutor
     from pullbox.utilities.executors.mass_convert_pipeline import MassConvertPipelineExecutor
@@ -761,6 +775,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
 
     queue_mgr = JobQueueManager(session_factory=get_session_factory())
     queue_mgr.register_executor("file_convert", FileConverterExecutor)
+    queue_mgr.register_executor("file_metadata", FileMetadataExecutor)
     queue_mgr.register_executor("mass_convert_pipeline", MassConvertPipelineExecutor)
     queue_mgr.register_executor("mass_rename", MassRenameExecutor)
     queue_mgr.register_executor("integrity_check", IntegrityCheckerExecutor)

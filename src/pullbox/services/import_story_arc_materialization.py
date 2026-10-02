@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import stat
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -10,10 +12,15 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Literal, cast
 
-from sqlalchemy import func, or_, select, tuple_
+import structlog
+from sqlalchemy import false, func, inspect, or_, select, tuple_, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
+from pullbox.core.comicvine_arc_identity import normalize_comicvine_arc_id
 from pullbox.core.issue_numbers import normalize_issue_number_text
+from pullbox.core.metadata_identity_events import IdentityEventReplayConflictError
+from pullbox.core.metadata_identity_state import IdentityReviewRequiredError
 from pullbox.core.story_arc_naming import (
     validate_story_arc_file_template,
     validate_story_arc_folder_template,
@@ -40,6 +47,8 @@ from pullbox.models.story_arc import (
     StoryArcSourceKind,
 )
 from pullbox.models.story_arc_import import ImportedStoryArc, ImportedStoryArcEntry
+from pullbox.services.import_story_arc_identity import attach_import_arc_identity
+from pullbox.services.metadata_identity_attachment import IdentityAttachmentConflictError
 from pullbox.services.story_arc_service import StoryArcService, StoryArcServiceError
 from pullbox.services.story_arc_sync_queue import (
     MAX_IMPORT_STORY_ARC_SYNC_ENQUEUE_BATCH_SIZE,
@@ -58,6 +67,7 @@ if TYPE_CHECKING:
 
 
 CancellationCheck = Callable[[], Awaitable[None]]
+logger = structlog.get_logger(__name__)
 DurableCheckpoint = Callable[[], Awaitable[None]]
 CountField = Literal[
     "arcs_created",
@@ -214,7 +224,7 @@ class _MaterializationBatch:
     library_root_ids: set[int]
     identity_evidence: dict[
         int,
-        tuple[list[tuple[str, str, str]], str | None],
+        tuple[list[tuple[str, str, str]], str | None, str],
     ]
 
 
@@ -462,13 +472,25 @@ async def _load_batch_external_identity_evidence(
     staged_arcs: Sequence[ImportedStoryArc],
     entry_page_size: int,
     cancellation_check: CancellationCheck | None,
-) -> dict[int, tuple[list[tuple[str, str, str]], str | None]]:
+) -> dict[int, tuple[list[tuple[str, str, str]], str | None, str]]:
     """Scan provider-neutral entry evidence without materializing entry ORM rows."""
     staged_arc_ids = [int(staged_arc.id) for staged_arc in staged_arcs]
     comicvine_ids: dict[int, set[str]] = {arc_id: set() for arc_id in staged_arc_ids}
+    revisions = {
+        int(arc.id): hashlib.sha256(
+            json.dumps(
+                [arc.source_kind.value, arc.source_key, arc.source_arc_id],
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+        )
+        for arc in staged_arcs
+    }
+    invalid_arc_ids: set[int] = set()
     row_count = 0
     result = await session.stream(
         select(
+            ImportedStoryArcEntry.id,
             ImportedStoryArcEntry.imported_story_arc_id,
             ImportedStoryArcEntry.evidence,
         )
@@ -480,29 +502,46 @@ async def _load_batch_external_identity_evidence(
         .execution_options(yield_per=entry_page_size)
     )
     try:
-        async for imported_story_arc_id, evidence in result:
+        async for entry_id, imported_story_arc_id, evidence in result:
+            revisions[int(imported_story_arc_id)].update(
+                json.dumps(
+                    [entry_id, evidence], sort_keys=True, ensure_ascii=True, separators=(",", ":")
+                ).encode("ascii")
+            )
             values = comicvine_ids[int(imported_story_arc_id)]
             cv_arc_id = _mapping(evidence).get("cv_arc_id")
-            if cv_arc_id is not None and str(cv_arc_id).strip() and len(values) < 2:
-                values.add(str(cv_arc_id))
+            if cv_arc_id is not None:
+                try:
+                    normalized = normalize_comicvine_arc_id(cv_arc_id)
+                except ValueError:
+                    invalid_arc_ids.add(int(imported_story_arc_id))
+                else:
+                    if len(values) < 2:
+                        values.add(normalized)
             row_count += 1
             if row_count % entry_page_size == 0:
                 await _checkpoint(cancellation_check)
     finally:
         await result.close()
 
-    loaded: dict[int, tuple[list[tuple[str, str, str]], str | None]] = {}
+    loaded: dict[int, tuple[list[tuple[str, str, str]], str | None, str]] = {}
     for staged_arc in staged_arcs:
         identities: list[tuple[str, str, str]] = []
         if staged_arc.source_arc_id:
             identities.append((staged_arc.source_kind.value, "story_arc", staged_arc.source_arc_id))
         values = comicvine_ids[int(staged_arc.id)]
         warning_code = None
-        if len(values) == 1:
+        if int(staged_arc.id) in invalid_arc_ids:
+            warning_code = "invalid_external_identity_evidence"
+        elif len(values) == 1:
             identities.append(("comicvine", "story_arc", next(iter(values))))
         elif len(values) > 1:
             warning_code = "conflicting_external_identity_evidence"
-        loaded[int(staged_arc.id)] = (identities, warning_code)
+        loaded[int(staged_arc.id)] = (
+            identities,
+            warning_code,
+            revisions[int(staged_arc.id)].hexdigest(),
+        )
     return loaded
 
 
@@ -514,7 +553,7 @@ async def _prepare_materialization_batch(
     state: _MaterializationState,
     identity_evidence: dict[
         int,
-        tuple[list[tuple[str, str, str]], str | None],
+        tuple[list[tuple[str, str, str]], str | None, str],
     ],
 ) -> _MaterializationBatch:
     """Prefetch all canonical lookups needed by one bounded staging page."""
@@ -524,7 +563,7 @@ async def _prepare_materialization_batch(
     library_root_ids: set[int] = set()
 
     for staged_arc in staged_arcs:
-        identities, _warning = identity_evidence[int(staged_arc.id)]
+        identities, _warning, _revision = identity_evidence[int(staged_arc.id)]
         identity_keys.update(identities)
         if staged_arc.materialized_story_arc_id is not None:
             target_arc_ids.add(int(staged_arc.materialized_story_arc_id))
@@ -580,7 +619,15 @@ async def _prepare_materialization_batch(
     missing_arc_ids = target_arc_ids - state.arcs_by_id.keys()
     if missing_arc_ids:
         arcs = list(
-            (await session.scalars(select(StoryArc).where(StoryArc.id.in_(missing_arc_ids)))).all()
+            (
+                await session.scalars(
+                    select(StoryArc)
+                    .where(StoryArc.id.in_(missing_arc_ids))
+                    .order_by(StoryArc.id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).all()
         )
         for arc in arcs:
             state.arcs_by_id[int(arc.id)] = arc
@@ -620,13 +667,98 @@ async def _materialize_one_arc(
     record_action: RecordActionFunc | None,
     batch: _MaterializationBatch,
 ) -> _ArcMaterializationContext | None:
+    """Keep each arc, policy, identity, and journal mutation atomic on conflict."""
+    state = batch.state
+    arc_id = int(staged_arc.id)
+    identities, _, _ = batch.identity_evidence[arc_id]
+    cached_arcs = dict(state.arcs_by_id)  # Bounded to the current staging page.
+    cached_identities = {key: state.identities_by_key.get(key) for key in identities}
+    loaded_keys = {key for key in identities if key in state.loaded_identity_keys}
+    source_key = (staged_arc.source_kind, staged_arc.source_key)
+    recovered = state.job_arc_ids_by_import_identity.get(source_key)
+    trial_counts = _MutableCounts()
+    trial_warnings: list[StoryArcMaterializationWarning] = []
+    if session.get_bind().dialect.name == "sqlite":
+        await session.execute(update(StoryArc).where(false()).values(revision=StoryArc.revision))
+    try:
+        async with session.begin_nested():
+            context = await _materialize_one_arc_in_transaction(
+                session,
+                import_job_id=import_job_id,
+                job=job,
+                staged_arc=staged_arc,
+                counts=trial_counts,
+                warnings=trial_warnings,
+                record_action=record_action,
+                batch=batch,
+            )
+        for field, amount in _count_snapshot(trial_counts).items():
+            setattr(counts, field, getattr(counts, field) + amount)
+        warnings.extend(trial_warnings)
+        return context
+    except (
+        IdentityAttachmentConflictError,
+        IdentityReviewRequiredError,
+        IdentityEventReplayConflictError,
+        IntegrityError,
+    ) as exc:
+        # SAVEPOINT rollback expires touched ORM rows. Refresh only this bounded
+        # page, and restore only this arc's cache keys, not the whole job index.
+        state.arcs_by_id = cached_arcs
+        logger.warning(
+            "import_story_arc_identity_review_required",
+            import_job_id=import_job_id,
+            imported_story_arc_id=arc_id,
+            error_type=type(exc).__name__,
+        )
+        for arc in cached_arcs.values():
+            if inspect(arc).expired:
+                await session.refresh(arc)
+        for key, owner in cached_identities.items():
+            if owner is None:
+                state.identities_by_key.pop(key, None)
+            else:
+                state.identities_by_key[key] = owner
+            if key not in loaded_keys:
+                state.loaded_identity_keys.discard(key)
+        if recovered is None:
+            state.job_arc_ids_by_import_identity.pop(source_key, None)
+        else:
+            state.job_arc_ids_by_import_identity[source_key] = recovered
+        await session.refresh(staged_arc)
+        if inspect(job).expired:
+            await session.refresh(job)
+        staged_arc.status = ImportedStoryArcStatus.FAILED
+        counts.arcs_failed += 1
+        _warn(warnings, "external_identity_requires_explicit_merge_review", staged_arc)
+        _persist_arc_materialization_diagnostics(
+            staged_arc,
+            story_arc_id=None,
+            status="failed",
+            counts=_count_snapshot(_MutableCounts(arcs_failed=1)),
+            warning_codes=["external_identity_requires_explicit_merge_review"],
+        )
+        return None
+
+
+async def _materialize_one_arc_in_transaction(
+    session: AsyncSession,
+    *,
+    import_job_id: int,
+    job: ImportJob,
+    staged_arc: ImportedStoryArc,
+    counts: _MutableCounts,
+    warnings: list[StoryArcMaterializationWarning],
+    record_action: RecordActionFunc | None,
+    batch: _MaterializationBatch,
+) -> _ArcMaterializationContext | None:
     arc_warning_start = len(warnings)
     arc_counts = _MutableCounts()
     policy = _validate_policy(staged_arc, library_root_ids=batch.library_root_ids)
     if policy.warning_code is not None:
         _warn(warnings, policy.warning_code, staged_arc)
 
-    identities, identity_warning = batch.identity_evidence[int(staged_arc.id)]
+    identities, identity_warning, evidence_revision = batch.identity_evidence[int(staged_arc.id)]
     if identity_warning is not None:
         _warn(warnings, identity_warning, staged_arc)
         _increment_counts(counts, arc_counts, "arcs_failed")
@@ -707,6 +839,26 @@ async def _materialize_one_arc(
         )
 
     for identity in identities:
+        if identity[0] == "comicvine":
+            outcome = await attach_import_arc_identity(
+                session,
+                arc=arc,
+                staged=staged_arc,
+                external_id=identity[2],
+                evidence_revision=evidence_revision,
+                job=job,
+                record_action=record_action,
+            )
+            batch.state.identities_by_key[identity] = int(arc.id)
+            batch.state.loaded_identity_keys.add(identity)
+            _increment_counts(
+                counts,
+                arc_counts,
+                "external_identities_created"
+                if outcome == "created"
+                else "external_identities_reused",
+            )
+            continue
         identity_outcome, materialized_identity = await _materialize_external_identity(
             session,
             arc=arc,
@@ -732,7 +884,7 @@ async def _materialize_one_arc(
         elif identity_outcome == "reused":
             _increment_counts(counts, arc_counts, "external_identities_reused")
         else:
-            _warn(warnings, "external_identity_conflict", staged_arc)
+            raise IdentityAttachmentConflictError("Scoped import identity changed owner")
 
     return _ArcMaterializationContext(
         staged_arc=staged_arc,
