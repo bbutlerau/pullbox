@@ -66,7 +66,7 @@ class DownloadService:
             indexer_id = release.indexer_id
 
         # Select the appropriate client
-        client = self._select_client(release.protocol)
+        client = await self._client_for_release(session, release.protocol, indexer_id)
         if not client:
             raise ProviderError(
                 "download",
@@ -502,6 +502,54 @@ class DownloadService:
         except Exception:
             clear_download_progress(download_id)
             raise
+
+    async def _client_for_release(
+        self,
+        session: AsyncSession,
+        protocol: AcquisitionProtocol,
+        indexer_id: int | None,
+    ) -> DownloadClient | None:
+        """Use the indexer's pinned client when it has one, else the protocol default.
+
+        A pinned client is never swapped for another one: if it is disabled or
+        cannot take this protocol the grab fails, so releases from that indexer
+        never land in a client the user kept them out of.
+        """
+        if indexer_id is not None:
+            from pullbox.models.indexer import IndexerConfig
+
+            indexer = await session.get(IndexerConfig, indexer_id)
+            if indexer is not None and indexer.download_client_id is not None:
+                return await self._pinned_client(
+                    session, indexer.download_client_id, protocol, indexer.name
+                )
+        return self._select_client(protocol)
+
+    async def _pinned_client(
+        self,
+        session: AsyncSession,
+        client_config_id: int,
+        protocol: AcquisitionProtocol,
+        indexer_name: str,
+    ) -> DownloadClient:
+        client = self._registry.get_download_client(client_config_id)
+        if client is None:
+            from pullbox.models.client import DownloadClientConfig
+
+            config = await session.get(DownloadClientConfig, client_config_id)
+            label = config.name if config is not None else f"#{client_config_id}"
+            raise ProviderError(
+                "download",
+                f'Indexer "{indexer_name}" sends its grabs to download client "{label}", '
+                "which is disabled or unavailable.",
+            )
+        if DownloadClientType(client.client_type).acquisition_protocol is not protocol:
+            raise ProviderError(
+                "download",
+                f'Indexer "{indexer_name}" is set to download client "{client.name}", '
+                f"which cannot take {protocol.value} releases.",
+            )
+        return client
 
     def _select_client(self, protocol: AcquisitionProtocol) -> DownloadClient | None:
         """Select the highest-priority client for an acquisition protocol."""

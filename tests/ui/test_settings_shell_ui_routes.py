@@ -288,6 +288,51 @@ class TestSettingsRouteContracts:
         assert "Unavailable in Jackett" in response.text
         assert "Jackett owns tracker challenge resolution" in response.text
 
+    async def test_settings_indexers_offer_and_show_a_pinned_download_client(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        async with sec_db() as session:
+            tracker_client = DownloadClientConfig(
+                name="qBittorrent (tracker)",
+                client_type=DownloadClientType.QBITTORRENT,
+                url="http://qbit-tracker.test",
+            )
+            session.add_all(
+                [
+                    tracker_client,
+                    DownloadClientConfig(
+                        name="Direct downloads",
+                        client_type=DownloadClientType.DIRECT,
+                        url="http://direct.test",
+                    ),
+                ]
+            )
+            await session.flush()
+            indexer = IndexerConfig(
+                name="Private Tracker",
+                indexer_type=IndexerType.TORZNAB,
+                url="http://tracker.example",
+                api_key=encrypt_secret("tracker-key"),
+                download_client_id=tracker_client.id,
+            )
+            session.add(indexer)
+            await session.commit()
+            indexer_id = indexer.id
+
+        response = await authenticated_client.get("/settings?tab=indexers")
+
+        assert response.status_code == 200
+        assert 'data-testid="settings-indexers-download-client"' in response.text
+        assert (
+            f'data-testid="settings-indexers-client-{indexer_id}">Client: qBittorrent (tracker)'
+            in response.text
+        )
+        choices = _script_block(response.text, "downloadClients: ", "\n")
+        assert "qBittorrent (tracker)" in choices
+        assert "Direct downloads" not in choices
+
     async def test_settings_indexers_warn_when_managers_sync_the_same_tracker(
         self,
         authenticated_client,
