@@ -100,6 +100,32 @@ class TestSettingsRouteContracts:
         assert "localhost</code> and <code" in response.text
         assert "pbFormatDurationMs(data.response_time_ms)" in response.text
 
+    async def test_settings_clients_picker_allows_a_second_client_of_a_type(
+        self,
+        authenticated_client,
+        sec_db,
+    ) -> None:  # type: ignore[no-untyped-def]
+        async with sec_db() as session:
+            session.add(
+                DownloadClientConfig(
+                    name="qBittorrent",
+                    client_type=DownloadClientType.QBITTORRENT,
+                    url="http://qbit.test",
+                )
+            )
+            await session.commit()
+
+        response = await authenticated_client.get("/settings?tab=clients")
+
+        assert response.status_code == 200
+        picker = _script_block(
+            response.text,
+            'data-testid="settings-clients-picker-qbittorrent"',
+            "</button>",
+        )
+        assert "disabled" not in picker
+        assert "Already configured" not in response.text
+
     async def test_settings_clients_describes_process_completed_as_recovery_sweep(
         self,
         authenticated_client,

@@ -589,9 +589,19 @@ class DownloadService:
 
     def get_client_for_download(self, download: DownloadHistory) -> DownloadClient | None:
         """Resolve the exact persisted client, with fallback for legacy null rows."""
-        if download.download_client_config_id is not None:
-            return self._registry.get_download_client(download.download_client_config_id)
-        return self._registry.get_client_for_type(str(download.download_client))
+        return self.get_client_for_identity(
+            download.download_client_config_id, download.download_client
+        )
+
+    def get_client_for_identity(
+        self,
+        client_config_id: int | None,
+        client_type: object,
+    ) -> DownloadClient | None:
+        """Resolve a client by its config ID, or by type for rows recorded without one."""
+        if client_config_id is not None:
+            return self._registry.get_download_client(client_config_id)
+        return self._registry.get_client_for_type(str(client_type))
 
     def get_client_for_type(self, client_type: object) -> DownloadClient | None:
         """Get the client for a given DownloadClientType value."""
