@@ -6,6 +6,9 @@ import xml.etree.ElementTree as ET
 import zipfile
 from typing import TYPE_CHECKING
 
+import structlog
+from structlog.testing import capture_logs
+
 from pullbox.utilities.comicinfo import embed_comicinfo_in_cbz, materialize_cbz_with_comicinfo
 
 if TYPE_CHECKING:
@@ -346,6 +349,17 @@ def test_embed_comicinfo_survives_a_filesystem_that_rejects_chmod(
         raise PermissionError("chmod is not permitted on this mount")
 
     monkeypatch.setattr("pullbox.utilities.comicinfo.os.chmod", reject_chmod)
+    # A logger cached before app reconfiguration would bypass capture_logs.
+    monkeypatch.setattr(
+        "pullbox.utilities.comicinfo.logger",
+        structlog.wrap_logger(None, cache_logger_on_first_use=False),
+    )
 
-    assert embed_comicinfo_in_cbz(archive_path, {"Series": "New Series"}) is True
+    with capture_logs() as logs:
+        assert embed_comicinfo_in_cbz(archive_path, {"Series": "New Series"}) is True
     assert _read_comicinfo(archive_path)["Series"] == "New Series"
+    warnings = [log for log in logs if log["event"] == "comicinfo_permission_bits_not_restored"]
+    assert len(warnings) == 1
+    assert warnings[0]["log_level"] == "warning"
+    assert warnings[0]["reference"] == str(archive_path)
+    assert "chmod is not permitted" in warnings[0]["error"]

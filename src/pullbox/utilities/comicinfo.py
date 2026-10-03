@@ -287,10 +287,18 @@ def _copy_permission_bits(reference: Path, target: Path) -> None:
     Rewrites go through ``tempfile.mkstemp``, which creates the file as 0600. Left
     alone, an archive that was readable by a media server before the rewrite is
     owner-only afterwards. Best effort: filesystems that reject chmod, such as some
-    SMB/CIFS mounts, must not fail the rewrite.
+    SMB/CIFS mounts, must not fail the rewrite, but the failure is logged so an
+    owner-only archive can be traced back to it.
     """
-    with contextlib.suppress(OSError):
+    try:
         os.chmod(target, stat.S_IMODE(reference.stat().st_mode))
+    except OSError as exc:
+        logger.warning(
+            "comicinfo_permission_bits_not_restored",
+            reference=str(reference),
+            target=str(target),
+            error=str(exc),
+        )
 
 
 def embed_comicinfo_in_cbz(
