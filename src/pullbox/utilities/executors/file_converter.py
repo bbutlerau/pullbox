@@ -601,8 +601,12 @@ def build_convert_preview(
 
 
 async def _sync_library_record(*, before_path: str, after_path: str, session: Any) -> ApplyResult:
-    """Move a tracked library record from one path to another, if one exists."""
-    if not before_path or not after_path or before_path == after_path:
+    """Point a tracked library record at the converted file and refresh its attributes.
+
+    A same-path repack (CBZ -> CBZ) keeps the name but changes the contents, so the
+    record is still refreshed: size, modified time and the cached hash.
+    """
+    if not before_path or not after_path:
         return ApplyResult()
 
     # Imported here: library_convert_service imports convert_file from this module.
@@ -615,13 +619,15 @@ async def _sync_library_record(*, before_path: str, after_path: str, session: An
         return ApplyResult()
 
     await _sync_converted_file_record(session, before_path=before_path, after_path=after_path)
+    if before_path == after_path:
+        message = f"Refreshed library record: {Path(after_path).name}"
+    else:
+        message = f"Updated library record: {Path(before_path).name} -> {Path(after_path).name}"
     return ApplyResult(
         extra_logs=[
             RuntimeLogEntry(
                 level="INFO",
-                message=(
-                    f"Updated library record: {Path(before_path).name} -> {Path(after_path).name}"
-                ),
+                message=message,
                 file_path=after_path,
                 extra={"previous_path": before_path, "updated_path": after_path},
             )
